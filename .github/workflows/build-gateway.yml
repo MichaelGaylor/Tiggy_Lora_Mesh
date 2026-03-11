@@ -1,0 +1,60 @@
+name: Build Gateway Apps
+
+on:
+  push:
+    branches: [ main ]
+  release:
+    types: [ published ]
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          cd gateway
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build Hub GUI exe
+        run: |
+          cd gateway
+          pyinstaller --noconfirm --onefile --windowed `
+            --collect-data customtkinter `
+            --name "LoRa-Mesh-Hub" `
+            gateway_hub_gui.py
+
+      - name: Build Gateway Client exe
+        run: |
+          cd gateway
+          pyinstaller --noconfirm --onefile --windowed `
+            --collect-data customtkinter `
+            --name "LoRa-Mesh-Gateway" `
+            gateway_gui.py
+
+      - name: Upload exe artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gateway-windows-exe
+          path: |
+            gateway/dist/LoRa-Mesh-Hub.exe
+            gateway/dist/LoRa-Mesh-Gateway.exe
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            gateway/dist/LoRa-Mesh-Hub.exe
+            gateway/dist/LoRa-Mesh-Gateway.exe
