@@ -6,6 +6,9 @@ on:
   release:
     types: [ published ]
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -18,57 +21,71 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install PlatformIO
-        run: pip install platformio
+      - name: Install PlatformIO and esptool
+        run: pip install platformio esptool
 
-      - name: Build all firmware targets
+      - name: Build repeater targets (Heltec V3, V4, LoRa32, XIAO)
         run: |
-          pio run -e xiao-s3
           pio run -e heltec-v3
           pio run -e heltec-v4
           pio run -e lora32
-          pio run -e tdeck-plus
+          pio run -e xiao-s3
+
+      - name: Build communicator target (T-Deck Plus)
+        run: pio run -e tdeck-plus
 
       - name: Merge firmware binaries for web flasher
         run: |
-          pip install esptool
           mkdir -p docs/flash/firmware
 
-          # XIAO ESP32S3 (ESP32-S3)
+          # Find boot_app0.bin (path varies by platform version)
+          BOOT_APP0=$(find ~/.platformio -name "boot_app0.bin" | head -1)
+          echo "boot_app0.bin found at: $BOOT_APP0"
+
+          # XIAO ESP32S3 — repeater (ESP32-S3, 4MB flash)
           esptool.py --chip esp32s3 merge_bin \
             -o docs/flash/firmware/xiao-s3.bin \
-            --flash_mode dio --flash_size 4MB \
+            --flash_mode dio --flash_freq 80m --flash_size 4MB \
             0x0     .pio/build/xiao-s3/bootloader.bin \
             0x8000  .pio/build/xiao-s3/partitions.bin \
-            0xe000  ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin \
+            0xe000  "$BOOT_APP0" \
             0x10000 .pio/build/xiao-s3/firmware.bin
 
-          # Heltec V3 (ESP32-S3)
+          # Heltec V3 — repeater (ESP32-S3, 8MB flash)
           esptool.py --chip esp32s3 merge_bin \
             -o docs/flash/firmware/heltec-v3.bin \
-            --flash_mode dio --flash_size 8MB \
+            --flash_mode dio --flash_freq 80m --flash_size 8MB \
             0x0     .pio/build/heltec-v3/bootloader.bin \
             0x8000  .pio/build/heltec-v3/partitions.bin \
-            0xe000  ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin \
+            0xe000  "$BOOT_APP0" \
             0x10000 .pio/build/heltec-v3/firmware.bin
 
-          # Heltec V4 (ESP32-S3, 16MB)
+          # Heltec V4 — repeater (ESP32-S3, 16MB flash)
           esptool.py --chip esp32s3 merge_bin \
             -o docs/flash/firmware/heltec-v4.bin \
-            --flash_mode dio --flash_size 16MB \
+            --flash_mode dio --flash_freq 80m --flash_size 16MB \
             0x0     .pio/build/heltec-v4/bootloader.bin \
             0x8000  .pio/build/heltec-v4/partitions.bin \
-            0xe000  ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin \
+            0xe000  "$BOOT_APP0" \
             0x10000 .pio/build/heltec-v4/firmware.bin
 
-          # T-Deck Plus (ESP32-S3, 16MB)
+          # T-Deck Plus — full communicator (ESP32-S3, 16MB flash)
           esptool.py --chip esp32s3 merge_bin \
             -o docs/flash/firmware/tdeck-plus.bin \
-            --flash_mode dio --flash_size 16MB \
+            --flash_mode dio --flash_freq 80m --flash_size 16MB \
             0x0     .pio/build/tdeck-plus/bootloader.bin \
             0x8000  .pio/build/tdeck-plus/partitions.bin \
-            0xe000  ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin \
+            0xe000  "$BOOT_APP0" \
             0x10000 .pio/build/tdeck-plus/firmware.bin
+
+          # LoRa32 — repeater (ESP32, 4MB flash, different chip)
+          esptool.py --chip esp32 merge_bin \
+            -o docs/flash/firmware/lora32.bin \
+            --flash_mode dio --flash_freq 80m --flash_size 4MB \
+            0x1000  .pio/build/lora32/bootloader.bin \
+            0x8000  .pio/build/lora32/partitions.bin \
+            0xe000  "$BOOT_APP0" \
+            0x10000 .pio/build/lora32/firmware.bin
 
       - name: Commit firmware binaries to docs
         run: |
