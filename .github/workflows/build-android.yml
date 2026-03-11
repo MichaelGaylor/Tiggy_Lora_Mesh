@@ -25,10 +25,8 @@ jobs:
       - name: Accept Android SDK licenses
         run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
-      - name: Generate Gradle wrapper jar
-        run: |
-          cd android-app
-          gradle wrapper --gradle-version 8.5 --distribution-type bin
+      - name: Make gradlew executable
+        run: chmod +x android-app/gradlew
 
       - name: Build debug APK
         run: |
