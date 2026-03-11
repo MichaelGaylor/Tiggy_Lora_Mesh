@@ -197,7 +197,7 @@ function updateManifest() {
   }
 
   // Point to the firmware manifest in the GitHub release
-  btn.setAttribute('manifest', `../../firmware/${sel}-manifest.json`);
+  btn.setAttribute('manifest', `firmware/${sel}-manifest.json`);
   btn.style.display = 'block';
   txt.style.display = 'none';
   info.textContent = boardInfo[sel] || '';

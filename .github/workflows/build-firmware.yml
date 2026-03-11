@@ -1,0 +1,91 @@
+name: Build Firmware
+
+on:
+  push:
+    branches: [ main ]
+  release:
+    types: [ published ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Build all firmware targets
+        run: |
+          pio run -e xiao-s3
+          pio run -e heltec-v3
+          pio run -e heltec-v4
+          pio run -e lora32
+          pio run -e tdeck-plus
+
+      - name: Merge firmware binaries for web flasher
+        run: |
+          pip install esptool
+          mkdir -p docs/flash/firmware
+
+          # XIAO ESP32S3 (ESP32-S3)
+          esptool.py --chip esp32s3 merge_bin \
+            -o docs/flash/firmware/xiao-s3.bin \
+            --flash_mode dio --flash_size 4MB \
+            0x0     .pio/build/xiao-s3/bootloader.bin \
+            0x8000  .pio/build/xiao-s3/partitions.bin \
+            0xe000  ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin \
+            0x10000 .pio/build/xiao-s3/firmware.bin
+
+          # Heltec V3 (ESP32-S3)
+          esptool.py --chip esp32s3 merge_bin \
+            -o docs/flash/firmware/heltec-v3.bin \
+            --flash_mode dio --flash_size 8MB \
+            0x0     .pio/build/heltec-v3/bootloader.bin \
+            0x8000  .pio/build/heltec-v3/partitions.bin \
+            0xe000  ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin \
+            0x10000 .pio/build/heltec-v3/firmware.bin
+
+          # Heltec V4 (ESP32-S3, 16MB)
+          esptool.py --chip esp32s3 merge_bin \
+            -o docs/flash/firmware/heltec-v4.bin \
+            --flash_mode dio --flash_size 16MB \
+            0x0     .pio/build/heltec-v4/bootloader.bin \
+            0x8000  .pio/build/heltec-v4/partitions.bin \
+            0xe000  ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin \
+            0x10000 .pio/build/heltec-v4/firmware.bin
+
+          # T-Deck Plus (ESP32-S3, 16MB)
+          esptool.py --chip esp32s3 merge_bin \
+            -o docs/flash/firmware/tdeck-plus.bin \
+            --flash_mode dio --flash_size 16MB \
+            0x0     .pio/build/tdeck-plus/bootloader.bin \
+            0x8000  .pio/build/tdeck-plus/partitions.bin \
+            0xe000  ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin \
+            0x10000 .pio/build/tdeck-plus/firmware.bin
+
+      - name: Commit firmware binaries to docs
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/flash/firmware/*.bin
+          git diff --staged --quiet || git commit -m "Auto-build: update firmware binaries [skip ci]"
+          git push
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-binaries
+          path: docs/flash/firmware/*.bin
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: docs/flash/firmware/*.bin
