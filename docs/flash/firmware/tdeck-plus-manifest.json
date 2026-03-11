@@ -1,0 +1,13 @@
+{
+  "name": "LoRa Mesh — LilyGO T-Deck Plus",
+  "version": "1.0.0",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        { "path": "tdeck-plus.bin", "offset": 0 }
+      ]
+    }
+  ]
+}

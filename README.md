@@ -64,7 +64,7 @@ Connect via Bluetooth to any mesh node to send messages, view the mesh, and set 
 
 ## 📖 Full Documentation
 
-**[Read the full manual →](docs/documentation.html)**
+**[Read the full manual →](https://michaelgaylor.github.io/Tiggy_Lora_Mesh/documentation.html)**
 
 Covers: setup, serial commands, EEPROM config, mesh routing, solar mode, Telegram setup, gateway hub, hardware wiring.
 
@@ -128,8 +128,8 @@ The XIAO + Wio-SX1262 is a plug-together kit — no soldering required for the L
 
 ## 🌍 Community
 
-- **Issues / bugs:** [GitHub Issues](../../issues)
-- **Discussions:** [GitHub Discussions](../../discussions)
+- **Issues / bugs:** [GitHub Issues](https://github.com/MichaelGaylor/Tiggy_Lora_Mesh/issues)
+- **Discussions:** [GitHub Discussions](https://github.com/MichaelGaylor/Tiggy_Lora_Mesh/discussions)
 
 ---
 

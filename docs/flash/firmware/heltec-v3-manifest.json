@@ -1,0 +1,13 @@
+{
+  "name": "LoRa Mesh — Heltec WiFi LoRa 32 V3 Repeater",
+  "version": "1.0.0",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        { "path": "heltec-v3.bin", "offset": 0 }
+      ]
+    }
+  ]
+}
