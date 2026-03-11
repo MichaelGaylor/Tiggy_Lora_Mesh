@@ -21,9 +21,7 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
-
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+          cache: gradle
 
       - name: Make gradlew executable
         run: chmod +x android-app/gradlew
@@ -31,7 +29,9 @@ jobs:
       - name: Build debug APK
         run: |
           cd android-app
-          ./gradlew assembleDebug --no-daemon
+          ./gradlew assembleDebug --no-daemon --stacktrace
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
