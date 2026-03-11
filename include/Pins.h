@@ -323,27 +323,28 @@
 #elif defined(BOARD_XIAO_S3)
 // ═══════════════════════════════════════════════════════════════
 // Seeed Studio XIAO ESP32S3 + Wio-SX1262 Kit
-// ESP32-S3 + SX1262 + no OLED (optional I2C SSD1306 on GPIO5/6)
-// Tiny form factor ~10x21mm — cheapest SX1262 option at ~£10
-// Perfect as a low-cost headless repeater node
-// ═══════════════════════════════════════════════════════════════
+// ESP32-S3 + SX1262 — tiny 10x21mm, plug-together, no soldering
+// ~£10 from The Pi Hut — cheapest SX1262 mesh repeater possible
 //
-//  XIAO ESP32S3 pinout (top view, USB-C at top):
+// Pins verified from official Seeed schematic:
+//   Wio-SX1262 for XIAO V1.0.kicad_sch
 //
-//   [USB-C]
-//  D0/GPIO1  ●  ● 5V
-//  D1/GPIO2  ●  ● GND
-//  D2/GPIO3  ●  ● 3V3
-//  D3/GPIO4  ●  ● D10/GPIO9  (MOSI)
-//  D4/GPIO5  ●  ● D9/GPIO8   (MISO)
-//  D5/GPIO6  ●  ● D8/GPIO7   (SCK)
-//  D6/GPIO43 ●  ● D7/GPIO44
+//  XIAO ESP32S3 header (top view, USB-C at top):
 //
-//  Wio-SX1262 internal connections (routed on expansion PCB):
-//  SCK  = GPIO7   MISO = GPIO8   MOSI = GPIO9
-//  CS   = GPIO41  RST  = GPIO42  DIO1 = GPIO39
-//  BUSY = GPIO40  RXEN = GPIO38
+//            [USB-C]
+//  RF_SW1 <- D0/GPIO1  ●  ● 5V
+//            D1/GPIO2  ●  ● GND
+//  RST    <- D2/GPIO3  ●  ● 3V3
+//            D3/GPIO4  ●  ● D10/GPIO10 -> MOSI
+//  (SDA)     D4/GPIO5  ●  ● D9 /GPIO9  <- MISO
+//  (SCL)     D5/GPIO6  ●  ● D8 /GPIO8  -> SCK
+//            D6/GPIO43 ●  ● D7 /GPIO44 -> CS
 //
+//  Wio-SX1262 connections (schematic net labels):
+//  SCK=GPIO8   MISO=GPIO9   MOSI=GPIO10
+//  CS=GPIO44   RST=GPIO3    DIO1=GPIO33  BUSY=GPIO34
+//  RF_SW1=GPIO1  (HIGH=RX enable, LOW=TX/idle)
+//  DIO2 & DIO3 are internal to module — not host-controlled
 // ═══════════════════════════════════════════════════════════════
 
 #define BOARD_NAME          "XIAO ESP32S3"
@@ -357,28 +358,28 @@
 // No power-on pin needed
 #define BOARD_POWERON       -1
 
-// SPI for LoRa (Wio-SX1262 internal routing)
-#define BOARD_SPI_MOSI      9
-#define BOARD_SPI_MISO      8
-#define BOARD_SPI_SCK       7
+// SPI for LoRa (from Wio-SX1262 schematic)
+#define BOARD_SPI_SCK       8
+#define BOARD_SPI_MISO      9
+#define BOARD_SPI_MOSI      10
 
 // No TFT display
 #define BOARD_TFT_CS        -1
 #define BOARD_TFT_DC        -1
 #define BOARD_TFT_BL        -1
 
-// SX1262 control pins (Wio-SX1262 internal)
-#define RADIO_CS            41
-#define RADIO_RST           42
-#define RADIO_DIO1          39
-#define RADIO_BUSY          40
-#define RADIO_RXEN          38    // DIO2 used as RX enable
+// SX1262 control pins (from Wio-SX1262 schematic net labels)
+#define RADIO_CS            44   // LORA_SPI_NSS
+#define RADIO_RST           3    // LORA_RST (active low)
+#define RADIO_DIO1          33   // LORA_DIO1
+#define RADIO_BUSY          34   // LORA_BUSY (active high)
+#define RADIO_RXEN          1    // LORA_RF_SW1: HIGH=RX, LOW=TX/idle
 
 // No GPS
 #define BOARD_GPS_TX        -1
 #define BOARD_GPS_RX        -1
 
-// I2C (optional SSD1306 OLED — solder to D4/D5 header pins)
+// I2C (optional SSD1306 OLED — connect to D4/GPIO5 SDA, D5/GPIO6 SCL)
 #define BOARD_I2C_SDA       5
 #define BOARD_I2C_SCL       6
 #define OLED_RST            -1
@@ -398,17 +399,17 @@
 // No battery ADC on base board
 #define BOARD_BAT_ADC       -1
 
-// LED (built-in)
+// Built-in LED
 #define BOARD_LED           21
 
 // Boot button
 #define BOARD_BUTTON        0
 
 // ─── User GPIO for relays & sensors ─────────────────────────
-// Free header pins: D0/GPIO1, D1/GPIO2, D2/GPIO3, D3/GPIO4
-// D6/GPIO43 (TX) and D7/GPIO44 (RX) also usable if UART not needed
+// Free header pins: D1/GPIO2, D3/GPIO4, D4/GPIO5, D5/GPIO6
+// GPIO1,3,8,9,10,33,34,44 used by Wio-SX1262 — leave alone
 #define USER_GPIO_COUNT     4
-#define DEFAULT_RELAY_PINS  { 1, 2, 3, 4 }
+#define DEFAULT_RELAY_PINS  { 2, 4, 5, 6 }
 #define DEFAULT_SENSOR_PINS { 43, 44 }
 #define SENSOR_PIN_COUNT    2
 

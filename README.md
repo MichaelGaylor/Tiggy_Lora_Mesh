@@ -115,9 +115,12 @@ XIAO ESP32S3 pinout:
 └─────────────────────┘
 
 Wio-SX1262 internal connections (routed on expansion PCB):
-  SCK=GPIO7  MISO=GPIO8  MOSI=GPIO9
-  CS=GPIO41  RST=GPIO42  DIO1=GPIO39  BUSY=GPIO40  RXEN=GPIO38
+  SCK=GPIO8   MISO=GPIO9   MOSI=GPIO10
+  CS=GPIO44   RST=GPIO3   DIO1=GPIO33  BUSY=GPIO34
+  RF_SW1=GPIO1 (HIGH=RX enable, LOW=TX/idle)
 ```
+
+Pins verified from official Seeed schematic (Wio-SX1262 for XIAO V1.0.kicad_sch).
 
 The XIAO + Wio-SX1262 is a plug-together kit — no soldering required for the LoRa part.
 
