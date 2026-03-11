@@ -10,7 +10,7 @@ Send messages, trigger relays, monitor sensors and send SOS alerts across kilome
 
 **No software to install.** Just plug in your board and open Chrome:
 
-👉 **[Click here to flash your device](https://YOUR_USERNAME.github.io/Tiggy_Lora_Mesh/flash)**
+👉 **[Click here to flash your device](https://MichaelGaylor.github.io/Tiggy_Lora_Mesh/flash)**
 
 Supported boards:
 | Board | Price | Best for |
@@ -75,7 +75,7 @@ Covers: setup, serial commands, EEPROM config, mesh routing, solar mode, Telegra
 Requires [PlatformIO](https://platformio.org/).
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/Tiggy_Lora_Mesh
+git clone https://github.com/MichaelGaylor/Tiggy_Lora_Mesh
 cd Tiggy_Lora_Mesh
 
 # Flash a XIAO ESP32S3 repeater
