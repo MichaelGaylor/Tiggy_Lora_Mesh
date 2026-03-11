@@ -30,7 +30,7 @@
 #endif
 
 // Only compile for repeater boards
-#if defined(BOARD_LORA32) || defined(BOARD_HELTEC_V3) || defined(BOARD_HELTEC_V4) || defined(BOARD_CUSTOM)
+#if defined(BOARD_LORA32) || defined(BOARD_HELTEC_V3) || defined(BOARD_HELTEC_V4) || defined(BOARD_XIAO_S3) || defined(BOARD_CUSTOM)
 
 // ─── OLED Display ────────────────────────────────────────────
 #include <Adafruit_GFX.h>
