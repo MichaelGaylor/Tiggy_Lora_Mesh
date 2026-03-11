@@ -1,0 +1,1874 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LoRa Mesh Communicator v3.1 - Complete Documentation</title>
+<style>
+  :root {
+    --bg: #0a0e14;
+    --panel: #131820;
+    --header: #0a1a30;
+    --cyan: #00e5ff;
+    --green: #00ff41;
+    --orange: #ff8c00;
+    --red: #ff2d2d;
+    --yellow: #ffe000;
+    --white: #f0f0f0;
+    --dim: #8898a8;
+    --faint: #3a4a5a;
+    --blue: #4488ff;
+    --bubble-in: #0a3040;
+    --bubble-out: #0a3010;
+    --selected: #1a2a3a;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    background: var(--bg);
+    color: var(--white);
+    font-family: 'Segoe UI', 'Inter', system-ui, sans-serif;
+    line-height: 1.7;
+    padding: 0;
+  }
+
+  /* Top banner */
+  .hero {
+    background: linear-gradient(135deg, #001030 0%, #002060 50%, #001030 100%);
+    border-bottom: 3px solid var(--cyan);
+    padding: 60px 40px;
+    text-align: center;
+  }
+  .hero h1 {
+    font-size: 3em;
+    color: var(--cyan);
+    text-shadow: 0 0 30px rgba(0,229,255,0.3);
+    margin-bottom: 10px;
+  }
+  .hero .subtitle {
+    color: var(--green);
+    font-size: 1.3em;
+    margin-bottom: 6px;
+  }
+  .hero .version {
+    display: inline-block;
+    background: var(--cyan);
+    color: #000;
+    padding: 4px 16px;
+    border-radius: 20px;
+    font-weight: 700;
+    font-size: 0.9em;
+  }
+
+  /* Nav */
+  nav {
+    background: var(--panel);
+    border-bottom: 1px solid var(--faint);
+    padding: 14px 40px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  nav a {
+    color: var(--cyan);
+    text-decoration: none;
+    padding: 6px 14px;
+    border-radius: 6px;
+    font-size: 0.85em;
+    transition: background 0.2s;
+  }
+  nav a:hover { background: var(--selected); }
+
+  /* Content container */
+  .container {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 30px 40px;
+  }
+
+  /* Sections */
+  section {
+    margin-bottom: 50px;
+  }
+  h2 {
+    color: var(--cyan);
+    font-size: 1.8em;
+    border-bottom: 2px solid var(--cyan);
+    padding-bottom: 8px;
+    margin-bottom: 20px;
+  }
+  h3 {
+    color: var(--green);
+    font-size: 1.3em;
+    margin: 25px 0 12px;
+  }
+  h4 {
+    color: var(--orange);
+    font-size: 1.1em;
+    margin: 18px 0 8px;
+  }
+  p { margin-bottom: 12px; color: var(--dim); }
+  strong { color: var(--white); }
+
+  /* Code blocks */
+  code {
+    background: #1a2030;
+    color: var(--green);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
+    font-size: 0.9em;
+  }
+  pre {
+    background: #0d1520;
+    border: 1px solid var(--faint);
+    border-left: 4px solid var(--cyan);
+    border-radius: 8px;
+    padding: 16px 20px;
+    overflow-x: auto;
+    margin: 12px 0 18px;
+    font-family: 'Cascadia Code', 'Fira Code', monospace;
+    font-size: 0.85em;
+    line-height: 1.6;
+    color: var(--white);
+  }
+  pre .comment { color: #5a7a5a; }
+  pre .keyword { color: var(--cyan); }
+  pre .string { color: var(--orange); }
+  pre .number { color: var(--yellow); }
+
+  /* Tables */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 14px 0 20px;
+    font-size: 0.9em;
+  }
+  th {
+    background: var(--header);
+    color: var(--cyan);
+    text-align: left;
+    padding: 10px 14px;
+    border: 1px solid var(--faint);
+  }
+  td {
+    background: var(--panel);
+    padding: 8px 14px;
+    border: 1px solid #1a2535;
+    color: var(--dim);
+  }
+  tr:hover td { background: var(--selected); }
+
+  /* Info boxes */
+  .info-box {
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 14px 0 20px;
+  }
+  .info-box.cyan {
+    background: rgba(0,229,255,0.08);
+    border-left: 4px solid var(--cyan);
+  }
+  .info-box.green {
+    background: rgba(0,255,65,0.06);
+    border-left: 4px solid var(--green);
+  }
+  .info-box.orange {
+    background: rgba(255,140,0,0.08);
+    border-left: 4px solid var(--orange);
+  }
+  .info-box.red {
+    background: rgba(255,45,45,0.08);
+    border-left: 4px solid var(--red);
+  }
+  .info-box p { margin-bottom: 4px; }
+
+  /* T-Deck screen mockups */
+  .screen {
+    width: 420px;
+    background: #000;
+    border: 3px solid #333;
+    border-radius: 12px;
+    overflow: hidden;
+    margin: 20px auto;
+    box-shadow: 0 8px 30px rgba(0,0,0,0.6);
+    font-family: 'Cascadia Code', 'Courier New', monospace;
+    font-size: 13px;
+  }
+  .screen-header {
+    background: var(--header);
+    padding: 6px 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 32px;
+  }
+  .screen-header .title {
+    color: var(--cyan);
+    font-weight: 700;
+    font-size: 14px;
+  }
+  .screen-header .badge {
+    background: var(--green);
+    color: #000;
+    padding: 2px 10px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .screen-content {
+    padding: 8px 10px;
+    min-height: 180px;
+  }
+  .screen-status {
+    background: var(--panel);
+    border-top: 1px solid var(--faint);
+    padding: 4px 10px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 11px;
+    height: 22px;
+  }
+  .screen-status .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+  .screen-status .dot.green { background: var(--green); }
+  .screen-status .dot.red { background: var(--red); }
+
+  /* Menu items in screen */
+  .menu-item {
+    padding: 5px 10px;
+    margin: 2px 0;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--dim);
+    font-size: 13px;
+  }
+  .menu-item.selected {
+    background: var(--selected);
+    color: var(--white);
+  }
+  .menu-item .bar {
+    width: 4px;
+    height: 18px;
+    border-radius: 2px;
+  }
+  .menu-item .arrow {
+    margin-left: auto;
+    color: var(--white);
+  }
+
+  /* Chat bubbles in screen */
+  .bubble {
+    max-width: 70%;
+    padding: 6px 12px;
+    border-radius: 10px;
+    margin: 4px 0;
+    font-size: 12px;
+  }
+  .bubble.out {
+    background: var(--bubble-out);
+    margin-left: auto;
+    border-bottom-right-radius: 2px;
+  }
+  .bubble.in {
+    background: var(--bubble-in);
+    border-bottom-left-radius: 2px;
+  }
+  .bubble .sender {
+    font-size: 10px;
+    margin-bottom: 2px;
+  }
+  .bubble .meta {
+    font-size: 9px;
+    color: var(--faint);
+    text-align: right;
+    margin-top: 2px;
+  }
+
+  /* OLED screen mockup */
+  .oled-screen {
+    width: 300px;
+    height: 150px;
+    background: #000;
+    border: 3px solid #444;
+    border-radius: 8px;
+    padding: 10px;
+    margin: 20px auto;
+    font-family: 'Cascadia Code', monospace;
+    font-size: 12px;
+    color: var(--white);
+    box-shadow: 0 4px 20px rgba(0,0,0,0.8);
+    line-height: 1.5;
+  }
+  .oled-screen .line { white-space: nowrap; }
+
+  /* Phone screen mockup */
+  .phone-screen {
+    width: 280px;
+    background: #111;
+    border: 3px solid #555;
+    border-radius: 24px;
+    overflow: hidden;
+    margin: 20px auto;
+    padding: 12px;
+    box-shadow: 0 8px 30px rgba(0,0,0,0.6);
+  }
+  .phone-header {
+    text-align: center;
+    color: var(--cyan);
+    font-size: 14px;
+    font-weight: 700;
+    padding: 8px;
+    border-bottom: 1px solid var(--faint);
+    margin-bottom: 8px;
+  }
+  .phone-nav {
+    display: flex;
+    justify-content: space-around;
+    border-top: 1px solid var(--faint);
+    padding-top: 8px;
+    margin-top: 8px;
+  }
+  .phone-nav .tab {
+    text-align: center;
+    font-size: 10px;
+    color: var(--dim);
+  }
+  .phone-nav .tab.active { color: var(--cyan); }
+
+  /* Flow diagrams */
+  .flow {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 14px 0;
+  }
+  .flow-box {
+    background: var(--panel);
+    border: 1px solid var(--faint);
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-size: 0.85em;
+    text-align: center;
+  }
+  .flow-arrow {
+    color: var(--cyan);
+    font-size: 1.2em;
+    font-weight: 700;
+  }
+
+  /* Board cards */
+  .board-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 20px;
+    margin: 20px 0;
+  }
+  .board-card {
+    background: var(--panel);
+    border: 1px solid var(--faint);
+    border-radius: 12px;
+    padding: 20px;
+    transition: border-color 0.2s;
+  }
+  .board-card:hover { border-color: var(--cyan); }
+  .board-card .price {
+    float: right;
+    background: var(--green);
+    color: #000;
+    padding: 2px 10px;
+    border-radius: 10px;
+    font-weight: 700;
+    font-size: 0.85em;
+  }
+  .board-card h4 { margin-top: 0; }
+
+  /* Packet diagram */
+  .packet-diagram {
+    display: flex;
+    margin: 16px 0;
+    border: 2px solid var(--cyan);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .packet-field {
+    text-align: center;
+    padding: 10px 8px;
+    border-right: 1px solid var(--faint);
+    flex-shrink: 0;
+  }
+  .packet-field:last-child { border-right: none; }
+  .packet-field .label {
+    font-size: 0.75em;
+    color: var(--dim);
+    margin-bottom: 4px;
+  }
+  .packet-field .value {
+    font-family: monospace;
+    color: var(--cyan);
+    font-weight: 700;
+    font-size: 0.9em;
+  }
+  .packet-field .bytes {
+    font-size: 0.7em;
+    color: var(--faint);
+    margin-top: 2px;
+  }
+
+  /* Colour legend */
+  .color-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 4px 0;
+  }
+  .color-swatch {
+    width: 24px; height: 24px;
+    border-radius: 4px;
+    flex-shrink: 0;
+    border: 1px solid #444;
+  }
+
+  /* Responsive */
+  @media (max-width: 700px) {
+    .hero { padding: 30px 20px; }
+    .hero h1 { font-size: 1.8em; }
+    .container { padding: 20px; }
+    nav { padding: 10px 20px; }
+    .screen { width: 100%; }
+    .board-cards { grid-template-columns: 1fr; }
+  }
+
+  /* Anchor offset for sticky nav */
+  section[id]::before {
+    content: '';
+    display: block;
+    height: 60px;
+    margin-top: -60px;
+    visibility: hidden;
+  }
+</style>
+</head>
+<body>
+
+<!-- ═══════════════ HERO ═══════════════ -->
+<div class="hero">
+  <h1>LoRa Mesh Communicator</h1>
+  <div class="subtitle">T-Deck Plus &bull; LoRa32 &bull; Heltec V3 &bull; Heltec V4</div>
+  <span class="version">v3.1 &mdash; MeshCore Architecture</span>
+  <p style="color:var(--dim); margin-top:16px; font-size:0.95em;">
+    Complete technical documentation &mdash; hardware, protocol, menus, code architecture &amp; API
+  </p>
+</div>
+
+<!-- ═══════════════ NAV ═══════════════ -->
+<nav>
+  <a href="#overview">Overview</a>
+  <a href="#hardware">Hardware</a>
+  <a href="#architecture">Architecture</a>
+  <a href="#protocol">Protocol</a>
+  <a href="#encryption">Encryption</a>
+  <a href="#routing">Routing</a>
+  <a href="#tdeck-ui">T-Deck UI</a>
+  <a href="#repeater-ui">Repeater UI</a>
+  <a href="#android-app">Android App</a>
+  <a href="#ble-protocol">BLE Protocol</a>
+  <a href="#serial-config">Serial Config</a>
+  <a href="#phrases">Quick Phrases</a>
+  <a href="#gpio">GPIO Control</a>
+  <a href="#eeprom">EEPROM Map</a>
+  <a href="#building">Building</a>
+  <a href="#gateway">Gateway Bridge</a>
+  <a href="#solar">Solar Mode</a>
+  <a href="#telegram">Telegram Alerts</a>
+  <a href="#theme">Theme</a>
+</nav>
+
+<div class="container">
+
+<!-- ═══════════════ OVERVIEW ═══════════════ -->
+<section id="overview">
+<h2>1. System Overview</h2>
+
+<p>LoRa Mesh Communicator is a fully encrypted, self-healing mesh network built on cheap ESP32 LoRa boards. Messages hop across multiple nodes to reach their destination &mdash; no internet, no cellular, no infrastructure required.</p>
+
+<div class="info-box cyan">
+  <p><strong>What makes this different from Meshtastic?</strong></p>
+  <p>Directed routing (not just blind flooding), jitter-based collision avoidance, listen-before-talk, hash-based O(1) dedup with 64 slots, duty-cycle enforcement, and a shared library (<code>MeshCore</code>) so all mesh logic lives in one place.</p>
+</div>
+
+<h3>System Roles</h3>
+<table>
+  <tr><th>Role</th><th>Hardware</th><th>Firmware</th><th>Description</th></tr>
+  <tr>
+    <td><strong>Full Communicator</strong></td>
+    <td>T-Deck Plus</td>
+    <td><code>main.cpp</code></td>
+    <td>Keyboard, 2.8" colour TFT, GPS, trackball, chat UI, SOS mode, mesh map, phrase picker, remote control panel</td>
+  </tr>
+  <tr>
+    <td><strong>Repeater / Relay Node</strong></td>
+    <td>LoRa32, Heltec V3, or Heltec V4</td>
+    <td><code>repeater.cpp</code></td>
+    <td>Headless mesh repeater with 0.96" OLED stats display, BLE for phone control, GPIO relay/sensor control, serial config, gateway bridge mode</td>
+  </tr>
+  <tr>
+    <td><strong>Phone Controller</strong></td>
+    <td>Android phone</td>
+    <td>Android app (Kotlin)</td>
+    <td>BLE connection to any repeater node &mdash; chat, relay control, settings, node discovery</td>
+  </tr>
+</table>
+
+<h3>Key Specs</h3>
+<table>
+  <tr><th>Parameter</th><th>Value</th></tr>
+  <tr><td>Frequency</td><td><code>868.0 MHz</code> (EU ISM band)</td></tr>
+  <tr><td>Modulation</td><td>LoRa &mdash; SF9, BW 125 kHz, CR 4/5</td></tr>
+  <tr><td>TX Power</td><td>20 dBm (28 dBm with Heltec V4 PA)</td></tr>
+  <tr><td>Encryption</td><td>AES-128-CTR with CRC-16 integrity</td></tr>
+  <tr><td>Max Hops (TTL)</td><td>5</td></tr>
+  <tr><td>Max Nodes Tracked</td><td>20</td></tr>
+  <tr><td>Max Message Size</td><td>200 bytes (plaintext)</td></tr>
+  <tr><td>Heartbeat Interval</td><td>30 seconds (&plusmn;2s jitter)</td></tr>
+  <tr><td>Route Stale Timeout</td><td>120 seconds</td></tr>
+  <tr><td>Duty Cycle Limit</td><td>10% per hour (EU legal)</td></tr>
+</table>
+</section>
+
+<!-- ═══════════════ HARDWARE ═══════════════ -->
+<section id="hardware">
+<h2>2. Hardware &amp; Pin Maps</h2>
+
+<div class="board-cards">
+
+  <!-- T-Deck Plus -->
+  <div class="board-card" style="border-top: 3px solid var(--cyan);">
+    <span class="price" style="background:var(--cyan);">~&pound;70</span>
+    <h4 style="color:var(--cyan);">LilyGO T-Deck Plus</h4>
+    <p><strong>MCU:</strong> ESP32-S3 &bull; <strong>Radio:</strong> SX1262 &bull; <strong>Display:</strong> ST7789 320&times;240 IPS</p>
+    <p><strong>Extras:</strong> QWERTY keyboard, trackball, GPS (MIA-M10Q), SD card slot</p>
+    <table style="font-size:0.8em;">
+      <tr><th>Function</th><th>Pin</th></tr>
+      <tr><td>SPI MOSI / MISO / SCK</td><td>41 / 38 / 40</td></tr>
+      <tr><td>Radio CS / RST / DIO1 / BUSY</td><td>9 / 17 / 45 / 13</td></tr>
+      <tr><td>TFT CS / DC / BL</td><td>12 / 11 / 42</td></tr>
+      <tr><td>GPS TX / RX</td><td>43 / 44</td></tr>
+      <tr><td>I2C SDA / SCL</td><td>18 / 8</td></tr>
+      <tr><td>Keyboard INT (I2C 0x55)</td><td>46</td></tr>
+      <tr><td>Trackball U/D/L/R/Click</td><td>3 / 15 / 1 / 2 / 0</td></tr>
+      <tr><td>SD Card CS</td><td>39</td></tr>
+      <tr><td>Battery ADC</td><td>4</td></tr>
+      <tr><td>Power ON</td><td>10</td></tr>
+    </table>
+  </div>
+
+  <!-- LoRa32 -->
+  <div class="board-card" style="border-top: 3px solid var(--green);">
+    <span class="price">~&pound;15</span>
+    <h4 style="color:var(--green);">TTGO LoRa32 T3 V1.6.1</h4>
+    <p><strong>MCU:</strong> ESP32 &bull; <strong>Radio:</strong> SX1276 &bull; <strong>Display:</strong> SSD1306 128&times;64 OLED</p>
+    <p><strong>The cheap repeater.</strong> Lots of free GPIO for relays &amp; sensors.</p>
+    <table style="font-size:0.8em;">
+      <tr><th>Function</th><th>Pin</th></tr>
+      <tr><td>SPI MOSI / MISO / SCK</td><td>27 / 19 / 5</td></tr>
+      <tr><td>Radio CS / RST / DIO0</td><td>18 / 23 / 26</td></tr>
+      <tr><td>I2C SDA / SCL / OLED RST</td><td>21 / 22 / 16</td></tr>
+      <tr><td>Battery ADC</td><td>35</td></tr>
+      <tr><td>LED</td><td>25</td></tr>
+      <tr><td>Button</td><td>0</td></tr>
+      <tr><td>Default Relay Pins</td><td style="color:var(--orange);">2, 4, 12, 15, 17, 33</td></tr>
+      <tr><td>Default Sensor Pins</td><td style="color:var(--yellow);">34, 36, 39 (input only)</td></tr>
+    </table>
+  </div>
+
+  <!-- Heltec V3 -->
+  <div class="board-card" style="border-top: 3px solid var(--orange);">
+    <span class="price">~&pound;20</span>
+    <h4 style="color:var(--orange);">Heltec WiFi LoRa 32 V3</h4>
+    <p><strong>MCU:</strong> ESP32-S3 &bull; <strong>Radio:</strong> SX1262 &bull; <strong>Display:</strong> SSD1306 128&times;64 OLED</p>
+    <p><strong>Modern repeater.</strong> Better range than SX1276, more GPIO, USB-C.</p>
+    <table style="font-size:0.8em;">
+      <tr><th>Function</th><th>Pin</th></tr>
+      <tr><td>SPI MOSI / MISO / SCK</td><td>10 / 11 / 9</td></tr>
+      <tr><td>Radio CS / RST / DIO1 / BUSY</td><td>8 / 12 / 14 / 13</td></tr>
+      <tr><td>I2C SDA / SCL / OLED RST</td><td>17 / 18 / 21</td></tr>
+      <tr><td>Vext Power Control</td><td>36 (LOW = OLED on)</td></tr>
+      <tr><td>Battery ADC</td><td>1</td></tr>
+      <tr><td>LED</td><td>35</td></tr>
+      <tr><td>Default Relay Pins</td><td style="color:var(--orange);">2, 3, 4, 5, 6, 7</td></tr>
+      <tr><td>Default Sensor Pins</td><td style="color:var(--yellow);">19, 20, 33</td></tr>
+    </table>
+  </div>
+
+  <!-- Heltec V4 -->
+  <div class="board-card" style="border-top: 3px solid var(--red);">
+    <span class="price" style="background:var(--red);">~&pound;25</span>
+    <h4 style="color:var(--red);">Heltec WiFi LoRa 32 V4</h4>
+    <p><strong>MCU:</strong> ESP32-S3 &bull; <strong>Radio:</strong> SX1262 + GC1109 PA (<strong>28 dBm!</strong>) &bull; <strong>Display:</strong> SSD1306 128&times;64 OLED</p>
+    <p><strong>Best repeater.</strong> Highest TX power, 16MB flash, native USB-C, solar input, GNSS connector.</p>
+    <table style="font-size:0.8em;">
+      <tr><th>Function</th><th>Pin</th></tr>
+      <tr><td>SPI MOSI / MISO / SCK</td><td>10 / 11 / 9</td></tr>
+      <tr><td>Radio CS / RST / DIO1 / BUSY</td><td>8 / 12 / 14 / 13</td></tr>
+      <tr><td>I2C SDA / SCL / OLED RST</td><td>17 / 18 / 21</td></tr>
+      <tr><td>Vext Power Control</td><td>36 (LOW = OLED on)</td></tr>
+      <tr><td>ADC Control</td><td>37 (HIGH = enable battery divider)</td></tr>
+      <tr><td>Battery ADC</td><td>1</td></tr>
+      <tr><td>LED</td><td>35</td></tr>
+      <tr><td>Default Relay Pins</td><td style="color:var(--orange);">2, 3, 4, 5, 6, 7</td></tr>
+      <tr><td>Default Sensor Pins</td><td style="color:var(--yellow);">19, 20, 33</td></tr>
+    </table>
+  </div>
+
+</div>
+</section>
+
+<!-- ═══════════════ ARCHITECTURE ═══════════════ -->
+<section id="architecture">
+<h2>3. Code Architecture</h2>
+
+<h3>MeshCore Shared Library</h3>
+<p>All mesh protocol logic lives in <code>lib/MeshCore/</code>. Both firmwares link against it &mdash; no duplicate code.</p>
+
+<div class="flow">
+  <div class="flow-box" style="border-color:var(--cyan);"><strong>MeshCore Library</strong><br><span style="color:var(--dim);font-size:0.8em;">CRC, Crypto, Routing, Dedup<br>Packet Build, Forward, Heartbeat</span></div>
+  <span class="flow-arrow">&larr;&rarr;</span>
+  <div class="flow-box" style="border-color:var(--green);"><strong>main.cpp</strong><br><span style="color:var(--dim);font-size:0.8em;">T-Deck Plus UI<br>Chat, GPS, Menus</span></div>
+  <span class="flow-arrow">&larr;&rarr;</span>
+  <div class="flow-box" style="border-color:var(--orange);"><strong>repeater.cpp</strong><br><span style="color:var(--dim);font-size:0.8em;">Repeater firmware<br>BLE, OLED, GPIO</span></div>
+</div>
+
+<h3>Callback Architecture</h3>
+<p>Each firmware registers hardware-specific callbacks with MeshCore at startup:</p>
+
+<pre><span class="comment">// In setup():</span>
+mesh.onTransmitRaw    = radioTransmit;      <span class="comment">// Send raw bytes via SX1262/SX1276</span>
+mesh.onChannelFree    = radioChannelFree;    <span class="comment">// Check RSSI for listen-before-talk</span>
+mesh.onMessage        = handleMessage;       <span class="comment">// Decrypted message arrived for us</span>
+mesh.onCmd            = handleCmd;           <span class="comment">// CMD (GPIO control) arrived</span>
+mesh.onAck            = handleAck;           <span class="comment">// ACK received</span>
+mesh.onNodeDiscovered = handleNodeDiscovered;<span class="comment">// New node heard for first time</span></pre>
+
+<h3>Main Loop Flow (both firmwares)</h3>
+<pre>
+loop() {
+    receiveCheck();                  <span class="comment">// Check radio ISR flag, read packet, call mesh.processPacket()</span>
+    handleAckRetry();                <span class="comment">// Retry unacknowledged messages</span>
+    mesh.processPendingForwards();   <span class="comment">// Send jitter-delayed forwards</span>
+
+    <span class="comment">// Heartbeat (every ~30s with &plusmn;2s jitter)</span>
+    if (millis() > nextHeartbeatTime)
+        mesh.sendHeartbeat();
+
+    <span class="comment">// Route cleanup (every 10s)</span>
+    mesh.pruneStale();
+
+    <span class="comment">// ... GPS, UI, BLE handling ...</span>
+}
+</pre>
+
+<h3>File Map</h3>
+<table>
+  <tr><th>File</th><th>Purpose</th><th>Lines</th></tr>
+  <tr><td><code>lib/MeshCore/MeshCore.h</code></td><td>Shared library header &mdash; constants, structs, class definition</td><td>~207</td></tr>
+  <tr><td><code>lib/MeshCore/MeshCore.cpp</code></td><td>All shared mesh logic &mdash; CRC, crypto, routing, dedup, forwarding</td><td>~440</td></tr>
+  <tr><td><code>src/main.cpp</code></td><td>T-Deck Plus full communicator &mdash; TFT UI, keyboard, GPS, menus</td><td>~1700</td></tr>
+  <tr><td><code>src/repeater.cpp</code></td><td>Headless repeater &mdash; OLED stats, BLE, GPIO, serial config</td><td>~500</td></tr>
+  <tr><td><code>include/Pins.h</code></td><td>Board-specific pin definitions (3 boards + custom template)</td><td>~180</td></tr>
+  <tr><td><code>include/phrases.h</code></td><td>Quick phrase library (40 phrases, 4 categories)</td><td>~70</td></tr>
+  <tr><td><code>android-app/</code></td><td>Kotlin + Jetpack Compose BLE controller app</td><td>~800</td></tr>
+</table>
+</section>
+
+<!-- ═══════════════ PROTOCOL ═══════════════ -->
+<section id="protocol">
+<h2>4. Packet Format &amp; Protocol</h2>
+
+<h3>Raw Packet Structure (on the air)</h3>
+<div class="packet-diagram">
+  <div class="packet-field" style="background:rgba(0,229,255,0.15); flex:1;">
+    <div class="label">Destination</div>
+    <div class="value">0xFFFF</div>
+    <div class="bytes">Bytes 0-1</div>
+  </div>
+  <div class="packet-field" style="background:rgba(0,255,65,0.1); flex:1;">
+    <div class="label">Source</div>
+    <div class="value">0x0001</div>
+    <div class="bytes">Bytes 2-3</div>
+  </div>
+  <div class="packet-field" style="background:rgba(255,140,0,0.1); flex:0.8;">
+    <div class="label">Sequence</div>
+    <div class="value">0x002A</div>
+    <div class="bytes">Bytes 4-5</div>
+  </div>
+  <div class="packet-field" style="background:rgba(255,224,0,0.1); flex:0.5;">
+    <div class="label">TTL</div>
+    <div class="value">5</div>
+    <div class="bytes">Byte 6</div>
+  </div>
+  <div class="packet-field" style="background:rgba(68,136,255,0.1); flex:3;">
+    <div class="label">Payload (ASCII)</div>
+    <div class="value">0001,FFFF,ABCD,5,0001,&lt;encrypted_hex&gt;</div>
+    <div class="bytes">Bytes 7+</div>
+  </div>
+</div>
+
+<h3>Payload Formats</h3>
+
+<h4>Data Message Payload</h4>
+<pre>&lt;from&gt;,&lt;to&gt;,&lt;mid&gt;,&lt;ttl&gt;,&lt;route&gt;,&lt;encrypted_hex&gt;
+
+Example: <span class="string">"0001,0002,XYZW,5,0001,48656C6C6F..."</span>
+
+Fields:
+  from          4-char hex sender ID
+  to            4-char hex destination (FFFF = broadcast)
+  mid           4-char message ID (A-Z random)
+  ttl           Remaining hop count
+  route         Comma-separated path (e.g. "0001,0003,0005")
+  encrypted_hex AES-128-CTR encrypted payload (hex encoded)</pre>
+
+<h4>After Decryption &mdash; Message Types</h4>
+<table>
+  <tr><th>Prefix</th><th>Format</th><th>Description</th></tr>
+  <tr><td><code>MSG,</code></td><td><code>MSG,Hello World</code></td><td>Text message</td></tr>
+  <tr><td><code>MSG,#</code></td><td><code>MSG,#1/3|Part one text</code></td><td>Chunked message (part 1 of 3)</td></tr>
+  <tr><td><code>POS,</code></td><td><code>POS,51.507222,-0.127500</code></td><td>GPS position broadcast</td></tr>
+  <tr><td><code>SOS,</code></td><td><code>SOS,51.507222,-0.127500</code> or <code>SOS,NOFIX</code></td><td>Emergency distress signal</td></tr>
+  <tr><td><code>CMD,</code></td><td><code>CMD,SET,2,1</code></td><td>Remote GPIO command</td></tr>
+</table>
+
+<h4>Special Packets (unencrypted)</h4>
+<table>
+  <tr><th>Type</th><th>Format</th><th>Description</th></tr>
+  <tr><td>Heartbeat</td><td><code>HB,0001</code></td><td>Periodic presence announcement (every ~30s)</td></tr>
+  <tr><td>ACK</td><td><code>ACK,0001,XYZW</code></td><td>Delivery acknowledgement (to node 0001, for message XYZW)</td></tr>
+</table>
+</section>
+
+<!-- ═══════════════ ENCRYPTION ═══════════════ -->
+<section id="encryption">
+<h2>5. Encryption Details</h2>
+
+<div class="flow">
+  <div class="flow-box">Plaintext<br><code>MSG,Hello</code></div>
+  <span class="flow-arrow">&rarr;</span>
+  <div class="flow-box">Append CRC-16<br><code>[msg bytes][CRC hi][CRC lo]</code></div>
+  <span class="flow-arrow">&rarr;</span>
+  <div class="flow-box">AES-128-CTR<br><code>encrypt(key, IV)</code></div>
+  <span class="flow-arrow">&rarr;</span>
+  <div class="flow-box">Hex Encode<br><code>48656C6C6F...</code></div>
+</div>
+
+<h3>AES Key</h3>
+<ul style="color:var(--dim); padding-left:20px;">
+  <li>Exactly <strong>16 ASCII characters</strong> (128 bits)</li>
+  <li>Default: <code>"DONTSHARETHEKEY!"</code></li>
+  <li><strong>All nodes must share the same key</strong> to communicate</li>
+  <li>Stored in EEPROM at address <code>450</code></li>
+</ul>
+
+<h3>IV (Initialization Vector) Generation</h3>
+<pre><span class="comment">// IV is derived from the 4-char Message ID</span>
+<span class="keyword">for</span> (i = <span class="number">0</span>; i < <span class="number">16</span>; i++) {
+    <span class="keyword">if</span> (i < seed.length())
+        iv[i] = seed[i];           <span class="comment">// Direct copy</span>
+    <span class="keyword">else</span>
+        iv[i] = seed[i % len] ^ i; <span class="comment">// XOR expansion</span>
+}</pre>
+
+<h3>CRC-16-CCITT</h3>
+<p>Polynomial <code>0x1021</code>, seed <code>0xFFFF</code>. Appended to plaintext <em>before</em> encryption so the receiver can verify decryption integrity.</p>
+</section>
+
+<!-- ═══════════════ ROUTING ═══════════════ -->
+<section id="routing">
+<h2>6. Routing &amp; Scalability</h2>
+
+<h3>Directed Routing Algorithm</h3>
+<p>Unlike pure flooding (Meshtastic), this system maintains a <strong>routing table</strong> and prefers <strong>unicast directed forwarding</strong> when a route is known.</p>
+
+<pre><span class="comment">// Route cost = (hop_count &times; 10) - RSSI</span>
+<span class="comment">// Lower is better. Closer nodes with fewer hops win.</span>
+
+<span class="keyword">Example</span>:
+  Route via 0003: cost = (<span class="number">2</span> hops &times; <span class="number">10</span>) - (<span class="number">-85</span> RSSI) = <span class="number">105</span>
+  Route via 0005: cost = (<span class="number">1</span> hop  &times; <span class="number">10</span>) - (<span class="number">-60</span> RSSI) = <span class="number">70</span>  &larr; <span class="keyword">winner</span></pre>
+
+<h3>Smart Forward Decision</h3>
+<div class="flow">
+  <div class="flow-box">Packet arrives<br>not for me</div>
+  <span class="flow-arrow">&rarr;</span>
+  <div class="flow-box">Check dedup<br>(hash ring, 64 slots)</div>
+  <span class="flow-arrow">&rarr;</span>
+  <div class="flow-box" style="border-color:var(--green);">Route exists?<br>&amp; doesn't loop?</div>
+  <span class="flow-arrow">&rarr;</span>
+  <div class="flow-box" style="border-color:var(--green);">Directed send<br>to next hop</div>
+</div>
+<div class="flow" style="margin-left:240px;">
+  <span class="flow-arrow" style="transform:rotate(90deg);">&darr;</span>
+  <span style="color:var(--red); font-size:0.85em;">No route</span>
+  <span class="flow-arrow">&rarr;</span>
+  <div class="flow-box" style="border-color:var(--orange);">Broadcast<br>(dest 0xFFFF)</div>
+  <span class="flow-arrow">&rarr;</span>
+  <div class="flow-box" style="border-color:var(--yellow);">Jitter delay<br>50-500ms random</div>
+  <span class="flow-arrow">&rarr;</span>
+  <div class="flow-box">Listen-before-talk<br>RSSI &lt; -120 dBm?</div>
+  <span class="flow-arrow">&rarr;</span>
+  <div class="flow-box" style="border-color:var(--green);">Transmit</div>
+</div>
+
+<h3>Collision Avoidance</h3>
+<table>
+  <tr><th>Mechanism</th><th>Detail</th></tr>
+  <tr><td><strong>Jitter Delay</strong></td><td>Random 50&ndash;500ms wait before forwarding. Prevents multiple nodes forwarding simultaneously.</td></tr>
+  <tr><td><strong>Listen-Before-Talk</strong></td><td>Scans channel RSSI before transmitting. If &gt; -120 dBm, waits up to 200ms for channel to clear.</td></tr>
+  <tr><td><strong>Duty Cycle</strong></td><td>Tracks total airtime. Refuses to transmit if &gt;10% of the last hour was spent transmitting (EU 868 MHz legal compliance).</td></tr>
+  <tr><td><strong>Heartbeat Jitter</strong></td><td>Heartbeats sent every 30s &plusmn;2s random offset to prevent periodic collisions.</td></tr>
+</table>
+
+<h3>Deduplication</h3>
+<pre><span class="comment">// FNV-1a hash of the 4-char Message ID</span>
+hash = <span class="number">2166136261</span>;    <span class="comment">// FNV offset basis</span>
+<span class="keyword">for each</span> char c <span class="keyword">in</span> mid:
+    hash ^= c;
+    hash *= <span class="number">16777619</span>; <span class="comment">// FNV prime</span>
+hash |= <span class="number">1</span>;           <span class="comment">// Never zero (zero = empty slot)</span>
+
+<span class="comment">// Stored in 64-slot ring buffer. O(1) lookup, O(1) insert.</span></pre>
+</section>
+
+<!-- ═══════════════ T-DECK UI ═══════════════ -->
+<section id="tdeck-ui">
+<h2>7. T-Deck Plus User Interface</h2>
+
+<p>The T-Deck Plus has a full 320&times;240 colour TFT display with a hardware QWERTY keyboard and trackball. All screens share a consistent layout: <strong>header bar</strong> (28px), <strong>content area</strong>, and <strong>status bar</strong> (18px).</p>
+
+<h3>Main Menu</h3>
+
+<div class="screen">
+  <div class="screen-header">
+    <span class="title">LoRa Mesh v3.1</span>
+    <span class="badge">ONLINE</span>
+  </div>
+  <div class="screen-content">
+    <div class="menu-item"><div class="bar" style="background:var(--green);"></div> New Message</div>
+    <div class="menu-item"><div class="bar" style="background:var(--cyan);"></div> Quick Phrases</div>
+    <div class="menu-item selected"><div class="bar" style="background:var(--cyan);"></div> View Messages <span class="arrow">&gt;</span></div>
+    <div class="menu-item"><div class="bar" style="background:var(--orange);"></div> Remote Control</div>
+    <div class="menu-item"><div class="bar" style="background:var(--red);"></div> SOS Emergency</div>
+    <div class="menu-item"><div class="bar" style="background:var(--dim);"></div> Settings</div>
+    <div class="menu-item"><div class="bar" style="background:var(--orange);"></div> Known Nodes</div>
+    <div class="menu-item"><div class="bar" style="background:var(--orange);"></div> Mesh Map <span style="color:var(--faint);margin-left:auto;font-size:11px;">v</span></div>
+  </div>
+  <div class="screen-status">
+    <span><span class="dot green"></span> 0001</span>
+    <span style="color:var(--faint);">&gt;</span>
+    <span style="color:var(--cyan);">FFFF</span>
+    <span><span class="dot red"></span> GPS</span>
+    <span style="color:var(--dim);">N:3</span>
+    <span style="margin-left:auto;color:var(--dim);">87%</span>
+  </div>
+</div>
+
+<h4>Menu Items Explained</h4>
+<table>
+  <tr><th>Item</th><th>Action</th><th>Key</th></tr>
+  <tr><td><span style="color:var(--green);">&#9632;</span> New Message</td><td>Opens text input &mdash; type a message with the keyboard, press Enter to send</td><td>Trackball click / Enter</td></tr>
+  <tr><td><span style="color:var(--cyan);">&#9632;</span> Quick Phrases</td><td>Pick up to 5 pre-defined phrases from 4 categories. Phrases are compressed to hex IDs for compact transmission.</td><td></td></tr>
+  <tr><td><span style="color:var(--cyan);">&#9632;</span> View Messages</td><td>Chat bubble view showing message history with scroll</td><td></td></tr>
+  <tr><td><span style="color:var(--orange);">&#9632;</span> Remote Control</td><td>Send GPIO commands (SET/GET/PULSE) to the target node</td><td></td></tr>
+  <tr><td><span style="color:var(--red);">&#9632;</span> SOS Emergency</td><td>Flashing red screen, broadcasts SOS + GPS every 2 minutes. Hold Esc 3s to cancel.</td><td></td></tr>
+  <tr><td><span style="color:var(--dim);">&#9632;</span> Settings</td><td>Opens settings submenu</td><td></td></tr>
+  <tr><td><span style="color:var(--orange);">&#9632;</span> Known Nodes</td><td>List of discovered nodes with RSSI, signal bars, age, and GPS indicator</td><td></td></tr>
+  <tr><td><span style="color:var(--orange);">&#9632;</span> Mesh Map</td><td>Live view of mesh topology &mdash; nodes, signal strength, and neighbour links. Auto-refreshes every 5s.</td><td></td></tr>
+  <tr><td><span style="color:var(--green);">&#9632;</span> Broadcast Pos</td><td>Sends your GPS coordinates to all nodes</td><td></td></tr>
+  <tr><td><span style="color:var(--cyan);">&#9632;</span> Find Node</td><td>Compass arrow and distance to the target node (requires both nodes to have GPS)</td><td></td></tr>
+</table>
+
+<h3>Chat View</h3>
+<div class="screen">
+  <div class="screen-header">
+    <span class="title">Messages &gt; 0002</span>
+  </div>
+  <div class="screen-content" style="display:flex; flex-direction:column; gap:6px;">
+    <div style="display:flex; align-items:flex-start; gap:6px;">
+      <div class="bubble in">
+        <div class="sender" style="color:var(--cyan);">0002</div>
+        Hello, are you at camp?
+        <div class="meta">-82dBm &nbsp; 14:32</div>
+      </div>
+    </div>
+    <div style="display:flex; justify-content:flex-end; align-items:flex-start; gap:6px;">
+      <div style="font-size:10px; color:var(--dim); align-self:center;">You</div>
+      <div class="bubble out">
+        Yes, arrived 10 mins ago
+        <div class="meta">14:33</div>
+      </div>
+    </div>
+    <div style="display:flex; align-items:flex-start; gap:6px;">
+      <div class="bubble in">
+        <div class="sender" style="color:var(--cyan);">0002</div>
+        Great, heading your way now
+        <div class="meta">-78dBm &nbsp; 14:35</div>
+      </div>
+    </div>
+    <div style="font-size:10px; color:var(--faint); margin-top:auto;">
+      [r] Reply &nbsp; [n] New &nbsp; [Esc] Back &nbsp; [Up/Dn] Scroll
+    </div>
+  </div>
+  <div class="screen-status">
+    <span><span class="dot green"></span> 0001</span>
+    <span style="color:var(--faint);">&gt;</span>
+    <span style="color:var(--cyan);">0002</span>
+    <span><span class="dot green"></span> GPS</span>
+    <span style="color:var(--dim);">N:3</span>
+    <span style="color:var(--orange);margin-left:auto;">TX..</span>
+    <span style="color:var(--dim);">87%</span>
+  </div>
+</div>
+
+<h3>Text Input</h3>
+<div class="screen">
+  <div class="screen-header"><span class="title">New Message</span></div>
+  <div class="screen-content">
+    <div style="display:flex; justify-content:space-between; font-size:11px; margin-bottom:8px;">
+      <span><span style="color:var(--dim);">To:</span> <span style="color:var(--cyan);">0002</span></span>
+      <span style="color:var(--dim);">12/160</span>
+    </div>
+    <div style="background:var(--panel); border:1px solid var(--cyan); border-radius:6px; padding:10px; min-height:60px;">
+      Hello world_
+    </div>
+    <div style="font-size:10px; color:var(--faint); margin-top:10px;">
+      [Enter] Send &nbsp;&nbsp; [Bksp] Delete &nbsp;&nbsp; [Esc] Cancel
+    </div>
+  </div>
+  <div class="screen-status">
+    <span><span class="dot green"></span> 0001</span>
+    <span style="color:var(--faint);">&gt;</span>
+    <span style="color:var(--cyan);">0002</span>
+    <span style="color:var(--dim); margin-left:auto;">87%</span>
+  </div>
+</div>
+
+<h3>Settings Submenu</h3>
+<div class="screen">
+  <div class="screen-header"><span class="title">LoRa Mesh v3.1</span></div>
+  <div class="screen-content">
+    <div class="menu-item selected"><div class="bar" style="background:var(--cyan);"></div> Set Local ID <span class="arrow">&gt;</span></div>
+    <div class="menu-item"><div class="bar" style="background:var(--faint);"></div> Set Target ID</div>
+    <div class="menu-item"><div class="bar" style="background:var(--faint);"></div> Edit AES Key</div>
+    <div class="menu-item"><div class="bar" style="background:var(--faint);"></div> Brightness</div>
+    <div class="menu-item"><div class="bar" style="background:var(--faint);"></div> Clear Nodes</div>
+    <div class="menu-item"><div class="bar" style="background:var(--faint);"></div> Back</div>
+  </div>
+  <div class="screen-status">
+    <span><span class="dot green"></span> 0001</span>
+    <span style="color:var(--dim); margin-left:auto;">87%</span>
+  </div>
+</div>
+
+<h4>Settings Actions</h4>
+<table>
+  <tr><th>Setting</th><th>Input</th><th>Notes</th></tr>
+  <tr><td>Set Local ID</td><td>4 hex characters (0-9, A-F)</td><td>Your node's unique address on the mesh</td></tr>
+  <tr><td>Set Target ID</td><td>4 hex characters</td><td>Default recipient. <code>FFFF</code> = broadcast to all</td></tr>
+  <tr><td>Edit AES Key</td><td>Exactly 16 ASCII characters</td><td>All nodes must share the same key!</td></tr>
+  <tr><td>Brightness</td><td>Cycles: 100% &rarr; 50% &rarr; 25%</td><td>Display backlight PWM</td></tr>
+  <tr><td>Clear Nodes</td><td>Immediate</td><td>Wipes all known node IDs from memory &amp; EEPROM</td></tr>
+</table>
+
+<h3>SOS Mode</h3>
+<div class="screen">
+  <div class="screen-header" style="background:var(--red);"><span class="title" style="color:white;">!! EMERGENCY !!</span></div>
+  <div class="screen-content" style="background:linear-gradient(180deg, #400000 0%, #200000 100%); text-align:center; padding-top:30px;">
+    <div style="font-size:20px; font-weight:700; color:white;">!! EMERGENCY !!</div>
+    <div style="margin-top:16px; color:var(--dim);">51.50722, -0.12750</div>
+    <div style="margin-top:16px; color:var(--dim);">Next broadcast: 118s</div>
+    <div style="margin-top:16px; color:var(--faint); font-size:11px;">Hold Esc 3s to cancel</div>
+  </div>
+  <div class="screen-status">
+    <span><span class="dot green"></span> 0001</span>
+    <span style="color:var(--red);margin-left:auto;">SOS ACTIVE</span>
+  </div>
+</div>
+
+<h3>Remote Control Panel</h3>
+<div class="screen">
+  <div class="screen-header"><span class="title">Remote Control &gt; 0010</span></div>
+  <div class="screen-content">
+    <div style="font-size:11px; color:var(--dim); margin-bottom:6px;">Target: <span style="color:var(--cyan);">0010</span></div>
+    <div class="menu-item"><div class="bar" style="background:var(--faint);"></div> Relay 1 ON (pin 2)</div>
+    <div class="menu-item selected"><div class="bar" style="background:var(--cyan);"></div> Relay 1 OFF (pin 2) <span class="arrow">&gt;</span></div>
+    <div class="menu-item"><div class="bar" style="background:var(--faint);"></div> Relay 2 ON (pin 4)</div>
+    <div class="menu-item"><div class="bar" style="background:var(--faint);"></div> Relay 2 OFF (pin 4)</div>
+    <div class="menu-item"><div class="bar" style="background:var(--faint);"></div> Read Sensor (pin 34)</div>
+    <div class="menu-item"><div class="bar" style="background:var(--faint);"></div> Read Sensor (pin 36)</div>
+    <div class="menu-item"><div class="bar" style="background:var(--faint);"></div> Pulse pin 2 (2s)</div>
+    <div class="menu-item"><div class="bar" style="background:var(--faint);"></div> Custom Command</div>
+  </div>
+  <div class="screen-status">
+    <span><span class="dot green"></span> 0001</span>
+    <span style="color:var(--dim); margin-left:auto;">87%</span>
+  </div>
+</div>
+
+<h3>First-Boot Wizard</h3>
+<p>On first power-up (EEPROM magic byte <code>0xA5</code> not found), a 3-step wizard guides setup:</p>
+<ol style="color:var(--dim); padding-left:20px;">
+  <li><strong>Step 1:</strong> Enter your Node ID (4 hex chars, e.g. <code>0001</code>)</li>
+  <li><strong>Step 2:</strong> Set or accept the AES encryption key (16 chars, pre-filled with default)</li>
+  <li><strong>Step 3:</strong> Confirmation screen showing all settings, press Enter to start</li>
+</ol>
+
+<h3>Keyboard Controls</h3>
+<table>
+  <tr><th>Context</th><th>Key</th><th>Action</th></tr>
+  <tr><td>Menu</td><td>Trackball Up/Down</td><td>Navigate items</td></tr>
+  <tr><td>Menu</td><td>Trackball Click / Enter</td><td>Select item</td></tr>
+  <tr><td>Menu</td><td>Esc / Trackball Left</td><td>Back to parent menu</td></tr>
+  <tr><td>Chat</td><td><code>n</code></td><td>New message</td></tr>
+  <tr><td>Chat</td><td><code>r</code></td><td>Quick reply to last sender</td></tr>
+  <tr><td>Chat</td><td>Trackball Up/Down</td><td>Scroll messages</td></tr>
+  <tr><td>Chat</td><td>Esc</td><td>Back to menu</td></tr>
+  <tr><td>Text Input</td><td>Enter</td><td>Send / confirm</td></tr>
+  <tr><td>Text Input</td><td>Backspace</td><td>Delete last char</td></tr>
+  <tr><td>Text Input</td><td>Esc</td><td>Cancel</td></tr>
+  <tr><td>Tracking/Map</td><td><code>q</code> / Esc</td><td>Back to menu</td></tr>
+  <tr><td>SOS</td><td>Hold Esc 3s</td><td>Cancel SOS mode</td></tr>
+</table>
+
+<h3>Boot Screen</h3>
+<div class="screen">
+  <div class="screen-content" style="text-align:center; padding-top:12px;">
+    <div style="height:3px; display:flex;">
+      <div style="flex:1; background:var(--red);"></div>
+      <div style="flex:1; background:var(--orange);"></div>
+      <div style="flex:1; background:var(--green);"></div>
+    </div>
+    <div style="font-size:22px; color:var(--cyan); margin-top:14px; font-weight:700;">LoRa Mesh</div>
+    <div style="color:var(--green); margin-top:4px;">T-Deck Plus Edition</div>
+    <div style="display:inline-block; background:var(--cyan); color:#000; padding:2px 12px; border-radius:8px; font-size:11px; font-weight:700; margin-top:6px;">v3.1</div>
+    <div style="background:var(--panel); border-radius:8px; padding:10px; margin:12px 20px 0; text-align:left; font-size:10px; color:var(--dim); line-height:1.8;">
+      Freq: 868.0 MHz &nbsp;&nbsp; SF: 9<br>
+      BW: 125 kHz &nbsp;&nbsp; Power: 20dBm<br>
+      Node: 0001 &nbsp;&nbsp; AES: <span style="color:var(--green);">Active</span><br>
+      Chip: ESP32-S3 + SX1262
+    </div>
+    <div style="margin:12px 30px 0; height:12px; border-radius:6px; border:1px solid var(--faint); overflow:hidden;">
+      <div style="width:100%; height:100%; background:var(--green); border-radius:6px;"></div>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ═══════════════ REPEATER UI ═══════════════ -->
+<section id="repeater-ui">
+<h2>8. Repeater OLED Display</h2>
+
+<p>The repeater boards (LoRa32 &amp; Heltec V3) show a 128&times;64 OLED stats screen that refreshes every 5 seconds.</p>
+
+<div class="oled-screen">
+  <div class="line" style="font-weight:700;">MESH RPT <span style="color:var(--cyan);">0010</span></div>
+  <div class="line" style="color:var(--faint);">________________________</div>
+  <div class="line">RX:<span style="color:var(--cyan);">1247</span> &nbsp;FWD:<span style="color:var(--green);">583</span></div>
+  <div class="line">N:<span style="color:var(--orange);">5</span> R:<span style="color:var(--orange);">12</span> <span style="color:var(--cyan);">BLE</span></div>
+  <div class="line">RSSI:<span style="color:var(--yellow);">-78</span>dBm</div>
+  <div class="line">Relay:<span style="color:var(--green);">1</span><span style="color:var(--dim);">0</span><span style="color:var(--green);">1</span><span style="color:var(--dim);">0</span><span style="color:var(--dim);">0</span><span style="color:var(--dim);">0</span></div>
+  <div class="line" style="color:var(--dim);">Up: 14h23m</div>
+</div>
+
+<h4>Display Fields</h4>
+<table>
+  <tr><th>Field</th><th>Meaning</th></tr>
+  <tr><td><code>MESH RPT 0010</code></td><td>Device role + node ID</td></tr>
+  <tr><td><code>RX:1247</code></td><td>Total packets received since boot</td></tr>
+  <tr><td><code>FWD:583</code></td><td>Total packets forwarded (relayed)</td></tr>
+  <tr><td><code>N:5</code></td><td>Number of known nodes</td></tr>
+  <tr><td><code>R:12</code></td><td>Active routes in routing table</td></tr>
+  <tr><td><code>BLE</code></td><td>Shown when a phone is connected via BLE</td></tr>
+  <tr><td><code>RSSI:-78dBm</code></td><td>Signal strength of last received packet</td></tr>
+  <tr><td><code>Relay:101000</code></td><td>State of each relay pin (1=ON, 0=OFF)</td></tr>
+  <tr><td><code>Up: 14h23m</code></td><td>Uptime since last reset</td></tr>
+</table>
+</section>
+
+<!-- ═══════════════ ANDROID APP ═══════════════ -->
+<section id="android-app">
+<h2>9. Android App</h2>
+
+<p>The companion Android app connects to any repeater node via BLE (Nordic UART Service). It turns any headless board into a full communicator with chat, relay control, and settings.</p>
+
+<h3>App Screens</h3>
+
+<div style="display:flex; gap:20px; flex-wrap:wrap; justify-content:center;">
+
+  <!-- Scan Screen -->
+  <div class="phone-screen">
+    <div class="phone-header">Scan for Devices</div>
+    <div style="padding:6px; font-size:12px;">
+      <div style="background:var(--panel); border-radius:8px; padding:10px; margin-bottom:6px; display:flex; justify-content:space-between;">
+        <span style="color:var(--white);">LoRa32_0010</span>
+        <span style="color:var(--green);">-52 dBm</span>
+      </div>
+      <div style="background:var(--panel); border-radius:8px; padding:10px; margin-bottom:6px; display:flex; justify-content:space-between;">
+        <span style="color:var(--white);">HeltecV3_0020</span>
+        <span style="color:var(--orange);">-88 dBm</span>
+      </div>
+      <div style="background:var(--panel); border-radius:8px; padding:10px; margin-bottom:6px; display:flex; justify-content:space-between;">
+        <span style="color:var(--dim);">Unknown_BLE</span>
+        <span style="color:var(--red);">-105 dBm</span>
+      </div>
+    </div>
+    <div style="text-align:center; padding:8px;">
+      <div style="display:inline-block; background:var(--cyan); color:#000; padding:8px 24px; border-radius:20px; font-weight:700; font-size:12px;">SCANNING...</div>
+    </div>
+  </div>
+
+  <!-- Chat Screen -->
+  <div class="phone-screen">
+    <div style="display:flex; align-items:center; padding:8px; gap:8px; font-size:12px;">
+      <span style="color:var(--dim);">To:</span>
+      <span style="border:1px solid var(--cyan); padding:4px 8px; border-radius:4px; color:var(--cyan);">FFFF</span>
+      <span style="color:var(--orange); font-size:10px;">Broadcast</span>
+    </div>
+    <div style="padding:6px; min-height:120px;">
+      <div style="font-size:10px; color:var(--cyan); margin-left:4px;">0002</div>
+      <div style="background:rgba(68,136,255,0.15); padding:6px 10px; border-radius:10px 10px 10px 2px; font-size:12px; max-width:80%; margin-bottom:8px;">
+        Anyone at base camp?
+        <div style="font-size:9px; color:var(--faint); text-align:right;">-82dBm &nbsp; 14:32</div>
+      </div>
+      <div style="text-align:right;">
+        <div style="font-size:10px; color:var(--green); margin-right:4px;">You</div>
+        <div style="display:inline-block; background:rgba(0,255,65,0.15); padding:6px 10px; border-radius:10px 10px 2px 10px; font-size:12px; text-align:left;">
+          Yes, just arrived!
+          <div style="font-size:9px; color:var(--faint); text-align:right;">14:33</div>
+        </div>
+      </div>
+    </div>
+    <div style="display:flex; gap:6px; padding:6px; border-top:1px solid var(--faint);">
+      <div style="flex:1; border:1px solid var(--faint); border-radius:20px; padding:6px 12px; font-size:11px; color:var(--dim);">Type a message...</div>
+      <div style="color:var(--cyan); font-size:16px; padding:4px;">&#9654;</div>
+    </div>
+    <div class="phone-nav">
+      <div class="tab active">Chat</div>
+      <div class="tab">Control</div>
+      <div class="tab">Settings</div>
+    </div>
+  </div>
+
+  <!-- Control Screen -->
+  <div class="phone-screen">
+    <div class="phone-header" style="display:flex; justify-content:space-between;">
+      <span>Relay Control</span>
+      <span style="color:var(--cyan); font-size:12px;">&#8635;</span>
+    </div>
+    <div style="padding:6px; font-size:12px;">
+      <div style="background:var(--panel); border-radius:8px; padding:10px; margin-bottom:6px; display:flex; align-items:center; gap:8px;">
+        <span style="color:var(--green); font-size:16px;">&#9211;</span>
+        <div style="flex:1;">
+          <div>Relay 1</div>
+          <div style="font-size:10px; color:var(--green);">GPIO 2 - ON</div>
+        </div>
+        <div style="font-size:10px; border:1px solid var(--faint); padding:2px 8px; border-radius:4px; color:var(--dim);">Pulse</div>
+        <div style="width:36px; height:20px; background:rgba(0,255,65,0.3); border-radius:10px; position:relative;">
+          <div style="width:16px; height:16px; background:var(--green); border-radius:50%; position:absolute; top:2px; right:2px;"></div>
+        </div>
+      </div>
+      <div style="background:var(--panel); border-radius:8px; padding:10px; margin-bottom:6px; display:flex; align-items:center; gap:8px;">
+        <span style="color:var(--dim); font-size:16px;">&#9211;</span>
+        <div style="flex:1;">
+          <div>Relay 2</div>
+          <div style="font-size:10px; color:var(--dim);">GPIO 4 - OFF</div>
+        </div>
+        <div style="font-size:10px; border:1px solid var(--faint); padding:2px 8px; border-radius:4px; color:var(--dim);">Pulse</div>
+        <div style="width:36px; height:20px; background:var(--faint); border-radius:10px; position:relative;">
+          <div style="width:16px; height:16px; background:var(--dim); border-radius:50%; position:absolute; top:2px; left:2px;"></div>
+        </div>
+      </div>
+      <div style="color:var(--green); font-size:14px; margin:10px 0 4px;">Sensors</div>
+      <div style="background:var(--panel); border-radius:8px; padding:10px; display:flex; align-items:center; gap:8px;">
+        <span style="color:var(--orange); font-size:16px;">&#9673;</span>
+        <div style="flex:1;">
+          <div>Sensor 1</div>
+          <div style="font-size:10px; color:var(--dim);">GPIO 34</div>
+        </div>
+        <span style="color:var(--orange); font-size:18px; font-weight:700;">2847</span>
+        <span style="color:var(--cyan); font-size:14px;">&#8635;</span>
+      </div>
+    </div>
+    <div class="phone-nav">
+      <div class="tab">Chat</div>
+      <div class="tab active">Control</div>
+      <div class="tab">Settings</div>
+    </div>
+  </div>
+</div>
+
+<h3>App Architecture</h3>
+<table>
+  <tr><th>Component</th><th>File</th><th>Responsibility</th></tr>
+  <tr><td>BLE Manager</td><td><code>BleManager.kt</code></td><td>Scan, connect, disconnect, send/receive via Nordic UART</td></tr>
+  <tr><td>ViewModel</td><td><code>MeshViewModel.kt</code></td><td>Parse incoming data, manage UI state (messages, relays, config)</td></tr>
+  <tr><td>Scan Screen</td><td><code>ScanScreen.kt</code></td><td>BLE device discovery with RSSI colour coding</td></tr>
+  <tr><td>Chat Screen</td><td><code>ChatScreen.kt</code></td><td>Send/receive messages, broadcast/direct toggle</td></tr>
+  <tr><td>Control Screen</td><td><code>ControlScreen.kt</code></td><td>Relay toggles, pulse buttons, sensor readings</td></tr>
+  <tr><td>Settings Screen</td><td><code>SettingsScreen.kt</code></td><td>Node ID, AES key, save to EEPROM, known nodes list</td></tr>
+  <tr><td>Theme</td><td><code>Theme.kt</code></td><td>Dark theme matching firmware cyan/green palette</td></tr>
+</table>
+</section>
+
+<!-- ═══════════════ BLE PROTOCOL ═══════════════ -->
+<section id="ble-protocol">
+<h2>10. BLE Protocol (Phone &harr; Node)</h2>
+
+<div class="info-box cyan">
+  <p><strong>BLE Service:</strong> Nordic UART Service (NUS)</p>
+  <p>Service UUID: <code>6E400001-B5A3-F393-E0A9-E50E24DCCA9E</code></p>
+  <p>TX (phone &rarr; node): <code>6E400002-...</code> &nbsp; RX (node &rarr; phone): <code>6E400003-...</code></p>
+  <p>Data is chunked to 20-byte BLE MTU packets with 30ms delays between chunks.</p>
+</div>
+
+<h3>Commands: Phone &rarr; Node</h3>
+<table>
+  <tr><th>Command</th><th>Format</th><th>Example</th><th>Response</th></tr>
+  <tr><td>Send Message</td><td><code>MSG,&lt;target&gt;,&lt;text&gt;</code></td><td><code>MSG,0001,Hello</code></td><td><code>OK,SENT,0001</code></td></tr>
+  <tr><td>Set Relay</td><td><code>CMD,SET,&lt;pin&gt;,&lt;0|1&gt;</code></td><td><code>CMD,SET,2,1</code></td><td><code>CMD,RSP,2,1</code></td></tr>
+  <tr><td>Read Pin</td><td><code>CMD,GET,&lt;pin&gt;</code></td><td><code>CMD,GET,34</code></td><td><code>CMD,RSP,34,2847</code></td></tr>
+  <tr><td>Pulse</td><td><code>CMD,PULSE,&lt;pin&gt;,&lt;ms&gt;</code></td><td><code>CMD,PULSE,2,1000</code></td><td><code>CMD,RSP,2,0</code></td></tr>
+  <tr><td>List Pins</td><td><code>CMD,LIST</code></td><td></td><td><code>PINS,R:2,4,12|S:34,36</code></td></tr>
+  <tr><td>Set Node ID</td><td><code>ID &lt;4hex&gt;</code></td><td><code>ID 0002</code></td><td><code>OK,ID,0002</code></td></tr>
+  <tr><td>Set AES Key</td><td><code>KEY &lt;16chars&gt;</code></td><td><code>KEY MySecretKey123</code></td><td><code>OK,KEY</code></td></tr>
+  <tr><td>Get Status</td><td><code>STATUS</code></td><td></td><td><code>STATUS,ID:0010,BOARD:...</code></td></tr>
+  <tr><td>Save Config</td><td><code>SAVE</code></td><td></td><td><code>OK,SAVED</code></td></tr>
+</table>
+
+<h3>Notifications: Node &rarr; Phone</h3>
+<table>
+  <tr><th>Event</th><th>Format</th><th>Example</th></tr>
+  <tr><td>Incoming Message</td><td><code>RX,&lt;from&gt;,&lt;text&gt;,&lt;rssi&gt;</code></td><td><code>RX,0001,Hello,-85</code></td></tr>
+  <tr><td>Command Response</td><td><code>CMD,RSP,&lt;pin&gt;,&lt;value&gt;</code></td><td><code>CMD,RSP,2,1</code></td></tr>
+  <tr><td>Pin List</td><td><code>PINS,R:&lt;pins&gt;|S:&lt;pins&gt;</code></td><td><code>PINS,R:2,4,12|S:34,36</code></td></tr>
+  <tr><td>Status</td><td><code>STATUS,&lt;key:val,...&gt;</code></td><td><code>STATUS,ID:0010,BOARD:LoRa32...</code></td></tr>
+  <tr><td>Node Found</td><td><code>NODE,&lt;id&gt;,&lt;rssi&gt;,&lt;hops&gt;</code></td><td><code>NODE,0002,-95,1</code></td></tr>
+</table>
+</section>
+
+<!-- ═══════════════ SERIAL CONFIG ═══════════════ -->
+<section id="serial-config">
+<h2>11. Serial Configuration (Repeater)</h2>
+
+<p>Connect to the repeater via USB serial at <strong>115200 baud</strong>. Same commands work via BLE.</p>
+
+<pre>
+<span class="keyword">ID</span> &lt;4hex&gt;              <span class="comment">Set node ID          e.g. ID 0002</span>
+<span class="keyword">KEY</span> &lt;16chars&gt;          <span class="comment">Set AES key          e.g. KEY DONTSHARETHEKEY!</span>
+<span class="keyword">RELAY</span> &lt;pins&gt;           <span class="comment">Set relay GPIO pins  e.g. RELAY 2,4,12,15</span>
+<span class="keyword">SENSOR</span> &lt;pins&gt;          <span class="comment">Set sensor GPIO pins e.g. SENSOR 34,36</span>
+<span class="keyword">STATUS</span>                 <span class="comment">Show device info</span>
+<span class="keyword">SAVE</span>                   <span class="comment">Write config to EEPROM</span>
+<span class="keyword">RESET</span>                  <span class="comment">Restore factory defaults</span>
+<span class="keyword">GATEWAY ON</span>             <span class="comment">Enable gateway mode (raw packet forwarding)</span>
+<span class="keyword">GATEWAY OFF</span>            <span class="comment">Disable gateway mode</span>
+<span class="keyword">PKT,</span>&lt;hex&gt;              <span class="comment">Inject raw packet into mesh (gateway mode only)</span>
+<span class="keyword">SOLAR ON</span>               <span class="comment">Enable solar/low-power mode (SX1262 boards only)</span>
+<span class="keyword">SOLAR OFF</span>              <span class="comment">Disable solar mode, restore normal operation</span>
+</pre>
+
+<div class="info-box orange">
+  <p><strong>Pin safety:</strong> The firmware blocks writes to SPI, radio, I2C, and boot pins. Only user-configurable GPIO pins are allowed for relay/sensor control. This prevents accidental damage to the radio or display.</p>
+</div>
+</section>
+
+<!-- ═══════════════ PHRASES ═══════════════ -->
+<section id="phrases">
+<h2>12. Quick Phrase System</h2>
+
+<p>The T-Deck's phrase picker lets you compose messages from pre-defined phrases without typing. Phrases are sent as hex IDs (e.g. <code>$0A|$1E</code>) and expanded on receipt &mdash; extremely bandwidth-efficient.</p>
+
+<table>
+  <tr><th style="background:var(--green); color:#000;">STATUS (0-9)</th><th style="background:var(--cyan); color:#000;">REQUEST (10-19)</th><th style="background:var(--orange); color:#000;">LOCATION (20-29)</th><th style="background:var(--blue); color:#000;">INTERACTION (30-39)</th></tr>
+  <tr><td>I AM OK</td><td>SEND HELP</td><td>AT BASE</td><td>WHERE ARE YOU</td></tr>
+  <tr><td>I AM LOST</td><td>NEED WATER</td><td>NEAR RIVER</td><td>I SEE YOU</td></tr>
+  <tr><td>I AM INJURED</td><td>NEED FOOD</td><td>AT CAMP</td><td>COME TO ME</td></tr>
+  <tr><td>I AM RESTING</td><td>NEED BATTERY</td><td>NEAR ROAD</td><td>GO TO BASE</td></tr>
+  <tr><td>I AM MOVING</td><td>NEED WARMTH</td><td>NEAR TREE</td><td>FOLLOW ME</td></tr>
+  <tr><td>I AM SAFE</td><td>BRING SUPPLIES</td><td>NEAR BUILDING</td><td>STAY THERE</td></tr>
+  <tr><td>I AM WAITING</td><td>RADIO CHECK</td><td>ON TRAIL</td><td>TURN BACK</td></tr>
+  <tr><td>I AM COLD</td><td>GPS HELP</td><td>INSIDE SHELTER</td><td>JOIN ME</td></tr>
+  <tr><td>I AM SCARED</td><td>MEDIC NEEDED</td><td>AT CHECKPOINT</td><td>MEET AT CAMP</td></tr>
+  <tr><td>I AM WET</td><td>SEND TRANSPORT</td><td>LOST POSITION</td><td>CONFIRM SIGNAL</td></tr>
+</table>
+
+<p style="margin-top:12px;"><strong>Wire format example:</strong> Selecting "I AM OK" + "AT CAMP" + "NEED WATER" sends: <code>$00|$16|$0B</code> (6 bytes instead of 30)</p>
+</section>
+
+<!-- ═══════════════ GPIO ═══════════════ -->
+<section id="gpio">
+<h2>13. GPIO Remote Control Protocol</h2>
+
+<p>GPIO commands are encrypted and routed through the mesh like regular messages. A T-Deck or phone app can control relays on any reachable node.</p>
+
+<h3>Command Format (inside encrypted payload)</h3>
+<table>
+  <tr><th>Command</th><th>Format</th><th>Description</th></tr>
+  <tr><td>SET</td><td><code>CMD,SET,&lt;pin&gt;,&lt;0|1&gt;</code></td><td>Set pin HIGH (1) or LOW (0). Pin is configured as OUTPUT.</td></tr>
+  <tr><td>GET</td><td><code>CMD,GET,&lt;pin&gt;</code></td><td>Read pin value. Analog pins (34-39) return 0-4095. Digital pins return 0/1.</td></tr>
+  <tr><td>PULSE</td><td><code>CMD,PULSE,&lt;pin&gt;,&lt;ms&gt;</code></td><td>Set pin HIGH for N milliseconds, then LOW. Max 30 seconds.</td></tr>
+  <tr><td>LIST</td><td><code>CMD,LIST</code></td><td>Returns configured relay and sensor pins.</td></tr>
+  <tr><td>RSP</td><td><code>CMD,RSP,&lt;pin&gt;,&lt;value&gt;</code></td><td>Response containing pin value (sent back to requester).</td></tr>
+</table>
+
+<div class="info-box red">
+  <p><strong>Forbidden Pins:</strong> The firmware blocks access to these pins regardless of configuration:</p>
+  <p style="color:var(--white);">SPI bus (MOSI, MISO, SCK) &bull; Radio (CS, RST, DIO, BUSY) &bull; Display (CS, DC) &bull; Boot (GPIO 0)</p>
+</div>
+</section>
+
+<!-- ═══════════════ EEPROM ═══════════════ -->
+<section id="eeprom">
+<h2>14. EEPROM Memory Map</h2>
+
+<p>512 bytes of EEPROM store persistent configuration. Layout is identical across all boards.</p>
+
+<table>
+  <tr><th>Address</th><th>Size</th><th>Content</th><th>Default</th></tr>
+  <tr><td><code>0</code></td><td>5 bytes</td><td>Local Node ID (4 chars + null)</td><td><code>"0001"</code></td></tr>
+  <tr><td><code>10</code></td><td>5 bytes</td><td>Target Node ID (4 chars + null)</td><td><code>"FFFF"</code></td></tr>
+  <tr><td><code>20</code></td><td>~100 bytes</td><td>Known nodes array (up to 20 &times; 5 bytes)</td><td>Empty</td></tr>
+  <tr><td><code>400</code></td><td>1 byte</td><td>Known node count</td><td><code>0</code></td></tr>
+  <tr><td><code>430</code></td><td>1 byte</td><td>Solar mode flag (0=off, 1=on)</td><td><code>0</code></td></tr>
+  <tr><td><code>450</code></td><td>17 bytes</td><td>AES-128 key (16 chars + null)</td><td><code>"DONTSHARETHEKEY!"</code></td></tr>
+  <tr><td><code>508</code></td><td>1 byte</td><td>First-boot magic byte</td><td><code>0xA5</code> after first setup</td></tr>
+</table>
+
+<div class="info-box green">
+  <p><strong>Tip:</strong> The <code>SAVE</code> command (via serial or BLE) calls <code>EEPROM.commit()</code> which writes the buffer to flash. Without <code>SAVE</code>, changes are lost on reboot.</p>
+</div>
+</section>
+
+<!-- ═══════════════ BUILDING ═══════════════ -->
+<section id="building">
+<h2>15. Building &amp; Flashing</h2>
+
+<h3>Prerequisites</h3>
+<ul style="color:var(--dim); padding-left:20px;">
+  <li><a href="https://platformio.org/install/cli" style="color:var(--cyan);">PlatformIO CLI</a> or PlatformIO IDE (VSCode extension)</li>
+  <li>USB driver for your board (CP2102 for LoRa32, CH340 for Heltec V3, native USB for T-Deck &amp; Heltec V4)</li>
+</ul>
+
+<h3>Build Commands</h3>
+<pre><span class="comment"># Build all 4 targets</span>
+pio run
+
+<span class="comment"># Build specific target</span>
+pio run -e tdeck-plus
+pio run -e lora32
+pio run -e heltec-v3
+pio run -e heltec-v4
+
+<span class="comment"># Flash specific target (with board connected)</span>
+pio run -e heltec-v4 --target upload
+
+<span class="comment"># Open serial monitor</span>
+pio device monitor -b <span class="number">115200</span>
+
+<span class="comment"># Clean build</span>
+pio run -e lora32 --target clean</pre>
+
+<h3>Build Isolation</h3>
+<p>PlatformIO uses <code>build_src_filter</code> to ensure each target only compiles its firmware:</p>
+<table>
+  <tr><th>Target</th><th>Compiles</th><th>Excludes</th></tr>
+  <tr><td>tdeck-plus</td><td><code>main.cpp</code> + MeshCore</td><td><code>repeater.cpp</code></td></tr>
+  <tr><td>lora32</td><td><code>repeater.cpp</code> + MeshCore</td><td><code>main.cpp</code></td></tr>
+  <tr><td>heltec-v3</td><td><code>repeater.cpp</code> + MeshCore</td><td><code>main.cpp</code></td></tr>
+  <tr><td>heltec-v4</td><td><code>repeater.cpp</code> + MeshCore</td><td><code>main.cpp</code></td></tr>
+</table>
+
+<h3>Android App</h3>
+<pre><span class="comment"># Open in Android Studio:</span>
+android-app/
+
+<span class="comment"># Build: compileSdk 34, minSdk 26</span>
+<span class="comment"># Dependencies: Jetpack Compose BOM 2024.01, BLE</span></pre>
+</section>
+
+<!-- ═══════════════ GATEWAY ═══════════════ -->
+<section id="gateway">
+<h2>16. Gateway Bridge &mdash; Internet-Linked Mesh Islands</h2>
+
+<p>The gateway feature connects geographically separated LoRa mesh networks over the internet. Each gateway node is a repeater connected via USB to a PC running the Python bridge server. Packets remain <strong>AES-128-CTR encrypted end-to-end</strong> &mdash; the servers never decrypt them.</p>
+
+<!-- ─── Hub Architecture ─── -->
+
+<h3>Hub Architecture (Recommended)</h3>
+
+<p>The simplest way to connect multiple mesh islands is using a <strong>central hub server</strong>. Each location runs a gateway that connects to the hub. Gateways only need the hub's address &mdash; no complex peer-to-peer configuration.</p>
+
+<div style="background:var(--panel); border:1px solid var(--faint); border-radius:8px; padding:20px; font-family:monospace; font-size:0.9em; overflow-x:auto; margin:16px 0;">
+<pre style="color:var(--text); margin:0; line-height:1.6;">
+  <span style="color:var(--cyan);">ISLAND A</span>              <span style="color:var(--orange);">CENTRAL HUB</span>              <span style="color:var(--green);">ISLAND B</span>
+                       <span style="color:var(--orange);">(cloud server or VPS)</span>
+
+  [Node 0001]                                         [Node 0005]
+       |                                                   |
+  <span style="color:var(--cyan);">[Repeater 0003]</span>                                    <span style="color:var(--green);">[Repeater 0007]</span>
+       |                                                   |
+  <span style="color:var(--dim);">USB Serial</span>                                          <span style="color:var(--dim);">USB Serial</span>
+       |                                                   |
+  <span style="color:var(--cyan);">┌──────────────┐</span>     <span style="color:var(--orange);">┌──────────────┐</span>     <span style="color:var(--green);">┌──────────────┐</span>
+  <span style="color:var(--cyan);">│ Gateway A    │</span>────&gt;<span style="color:var(--orange);">│ Gateway Hub  │</span>&lt;────<span style="color:var(--green);">│ Gateway B    │</span>
+  <span style="color:var(--cyan);">│ "Base Camp"  │</span>     <span style="color:var(--orange);">│ (relay only) │</span>     <span style="color:var(--green);">│ "Ridge Post" │</span>
+  <span style="color:var(--cyan);">└──────────────┘</span>     <span style="color:var(--orange);">└──────┬───────┘</span>     <span style="color:var(--green);">└──────────────┘</span>
+  <span style="color:var(--dim);">laptop at camp</span>              <span style="color:var(--orange);">│</span>            <span style="color:var(--dim);">PC at ridge post</span>
+                              <span style="color:var(--orange);">│</span>
+                     <span style="color:var(--red);">┌──────────────┐</span>
+                     <span style="color:var(--red);">│ Gateway C    │</span>
+                     <span style="color:var(--red);">│ "Town HQ"    │</span>
+                     <span style="color:var(--red);">└──────────────┘</span>
+                     <span style="color:var(--dim);">office in town</span>
+</pre>
+</div>
+
+<div class="info-box cyan">
+  <p><strong>End-to-end encryption:</strong> The hub and gateway servers only see opaque hex-encoded ciphertext. They never possess the AES key and cannot read message contents. All encryption/decryption happens on the LoRa nodes themselves.</p>
+</div>
+
+<!-- ─── Components ─── -->
+
+<h3>System Components</h3>
+<table>
+  <tr><th>Component</th><th>File</th><th>What It Does</th><th>Where It Runs</th></tr>
+  <tr>
+    <td style="color:var(--orange);">Repeater Firmware</td>
+    <td><code>src/repeater.cpp</code></td>
+    <td>LoRa radio + gateway serial protocol (<code>PKT,&lt;hex&gt;</code> forwarding)</td>
+    <td>LoRa32 or Heltec V3 board</td>
+  </tr>
+  <tr>
+    <td style="color:var(--cyan);">Gateway Client</td>
+    <td><code>gateway/gateway.py</code></td>
+    <td>Reads packets from repeater via USB serial, sends to hub or peers</td>
+    <td>PC/laptop at each location</td>
+  </tr>
+  <tr>
+    <td style="color:var(--green);">Gateway Hub</td>
+    <td><code>gateway/gateway_hub.py</code></td>
+    <td>Central relay &mdash; receives packets from any gateway, relays to all others</td>
+    <td>Cloud VPS, home server, or any always-on PC</td>
+  </tr>
+</table>
+
+<!-- ─── How It Works ─── -->
+
+<h3>How It Works &mdash; Step by Step</h3>
+<ol style="color:var(--dim); padding-left:20px;">
+  <li>A node on Island A sends an encrypted message destined for a node on Island B</li>
+  <li>The repeater on Island A receives the packet over LoRa radio &mdash; MeshCore processes it normally (routing, forwarding)</li>
+  <li>Because <strong>gateway mode</strong> is enabled, the repeater also outputs the raw packet bytes over USB serial as <code>PKT,&lt;hex&gt;</code></li>
+  <li>The Python gateway client (<code>gateway.py</code>) reads this line and sends it to the central hub via WebSocket</li>
+  <li>The hub (<code>gateway_hub.py</code>) relays the packet to <strong>all other connected gateways</strong></li>
+  <li>Gateway Client B receives the packet and injects it into Island B's mesh via <code>PKT,&lt;hex&gt;</code> over serial</li>
+  <li>The repeater on Island B transmits the raw packet over LoRa radio</li>
+  <li>The destination node receives and decrypts the message &mdash; end-to-end encryption preserved</li>
+</ol>
+
+<!-- ─── Security ─── -->
+
+<h3>Security Model</h3>
+<table>
+  <tr><th>Layer</th><th>Protection</th></tr>
+  <tr><td style="color:var(--green);">Message Content</td><td>AES-128-CTR encrypted on-device. Hub and gateways <strong>never</strong> see plaintext.</td></tr>
+  <tr><td style="color:var(--cyan);">Hub Access</td><td>Optional authentication key (<code>--key</code>) &mdash; only gateways with the correct key can join.</td></tr>
+  <tr><td style="color:var(--orange);">Transport</td><td>WebSocket (ws://) by default. Use <code>wss://</code> with a TLS reverse proxy (nginx/caddy) for encrypted transport.</td></tr>
+  <tr><td style="color:var(--dim);">Network</td><td>For maximum security, run the hub on a VPN or use SSH tunnels between sites.</td></tr>
+</table>
+
+<div class="info-box orange">
+  <p><strong>Important:</strong> The hub auth key prevents <em>unauthorized gateways</em> from connecting, but it does not encrypt the WebSocket traffic itself. For sensitive deployments, always use <code>wss://</code> (TLS) or a VPN to protect the transport layer.</p>
+</div>
+
+<!-- ─── Serial Protocol ─── -->
+
+<h3>Serial Protocol (Repeater &harr; Gateway Client)</h3>
+<table>
+  <tr><th>Direction</th><th>Format</th><th>Description</th></tr>
+  <tr><td style="color:var(--green);">Repeater &rarr; Client</td><td><code>PKT,&lt;hex&gt;</code></td><td>Raw radio packet forwarded as hex string (auto when gateway mode ON)</td></tr>
+  <tr><td style="color:var(--cyan);">Client &rarr; Repeater</td><td><code>PKT,&lt;hex&gt;</code></td><td>Inject raw packet into local mesh via radio transmission</td></tr>
+  <tr><td style="color:var(--dim);">Config</td><td><code>GATEWAY ON</code></td><td>Enable gateway mode (gateway.py sends this automatically on start)</td></tr>
+  <tr><td style="color:var(--dim);">Config</td><td><code>GATEWAY OFF</code></td><td>Disable gateway mode (sent automatically on shutdown)</td></tr>
+</table>
+
+<!-- ─── WebSocket Protocols ─── -->
+
+<h3>WebSocket Protocol</h3>
+<p>All WebSocket messages are JSON. The hub understands three message types:</p>
+
+<h4>Authentication (Gateway &rarr; Hub)</h4>
+<pre>{
+  <span class="string">"type"</span>:       <span class="string">"auth"</span>,
+  <span class="string">"gateway_id"</span>: <span class="string">"3f8a1b2c"</span>,       <span class="comment">// Unique ID (auto-generated)</span>
+  <span class="string">"name"</span>:       <span class="string">"Base Camp"</span>,      <span class="comment">// Friendly name (--name flag)</span>
+  <span class="string">"key"</span>:        <span class="string">"MySecretKey"</span>     <span class="comment">// Hub auth key (--hub-key flag)</span>
+}</pre>
+
+<h4>Auth Response (Hub &rarr; Gateway)</h4>
+<pre>{
+  <span class="string">"type"</span>:    <span class="string">"auth_result"</span>,
+  <span class="string">"success"</span>: <span class="keyword">true</span>,
+  <span class="string">"peers"</span>:   <span class="number">2</span>                   <span class="comment">// Number of other gateways online</span>
+}</pre>
+
+<h4>Packet Relay (bidirectional)</h4>
+<pre>{
+  <span class="string">"type"</span>:   <span class="string">"pkt"</span>,
+  <span class="string">"data"</span>:   <span class="string">"A50012..."</span>,        <span class="comment">// Hex-encoded raw radio packet</span>
+  <span class="string">"origin"</span>: <span class="string">"3f8a1b2c"</span>          <span class="comment">// Source gateway ID (prevents echo loops)</span>
+}</pre>
+
+<h4>Peer Events (Hub &rarr; Gateway)</h4>
+<pre>{
+  <span class="string">"type"</span>: <span class="string">"peer_joined"</span>,        <span class="comment">// or "peer_left"</span>
+  <span class="string">"name"</span>: <span class="string">"Ridge Post"</span>,
+  <span class="string">"peers"</span>: <span class="number">3</span>                    <span class="comment">// Total gateways now online</span>
+}</pre>
+
+<!-- ─── Dedup ─── -->
+
+<h3>Deduplication</h3>
+<p>Both the hub and each gateway maintain time-expiring hash sets to prevent packets from bouncing in loops:</p>
+<table>
+  <tr><th>Component</th><th>Buffer Size</th><th>TTL</th></tr>
+  <tr><td>Gateway Client</td><td>256 entries</td><td>30 seconds</td></tr>
+  <tr><td>Gateway Hub</td><td>512 entries</td><td>30 seconds</td></tr>
+</table>
+<p>Additionally, the <code>origin</code> field in each packet prevents a gateway from re-processing packets it originally sent.</p>
+
+<!-- ─── Setup Guide ─── -->
+
+<h3>Complete Setup Guide</h3>
+
+<h4>Step 1: Flash the Repeaters</h4>
+<p>Each location needs a repeater board (LoRa32 or Heltec V3) connected to a PC via USB.</p>
+<pre><span class="comment"># Flash a LoRa32 as a repeater</span>
+pio run -e lora32 --target upload
+
+<span class="comment"># Configure via serial (115200 baud):</span>
+ID 0003                      <span class="comment"># Unique node ID for this repeater</span>
+KEY DONTSHARETHEKEY!         <span class="comment"># Must match ALL nodes in the mesh</span>
+SAVE</pre>
+
+<div class="info-box cyan">
+  <p><strong>Key rule:</strong> All nodes across all mesh islands must share the same AES key. The key is what makes them one logical mesh network, even if they're physically separated.</p>
+</div>
+
+<h4>Step 2: Set Up the Hub Server</h4>
+<p>The hub runs on any always-on machine with a public IP or port forwarding. It does <strong>not</strong> need a LoRa radio &mdash; it's purely a network relay.</p>
+<pre><span class="comment"># On your server/VPS:</span>
+cd gateway/
+pip install -r requirements.txt
+
+<span class="comment"># Start hub (open, no authentication)</span>
+python gateway_hub.py --listen <span class="number">9000</span>
+
+<span class="comment"># Start hub WITH authentication (recommended)</span>
+python gateway_hub.py --listen <span class="number">9000</span> --key <span class="string">MySecretMeshKey</span></pre>
+
+<h4>Step 3: Connect Gateways to the Hub</h4>
+<p>At each location, run <code>gateway.py</code> pointing to the hub:</p>
+<pre><span class="comment"># At Location A:</span>
+python gateway.py --port COM3 --hub ws://your-server.com:<span class="number">9000</span> \
+    --hub-key <span class="string">MySecretMeshKey</span> --name <span class="string">"Base Camp"</span>
+
+<span class="comment"># At Location B:</span>
+python gateway.py --port COM5 --hub ws://your-server.com:<span class="number">9000</span> \
+    --hub-key <span class="string">MySecretMeshKey</span> --name <span class="string">"Ridge Post"</span>
+
+<span class="comment"># At Location C:</span>
+python gateway.py --port /dev/ttyUSB0 --hub ws://your-server.com:<span class="number">9000</span> \
+    --hub-key <span class="string">MySecretMeshKey</span> --name <span class="string">"Town HQ"</span></pre>
+
+<p>That's it. The gateway automatically:</p>
+<ul style="color:var(--dim); padding-left:20px;">
+  <li>Opens the serial port and sends <code>GATEWAY ON</code> to the repeater</li>
+  <li>Connects to the hub and authenticates</li>
+  <li>Forwards radio packets to the hub, and injects hub packets into the local mesh</li>
+  <li>Reconnects automatically if the hub or serial connection drops</li>
+  <li>Sends <code>GATEWAY OFF</code> on graceful shutdown (Ctrl+C)</li>
+</ul>
+
+<h4>Step 4: Network Configuration</h4>
+<div class="info-box orange">
+  <p><strong>Port forwarding:</strong> The hub server needs its WebSocket port (default 9000) accessible from the internet. If behind a router, forward port 9000 to the hub PC. For production deployments, use a TLS reverse proxy (nginx/caddy) for <code>wss://</code> encrypted transport.</p>
+</div>
+
+<!-- ─── Advanced: Direct Peer Mode ─── -->
+
+<h3>Advanced: Direct Peer-to-Peer Mode</h3>
+<p>For two-site setups or when you don't want a central hub, gateways can connect directly to each other:</p>
+<pre><span class="comment"># Site A (listens for inbound connections)</span>
+python gateway.py --port COM3 --listen <span class="number">9000</span>
+
+<span class="comment"># Site B (connects to Site A)</span>
+python gateway.py --port COM5 --listen <span class="number">9001</span> --peers ws://siteA-ip:<span class="number">9000</span></pre>
+<p style="color:var(--dim);">In this mode, each gateway must know every other gateway's address. For 3+ sites, the hub mode is strongly recommended.</p>
+
+<!-- ─── Topology ─── -->
+
+<h3>Topology Options</h3>
+<table>
+  <tr><th>Topology</th><th>Mode</th><th>Description</th><th>Best For</th></tr>
+  <tr><td style="color:var(--cyan);">Star (Hub)</td><td><code>--hub</code></td><td>All gateways connect to one central hub</td><td>3+ sites, simplest setup, recommended</td></tr>
+  <tr><td style="color:var(--green);">Direct Pair</td><td><code>--peers</code></td><td>Two gateways connect directly</td><td>Two-site deployments</td></tr>
+  <tr><td style="color:var(--orange);">Full Mesh</td><td><code>--peers</code></td><td>Every gateway connects to every other</td><td>Maximum resilience (complex config)</td></tr>
+</table>
+
+<!-- ─── CLI Reference ─── -->
+
+<h3>CLI Reference</h3>
+
+<h4>gateway.py (runs at each site)</h4>
+<table>
+  <tr><th>Flag</th><th>Description</th><th>Example</th></tr>
+  <tr><td><code>--port, -p</code></td><td>Serial port to repeater</td><td><code>--port COM3</code></td></tr>
+  <tr><td><code>--baud, -b</code></td><td>Baud rate (default: 115200)</td><td><code>--baud 115200</code></td></tr>
+  <tr><td><code>--hub</code></td><td>Hub server WebSocket URL</td><td><code>--hub ws://server:9000</code></td></tr>
+  <tr><td><code>--hub-key</code></td><td>Authentication key for hub</td><td><code>--hub-key MySecret</code></td></tr>
+  <tr><td><code>--name, -n</code></td><td>Friendly name for this gateway</td><td><code>--name "Base Camp"</code></td></tr>
+  <tr><td><code>--listen, -l</code></td><td>Local WebSocket port (peer mode)</td><td><code>--listen 9000</code></td></tr>
+  <tr><td><code>--peers</code></td><td>Direct peer URLs (peer mode)</td><td><code>--peers ws://ip:9000</code></td></tr>
+  <tr><td><code>--list-ports</code></td><td>List serial ports and exit</td><td><code>--list-ports</code></td></tr>
+</table>
+
+<h4>gateway_hub.py (runs once, centrally)</h4>
+<table>
+  <tr><th>Flag</th><th>Description</th><th>Example</th></tr>
+  <tr><td><code>--listen, -l</code></td><td>WebSocket listen port</td><td><code>--listen 9000</code></td></tr>
+  <tr><td><code>--key, -k</code></td><td>Authentication key (gateways must match)</td><td><code>--key MySecret</code></td></tr>
+</table>
+
+<!-- ─── OLED ─── -->
+
+<h3>OLED Gateway Indicator</h3>
+<p>When gateway mode is active, the repeater OLED displays <strong>GW</strong> in the top-right status area instead of the BLE indicator. The STATUS serial command and BLE status response also include the gateway state.</p>
+
+<!-- ─── File Structure ─── -->
+
+<h3>Gateway File Structure</h3>
+<pre>
+gateway/
+  <span style="color:var(--cyan);">gateway.py</span>          <span class="comment"># Gateway client (runs at each site with a repeater)</span>
+  <span style="color:var(--green);">gateway_hub.py</span>      <span class="comment"># Central hub server (runs once on a server)</span>
+  <span style="color:var(--dim);">requirements.txt</span>    <span class="comment"># Python dependencies: pyserial, websockets</span>
+</pre>
+
+</section>
+
+<!-- ═══════════════ SOLAR MODE ═══════════════ -->
+<section id="solar">
+<h2>17. Solar / Low-Power Repeater Mode</h2>
+
+<p>Remote repeater nodes on hilltops or rooftops often need to run indefinitely from a small solar panel and an 18650 battery. Solar mode dramatically reduces power consumption by disabling non-essential peripherals and using the SX1262's hardware duty-cycle RX.</p>
+
+<div class="info-box orange">
+  <p><strong>SX1262 only:</strong> Solar mode requires the SX1262 radio's hardware duty-cycle RX feature. It is available on <strong>Heltec V3</strong> and <strong>Heltec V4</strong> boards. The LoRa32 (SX1276) does not support this mode.</p>
+</div>
+
+<h3>Power Budget</h3>
+<table>
+  <tr><th>Component</th><th>Normal Mode</th><th>Solar Mode</th></tr>
+  <tr><td>ESP32-S3 (CPU)</td><td>~80 mA (active)</td><td>~0.8 mA (light sleep)</td></tr>
+  <tr><td>SX1262 (Radio)</td><td>~10 mA (continuous RX)</td><td>~1.5 mA (duty-cycle RX)</td></tr>
+  <tr><td>OLED Display</td><td>~15 mA</td><td>0 mA (powered off)</td></tr>
+  <tr><td>BLE</td><td>~15 mA</td><td>0 mA (deinitialised)</td></tr>
+  <tr><td><strong>Total average</strong></td><td><strong>~130 mA</strong></td><td><strong>~3&ndash;4 mA</strong></td></tr>
+</table>
+
+<p style="color:var(--dim); margin-top:8px;">
+  With a 3000 mAh 18650: <strong>~36 days</strong> on battery alone.<br>
+  With a 1W solar panel: <strong>indefinite operation</strong>.
+</p>
+
+<h3>How It Works</h3>
+<ul style="color:var(--dim); padding-left:20px;">
+  <li><strong>SX1262 duty-cycle RX</strong> &mdash; the radio autonomously alternates between brief RX windows and deep sleep. When a preamble is detected during an RX window, the radio wakes fully and fires DIO1 to wake the ESP32.</li>
+  <li><strong>ESP32-S3 light sleep</strong> &mdash; the CPU enters light sleep between events. All RAM is preserved, SPI bus stays configured. GPIO interrupts (DIO1, button) wake the CPU instantly.</li>
+  <li><strong>OLED &amp; BLE disabled</strong> &mdash; Vext is powered off (disabling the OLED) and BLE is fully deinitialised, saving ~30 mA and ~60 KB RAM.</li>
+  <li><strong>Reduced heartbeat</strong> &mdash; heartbeats are sent every 60 seconds (vs 30s in normal mode), with longer jitter.</li>
+</ul>
+
+<h3>Activation</h3>
+<pre>
+<span class="comment"># Enable solar mode (persists across reboots)</span>
+<span class="keyword">SOLAR ON</span>
+
+<span class="comment"># Disable solar mode and restore normal operation</span>
+<span class="keyword">SOLAR OFF</span>
+
+<span class="comment"># Check status (works in solar mode)</span>
+<span class="keyword">STATUS</span>
+</pre>
+
+<p>Solar mode is <strong>persisted to EEPROM</strong> &mdash; the node will boot directly into solar mode after a power cycle. No need to re-send the command.</p>
+
+<h3>Behaviour in Solar Mode</h3>
+<table>
+  <tr><th>Feature</th><th>Behaviour</th></tr>
+  <tr><td>OLED display</td><td>Off. Press the PRG button to show status for 10 seconds.</td></tr>
+  <tr><td>BLE (phone app)</td><td>Disabled &mdash; phone app cannot connect.</td></tr>
+  <tr><td>LED</td><td>Single brief blink every heartbeat (60s) as sign-of-life.</td></tr>
+  <tr><td>Serial commands</td><td>Only <code>SOLAR OFF</code>, <code>STATUS</code>, and <code>PKT,</code> (gateway) are accepted.</td></tr>
+  <tr><td>Mesh routing</td><td>Fully functional &mdash; packets are received, forwarded, and routed normally.</td></tr>
+  <tr><td>Gateway mode</td><td>Still works if previously enabled &mdash; <code>PKT,</code> forwarding over serial continues.</td></tr>
+  <tr><td>GPIO relays</td><td>Configured but CMD processing continues normally on received packets.</td></tr>
+</table>
+
+<h3>Recommended Hardware Setup</h3>
+<ul style="color:var(--dim); padding-left:20px;">
+  <li><strong>Board:</strong> Heltec V4 (28 dBm TX power, native solar input, 16 MB flash)</li>
+  <li><strong>Battery:</strong> 18650 Li-Ion, 3000+ mAh (protected cell recommended)</li>
+  <li><strong>Solar panel:</strong> 5V, 1W minimum (e.g. 110&times;60mm panel). Connect to the Heltec V4's solar input pad.</li>
+  <li><strong>Enclosure:</strong> IP65 waterproof box with cable glands for antenna and solar panel.</li>
+  <li><strong>Antenna:</strong> External antenna with SMA pigtail for best range.</li>
+</ul>
+
+<div class="info-box green">
+  <p><strong>Deployment tip:</strong> Flash the node, set the ID and AES key, send <code>SOLAR ON</code>, then disconnect USB. The node is now a fully autonomous solar-powered mesh repeater. Reconnect USB and send <code>SOLAR OFF</code> when you need to reconfigure.</p>
+</div>
+
+</section>
+
+<!-- ═══════════════ TELEGRAM ═══════════════ -->
+<section id="telegram">
+<h2>18. Telegram Alerts (Android App)</h2>
+
+<p>The Android app can forward <strong>group mesh messages</strong> and <strong>SOS emergencies</strong> to a Telegram chat via a bot. This lets family members, a base-camp coordinator, or anyone with Telegram receive real-time alerts — even if they are miles away with no LoRa hardware.</p>
+
+<div class="callout">
+  <strong>Privacy model:</strong> decryption happens entirely on your phone. The hub server never sees plaintext. Your AES mesh key never leaves your device.
+</div>
+
+<h3>How it works</h3>
+<ul>
+  <li>Every group in the mesh uses a shared AES key (e.g. <code>MyHikingGroup!</code>).</li>
+  <li>When the Android app receives a packet it decrypts it locally using that key.</li>
+  <li>If decryption succeeds <em>and</em> the message is a group broadcast or SOS, it is forwarded to your Telegram bot via a standard HTTPS POST.</li>
+  <li>Direct node-to-node messages are never forwarded — they stay private.</li>
+  <li><strong>Deduplication:</strong> if several group members have mobile signal and all receive the same packet, only one phone actually sends to Telegram (the first one wins; the others detect the message is already there and skip).</li>
+</ul>
+
+<h3>What gets forwarded</h3>
+<table>
+  <tr><th>Message type</th><th>Forwarded?</th><th>Format in Telegram</th></tr>
+  <tr><td>Group broadcast</td><td>✅ Yes</td><td><code>📡 [NODE1] Hello everyone</code></td></tr>
+  <tr><td>SOS with GPS</td><td>✅ Yes (priority)</td><td><code>🚨 SOS EMERGENCY from NODE1 — maps link</code></td></tr>
+  <tr><td>SOS no GPS fix</td><td>✅ Yes (priority)</td><td><code>🚨 SOS EMERGENCY from NODE1 (no GPS fix)</code></td></tr>
+  <tr><td>Direct message</td><td>❌ No</td><td>Stays private between two nodes</td></tr>
+  <tr><td>Position ping</td><td>❌ No</td><td>Internal routing packet</td></tr>
+</table>
+
+<h3>Step-by-step setup</h3>
+
+<h4>Step 1 — Create a Telegram bot</h4>
+<ol>
+  <li>Open Telegram and search for <strong>@BotFather</strong>.</li>
+  <li>Send <code>/newbot</code> and follow the prompts to name your bot.</li>
+  <li>BotFather will reply with a <strong>bot token</strong> that looks like:<br>
+    <code>123456789:ABCdefGHIjklMNOpqrSTUvwxYZ</code><br>
+    Copy this — you will need it in the app.</li>
+</ol>
+
+<h4>Step 2 — Get your Chat ID</h4>
+<ol>
+  <li>Add your bot to a Telegram group, or start a private chat with it and send any message.</li>
+  <li>In a browser, open:<br>
+    <code>https://api.telegram.org/bot&lt;YOUR_TOKEN&gt;/getUpdates</code></li>
+  <li>Look for <code>"chat":{"id":</code> in the JSON response. That number is your <strong>Chat ID</strong>.</li>
+  <li>For a group it will be a <em>negative</em> number, e.g. <code>-1001234567890</code>.</li>
+</ol>
+
+<h4>Step 3 — Configure in the app</h4>
+<ol>
+  <li>Open the Android app → <strong>Settings</strong> tab.</li>
+  <li>Toggle <strong>Telegram Alerts</strong> on.</li>
+  <li>Enter your bot token and chat ID.</li>
+  <li>Tap <strong>Save</strong> then <strong>Test</strong> — a confirmation message should appear in your Telegram chat immediately.</li>
+</ol>
+
+<div class="callout">
+  <strong>Multiple groups, one hub:</strong> each group configures their own bot in their own copy of the app. The hub server is never involved — it only relays encrypted packets.
+</div>
+
+<h3>T-Deck and other standalone devices</h3>
+<p>Devices running the firmware directly (T-Deck, LoRa32, Heltec) are completely unaffected by the Telegram feature. They send and receive mesh messages as normal. If a group member with an Android phone happens to receive the same message and has mobile signal, the forwarding happens transparently — the T-Deck user never knows and nothing changes on their device.</p>
+
+</section>
+
+<!-- ═══════════════ THEME ═══════════════ -->
+<section id="theme">
+<h2>19. Colour Theme Reference</h2>
+
+<p>Consistent colour palette used across the TFT display, OLED, and Android app.</p>
+
+<h3>TFT Display Colours (RGB565)</h3>
+<div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap:8px;">
+  <div class="color-row"><div class="color-swatch" style="background:#000;"></div> <code>0x0000</code> <span style="color:var(--dim);">Background (Pure Black)</span></div>
+  <div class="color-row"><div class="color-swatch" style="background:#101820;"></div> <code>0x10A2</code> <span style="color:var(--dim);">Panel</span></div>
+  <div class="color-row"><div class="color-swatch" style="background:#0a1a30;"></div> <code>0x0926</code> <span style="color:var(--dim);">Header</span></div>
+  <div class="color-row"><div class="color-swatch" style="background:#00e5ff;"></div> <code>0x07FF</code> <span style="color:var(--dim);">Accent (Cyan)</span></div>
+  <div class="color-row"><div class="color-swatch" style="background:#fff;"></div> <code>0xFFFF</code> <span style="color:var(--dim);">Text (White)</span></div>
+  <div class="color-row"><div class="color-swatch" style="background:#888;"></div> <code>0x8410</code> <span style="color:var(--dim);">Dim (Mid Grey)</span></div>
+  <div class="color-row"><div class="color-swatch" style="background:#444;"></div> <code>0x4208</code> <span style="color:var(--dim);">Faint (Dark Grey)</span></div>
+  <div class="color-row"><div class="color-swatch" style="background:#00ff00;"></div> <code>0x07E0</code> <span style="color:var(--dim);">Good (Green)</span></div>
+  <div class="color-row"><div class="color-swatch" style="background:#ff8c00;"></div> <code>0xFD20</code> <span style="color:var(--dim);">Warn (Orange)</span></div>
+  <div class="color-row"><div class="color-swatch" style="background:#ff0000;"></div> <code>0xF800</code> <span style="color:var(--dim);">Bad (Red)</span></div>
+  <div class="color-row"><div class="color-swatch" style="background:#0a3040;"></div> <code>0x1126</code> <span style="color:var(--dim);">Bubble Incoming (Teal)</span></div>
+  <div class="color-row"><div class="color-swatch" style="background:#0a3010;"></div> <code>0x0320</code> <span style="color:var(--dim);">Bubble Outgoing (Green)</span></div>
+  <div class="color-row"><div class="color-swatch" style="background:#800000;"></div> <code>0x8000</code> <span style="color:var(--dim);">Bubble SOS (Dark Red)</span></div>
+  <div class="color-row"><div class="color-swatch" style="background:#1a2a3a;"></div> <code>0x2104</code> <span style="color:var(--dim);">Selected Item</span></div>
+  <div class="color-row"><div class="color-swatch" style="background:#ffe000;"></div> <code>0xFFE0</code> <span style="color:var(--dim);">Cursor (Yellow)</span></div>
+</div>
+
+<h3>Android App Colours</h3>
+<div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap:8px; margin-top:12px;">
+  <div class="color-row"><div class="color-swatch" style="background:#00E5FF;"></div> <code>MeshCyan</code> <span style="color:var(--dim);">Primary accent</span></div>
+  <div class="color-row"><div class="color-swatch" style="background:#00FF41;"></div> <code>MeshGreen</code> <span style="color:var(--dim);">Success / ON</span></div>
+  <div class="color-row"><div class="color-swatch" style="background:#FF8C00;"></div> <code>MeshOrange</code> <span style="color:var(--dim);">Warnings</span></div>
+  <div class="color-row"><div class="color-swatch" style="background:#FF2D2D;"></div> <code>MeshRed</code> <span style="color:var(--dim);">Errors / SOS</span></div>
+  <div class="color-row"><div class="color-swatch" style="background:#4488FF;"></div> <code>MeshBlue</code> <span style="color:var(--dim);">Incoming messages</span></div>
+  <div class="color-row"><div class="color-swatch" style="background:#8898A8;"></div> <code>MeshGrey</code> <span style="color:var(--dim);">Secondary text</span></div>
+  <div class="color-row"><div class="color-swatch" style="background:#0A0E14;"></div> <code>MeshDarkBg</code> <span style="color:var(--dim);">Background</span></div>
+  <div class="color-row"><div class="color-swatch" style="background:#131820;"></div> <code>MeshSurface</code> <span style="color:var(--dim);">Card surfaces</span></div>
+</div>
+
+<h3>Signal Strength Colour Coding</h3>
+<table>
+  <tr><th>RSSI Range</th><th>Colour</th><th>Meaning</th></tr>
+  <tr><td>&gt; -80 dBm</td><td style="color:var(--green);">Green</td><td>Excellent signal</td></tr>
+  <tr><td>-80 to -100 dBm</td><td style="color:var(--orange);">Orange</td><td>Moderate signal</td></tr>
+  <tr><td>&lt; -100 dBm</td><td style="color:var(--red);">Red</td><td>Weak signal</td></tr>
+</table>
+</section>
+
+</div>
+
+<!-- Footer -->
+<div style="background:var(--panel); border-top:1px solid var(--faint); padding:30px 40px; text-align:center; color:var(--faint); font-size:0.85em;">
+  <p>LoRa Mesh Communicator v3.1 &mdash; MeshCore Architecture</p>
+  <p>T-Deck Plus &bull; LoRa32 T3 V1.6.1 &bull; Heltec WiFi LoRa 32 V3 &bull; Heltec WiFi LoRa 32 V4</p>
+  <p style="margin-top:8px;">Documentation generated March 2026</p>
+</div>
+
+</body>
+</html>

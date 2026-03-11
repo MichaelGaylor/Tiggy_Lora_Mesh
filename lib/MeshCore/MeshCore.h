@@ -1,0 +1,207 @@
+// ═══════════════════════════════════════════════════════════════
+// MeshCore - Shared mesh networking library
+// ═══════════════════════════════════════════════════════════════
+// Used by both T-Deck Plus (main.cpp) and repeater nodes.
+// All mesh protocol, crypto, routing, and packet handling
+// lives here — one place to maintain.
+// ═══════════════════════════════════════════════════════════════
+#pragma once
+
+#include <Arduino.h>
+#include <AES.h>
+#include <CTR.h>
+#include <RadioLib.h>
+#include <map>
+#include <vector>
+#include <deque>
+
+// ─── Configuration ───────────────────────────────────────────
+#define LORA_FREQ       868.0
+#define LORA_BW         125.0
+#define LORA_SF         9
+#define LORA_CR         5
+#define LORA_POWER      20
+#define LORA_PREAMBLE   8
+#define LORA_SYNC       0x12
+
+#define EEPROM_SIZE     512
+#define MAX_NODES       20
+#define NODE_ID_LEN     4
+#define MAX_MSG_LEN     200
+#define AES_KEY_LEN     16
+#define TTL_DEFAULT     5         // Increased from 3 for larger meshes
+
+#define ACK_TIMEOUT     3000
+#define MAX_RETRIES     3
+#define HB_INTERVAL     30000UL
+#define HB_INTERVAL_SOLAR 60000UL // Solar mode: 60s heartbeat (saves power)
+#define STALE_TIMEOUT   120000UL  // 2min (was 60s) — less aggressive pruning
+#define ROUTE_TIMEOUT   120000UL
+
+#define DEDUP_SIZE      64        // Increased from 20 — bloom-style dedup
+#define COST_WEIGHT     10
+#define EEPROM_KEY_ADDR 450
+#define EEPROM_MAGIC_ADDR 508
+#define EEPROM_MAGIC_VAL  0xA5
+
+// Scalability tunables
+#define FWD_JITTER_MIN  50        // Min random delay before forward (ms)
+#define FWD_JITTER_MAX  500       // Max random delay before forward (ms)
+#define CHANNEL_BUSY_MS 20        // Listen-before-talk threshold
+#define MAX_AIRTIME_PCT 10        // Max 10% duty cycle per hour
+
+// GPIO
+#define MAX_RELAY_PINS  8
+#define MAX_SENSOR_PINS 6
+
+// ─── Data Structures ─────────────────────────────────────────
+
+struct Route {
+    String   nextHop;
+    uint16_t cost;
+    uint32_t lastSeen;
+    int      rssi;
+};
+
+// Parsed packet header
+struct MeshPacket {
+    uint16_t dest;
+    uint16_t src;
+    uint16_t seq;
+    uint8_t  ttl;
+    String   payload;
+};
+
+// Parsed message fields (from payload string)
+struct MeshMessage {
+    String from;
+    String to;
+    String mid;
+    int    ttl;
+    String route;
+    String encrypted;  // hex-encoded ciphertext
+};
+
+// ─── MeshCore Class ──────────────────────────────────────────
+
+class MeshCore {
+public:
+    // ─── State (public for firmware access) ──────────────────
+    char localID[NODE_ID_LEN + 1]  = "0001";
+    char knownNodes[MAX_NODES][NODE_ID_LEN + 1];
+    uint8_t knownCount = 0;
+    char aes_key_string[AES_KEY_LEN + 1] = "DONTSHARETHEKEY!";
+
+    std::map<String, Route> routingTable;
+    uint16_t seqCounter = 0;
+    volatile bool rxFlag = false;
+    int lastRSSI = 0;
+
+    // Stats
+    unsigned long packetsReceived = 0;
+    unsigned long packetsForwarded = 0;
+    unsigned long cmdsExecuted = 0;
+
+    // ─── Callbacks (set by each firmware) ────────────────────
+    // Called to physically transmit a raw packet
+    typedef void (*TxFunc)(uint8_t* pkt, size_t len);
+    TxFunc onTransmitRaw = nullptr;
+
+    // Called to check if channel is free (for listen-before-talk)
+    typedef bool (*ChannelFreeFunc)();
+    ChannelFreeFunc onChannelFree = nullptr;
+
+    // Called when a new node is discovered
+    typedef void (*NodeDiscoverFunc)(const String& id, int rssi);
+    NodeDiscoverFunc onNodeDiscovered = nullptr;
+
+    // Called when a decrypted message arrives for us
+    typedef void (*MessageFunc)(const String& from, const String& text, int rssi);
+    MessageFunc onMessage = nullptr;
+
+    // Called when a CMD arrives for us
+    typedef void (*CmdFunc)(const String& from, const String& cmdBody);
+    CmdFunc onCmd = nullptr;
+
+    // Called when an ACK arrives
+    typedef void (*AckFunc)(const String& from, const String& mid);
+    AckFunc onAck = nullptr;
+
+    // ─── CRC ─────────────────────────────────────────────────
+    static uint16_t crc16(const uint8_t* data, size_t len, uint16_t seed = 0xFFFF);
+
+    // ─── Crypto ──────────────────────────────────────────────
+    byte* getAESKey();
+    String toHex(const byte* data, int len);
+    void hexToBytes(const String& hex, byte* out, int& outLen);
+    void buildIV(const String& seed, byte* iv);
+    String encryptMsg(const String& msg, const String& iv_seed);
+    String decryptMsg(const String& hexstr, const String& iv_seed);
+    String generateMsgID();
+
+    // ─── Validation ──────────────────────────────────────────
+    bool isValidNodeID(const String& s);
+
+    // ─── Dedup (improved: hash-based for O(1) lookup) ────────
+    bool isDuplicate(const String& mid);
+    void markSeen(const String& mid);
+
+    // ─── Routing ─────────────────────────────────────────────
+    void addNode(const String& id);
+    std::vector<String> splitRoute(const String& route);
+    void updateRouting(const String& from, const String& route, int rssi);
+    void pruneStale();
+    Route* bestRoute(const String& dest);
+
+    // ─── Packet Building ─────────────────────────────────────
+    void transmitPacket(uint16_t dest, const String& payload);
+
+    // ─── Smart Forwarding (with jitter + directed routing) ───
+    void smartForward(const String& from, const String& to,
+                      const String& mid, int ttl,
+                      const String& route, const String& enc,
+                      uint16_t rawDest);
+
+    // ─── Receive Processing ──────────────────────────────────
+    // Call this from your ISR-flagged receive handler
+    // Returns true if a packet was processed
+    bool parseRawPacket(uint8_t* pkt, size_t len, MeshPacket& out);
+    bool parsePayloadFields(const String& payload, MeshMessage& out);
+    void processPacket(const MeshPacket& pkt);
+
+    // ─── Heartbeat ───────────────────────────────────────────
+    void sendHeartbeat();
+
+    // ─── Duty Cycle Tracking ─────────────────────────────────
+    bool canTransmit();   // Returns false if duty cycle exceeded
+
+private:
+    // Dedup: hash ring for O(1) lookups
+    uint32_t dedupHashes[DEDUP_SIZE] = {0};
+    uint8_t  dedupIdx = 0;
+
+    // Duty cycle tracking
+    unsigned long txTimeThisHour = 0;
+    unsigned long hourStart = 0;
+    unsigned long lastTxDuration = 0;
+
+    // Jitter state for pending forwards
+    struct PendingForward {
+        String payload;
+        uint16_t dest;
+        unsigned long sendAt;
+        bool active = false;
+    };
+    static const int MAX_PENDING = 8;
+    PendingForward pendingFwds[MAX_PENDING];
+
+    uint32_t hashMid(const String& mid);
+    bool waitForClearChannel(int maxWaitMs = 200);
+
+public:
+    // Process pending jittered forwards — call from loop()
+    void processPendingForwards();
+};
+
+// Global instance
+extern MeshCore mesh;
