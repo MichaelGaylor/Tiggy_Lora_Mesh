@@ -122,12 +122,20 @@
   <!-- Step 2 -->
   <div class="step">
     <span class="step-num">2</span><h2>Select your board</h2>
+    <p style="color:var(--grey); font-size:0.85rem; margin-top:8px;">
+      <strong style="color:var(--cyan)">Repeater firmware</strong> — headless mesh relay node, no screen needed, configured via serial or BLE.<br>
+      <strong style="color:var(--cyan)">Communicator firmware</strong> — full UI with screen, keyboard, GPS. T-Deck Plus only.
+    </p>
     <select id="boardSelect" onchange="updateManifest()">
-      <option value="">-- Choose your board --</option>
-      <option value="xiao-s3">Seeed XIAO ESP32S3 + Wio-SX1262 (~£10) — ultra-cheap repeater</option>
-      <option value="heltec-v3">Heltec WiFi LoRa 32 V3 (~£18) — repeater with OLED</option>
-      <option value="heltec-v4">Heltec WiFi LoRa 32 V4 (~£20) — best repeater, solar input</option>
-      <option value="tdeck-plus">LilyGO T-Deck Plus (~£55) — full communicator</option>
+      <optgroup label="── Repeater nodes (headless relay) ──">
+        <option value="xiao-s3">Seeed XIAO ESP32S3 + Wio-SX1262 (~£10) — cheapest repeater</option>
+        <option value="lora32">LilyGO LoRa32 T3 V1.6 (~£15) — ESP32 + SX1276 repeater</option>
+        <option value="heltec-v3">Heltec WiFi LoRa 32 V3 (~£18) — repeater with OLED status</option>
+        <option value="heltec-v4">Heltec WiFi LoRa 32 V4 (~£20) — best repeater, 28dBm, solar</option>
+      </optgroup>
+      <optgroup label="── Full communicator ──">
+        <option value="tdeck-plus">LilyGO T-Deck Plus (~£55) — screen + keyboard + GPS</option>
+      </optgroup>
     </select>
     <div id="boardInfo" class="note hidden"></div>
   </div>
@@ -177,10 +185,11 @@ STATUS           <span style="color:var(--grey)">← confirm settings</span></pr
 
 <script>
 const boardInfo = {
-  'xiao-s3': '🟢 Ultra-cheap headless repeater. Tiny 10×21mm. Perfect for hiding in a weatherproof box on a hilltop. No screen.',
-  'heltec-v3': '🟡 Compact repeater with 0.96" OLED status display. Good all-rounder.',
-  'heltec-v4': '🔵 Best repeater option. 28dBm TX power (2× range), native solar input, 16MB flash.',
-  'tdeck-plus': '⌨️ Full communicator with 2.8" screen, keyboard, GPS, and trackball. The flagship device.'
+  'xiao-s3':   '📡 REPEATER — Headless mesh relay. Tiny 10×21mm plug-together kit, no soldering. Hide in a weatherproof box on a hilltop.',
+  'lora32':    '📡 REPEATER — LilyGO LoRa32 with 0.96" OLED status screen. Uses SX1276 radio (slightly less sensitive than SX1262).',
+  'heltec-v3': '📡 REPEATER — Heltec V3 with 0.96" OLED. SX1262 radio, good range, compact.',
+  'heltec-v4': '📡 REPEATER — Best repeater. SX1262 + 28dBm PA (double the range), solar input, 16MB flash. Runs indefinitely on a 1W panel.',
+  'tdeck-plus': '📟 COMMUNICATOR — Full device with 2.8" colour screen, physical keyboard, GPS, trackball. Send messages, view mesh map, SOS beacon.'
 };
 
 function updateManifest() {
