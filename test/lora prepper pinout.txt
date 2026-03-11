@@ -1,0 +1,23 @@
+| Peripheral          | Signal              | ESP32 Pin | SPI Bus / Notes              |
+| ------------------- | ------------------- | --------- | ---------------------------- |
+| **Power & GND**     | 3V3                 | 3V3       | Shared 3.3 V rail            |
+|                     | GND                 | GND       | Shared ground                |
+| **LoRa RA-02**      | SCK                 | GPIO 18   | VSPI SCK                     |
+|                     | MOSI                | GPIO 23   | VSPI MOSI                    |
+|                     | MISO                | GPIO 19   | VSPI MISO (status reads)     |
+|                     | NSS (CS)            | GPIO 5    | VSPI chip-select             |
+|                     | RESET               | GPIO 14   |                              |
+|                     | DIO0                | GPIO 26   | IRQ / data-ready             |
+| **ST7789 Display**  | SCL                 | GPIO 27   | HSPI SCK                     |
+|                     | SDA                 | GPIO 22   | HSPI MOSI                    |
+|                     | RES (RST)           | GPIO 4    | Reset                        |
+|                     | DC (D/C)            | GPIO 2    | Data/Command                 |
+|                     | BLK (LED backlight) | GPIO 21   | PWM-capable for dimming(LEDC)|
+| **Rotary Encoder**  | CLK                 | GPIO 32   |                              |
+|                     | DT                  | GPIO 33   |                              |
+|                     | SW                  | GPIO 25   |                              |
+| **GPS (G28U7FTTL)** | TX → ESP32 RX2      | GPIO 16   | HardwareSerial 2 RX          |
+|                     | RX ← ESP32 TX2      | GPIO 17   | HardwareSerial 2 TX -optional|
+| **Backlight PWM**   | (same as BLK)       | GPIO 21   | LEDC channel 7               |
+| **USB-UART Debug**  | TX0                 | GPIO 1    | Serial console @ 115200 baud |
+|                     | RX0                 | GPIO 3    |                              |

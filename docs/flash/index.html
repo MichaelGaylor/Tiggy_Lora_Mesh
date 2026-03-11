@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LoRa Mesh — Web Flasher</title>
+<script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js"></script>
+<style>
+  :root {
+    --cyan: #00e5ff;
+    --green: #00e676;
+    --bg: #0a1628;
+    --surface: #0d1f3c;
+    --text: #e0e0e0;
+    --grey: #607d8b;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    padding: 40px 20px;
+  }
+  .container { max-width: 700px; margin: 0 auto; }
+  h1 { color: var(--cyan); font-size: 2rem; margin-bottom: 8px; }
+  .subtitle { color: var(--grey); margin-bottom: 40px; }
+  .step {
+    background: var(--surface);
+    border: 1px solid #1a3a5c;
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 20px;
+  }
+  .step-num {
+    display: inline-block;
+    background: var(--cyan);
+    color: #000;
+    font-weight: bold;
+    width: 28px; height: 28px;
+    border-radius: 50%;
+    text-align: center;
+    line-height: 28px;
+    margin-right: 10px;
+    font-size: 14px;
+  }
+  .step h2 { display: inline; font-size: 1.1rem; color: var(--cyan); }
+  .step p { margin-top: 12px; color: var(--grey); line-height: 1.6; }
+  .boards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-top: 16px; }
+  .board {
+    background: #0a1628;
+    border: 2px solid #1a3a5c;
+    border-radius: 10px;
+    padding: 16px;
+    cursor: pointer;
+    transition: border-color 0.2s;
+  }
+  .board:hover, .board.selected { border-color: var(--cyan); }
+  .board.selected { background: rgba(0,229,255,0.05); }
+  .board h3 { color: var(--text); margin-bottom: 4px; font-size: 0.95rem; }
+  .board .price { color: var(--green); font-size: 0.85rem; margin-bottom: 8px; }
+  .board .desc { color: var(--grey); font-size: 0.8rem; line-height: 1.4; }
+  .board input[type=radio] { display: none; }
+  .flash-btn {
+    margin-top: 24px;
+    text-align: center;
+  }
+  esp-web-install-button {
+    --esp-tools-button-color: var(--cyan);
+    --esp-tools-button-text-color: #000;
+  }
+  .warning {
+    background: rgba(255,152,0,0.1);
+    border: 1px solid rgba(255,152,0,0.3);
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-top: 16px;
+    color: #ffcc80;
+    font-size: 0.85rem;
+  }
+  .note {
+    background: rgba(0,229,255,0.05);
+    border: 1px solid rgba(0,229,255,0.2);
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-top: 12px;
+    font-size: 0.85rem;
+    color: var(--grey);
+  }
+  a { color: var(--cyan); }
+  .hidden { display: none; }
+  select {
+    background: #0a1628;
+    color: var(--text);
+    border: 1px solid #1a3a5c;
+    border-radius: 8px;
+    padding: 10px 16px;
+    font-size: 1rem;
+    width: 100%;
+    margin-top: 12px;
+    cursor: pointer;
+  }
+  select:focus { outline: none; border-color: var(--cyan); }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <h1>⚡ LoRa Mesh Web Flasher</h1>
+  <p class="subtitle">Flash your ESP32 LoRa board directly from your browser — no software to install.</p>
+  <p class="warning">⚠️ Requires <strong>Chrome or Edge</strong> on desktop. Does not work on Firefox or mobile.</p>
+
+  <!-- Step 1 -->
+  <div class="step">
+    <span class="step-num">1</span><h2>Plug in your board</h2>
+    <p>Connect your ESP32 board via USB. Windows may need the <a href="https://www.silabs.com/developers/usb-to-uart-bridge-vcp-drivers" target="_blank">CP210x driver</a> if it's not recognised.</p>
+    <div class="note">
+      💡 <strong>XIAO ESP32S3 + Wio-SX1262:</strong> Hold the BOOT button while plugging in if it doesn't appear as a port.
+    </div>
+  </div>
+
+  <!-- Step 2 -->
+  <div class="step">
+    <span class="step-num">2</span><h2>Select your board</h2>
+    <select id="boardSelect" onchange="updateManifest()">
+      <option value="">-- Choose your board --</option>
+      <option value="xiao-s3">Seeed XIAO ESP32S3 + Wio-SX1262 (~£10) — ultra-cheap repeater</option>
+      <option value="heltec-v3">Heltec WiFi LoRa 32 V3 (~£18) — repeater with OLED</option>
+      <option value="heltec-v4">Heltec WiFi LoRa 32 V4 (~£20) — best repeater, solar input</option>
+      <option value="tdeck-plus">LilyGO T-Deck Plus (~£55) — full communicator</option>
+    </select>
+    <div id="boardInfo" class="note hidden"></div>
+  </div>
+
+  <!-- Step 3 -->
+  <div class="step">
+    <span class="step-num">3</span><h2>Flash firmware</h2>
+    <p>Click the button below, select your COM port, and the latest firmware will be installed automatically.</p>
+    <div class="flash-btn">
+      <esp-web-install-button id="installBtn" manifest="" style="display:none">
+        <button slot="activate" style="
+          background: var(--cyan);
+          color: #000;
+          border: none;
+          border-radius: 8px;
+          padding: 14px 32px;
+          font-size: 1.1rem;
+          font-weight: bold;
+          cursor: pointer;
+          margin-top: 16px;
+        ">🔌 Connect &amp; Flash</button>
+        <span slot="unsupported" style="color:#ff5252">
+          Your browser doesn't support WebSerial. Please use Chrome or Edge on desktop.
+        </span>
+      </esp-web-install-button>
+      <p id="selectFirst" style="color:var(--grey); margin-top:16px;">← Select a board first</p>
+    </div>
+  </div>
+
+  <!-- Step 4 -->
+  <div class="step">
+    <span class="step-num">4</span><h2>Configure your node</h2>
+    <p>After flashing, open a serial monitor at <strong>115200 baud</strong> and set your node up:</p>
+    <pre style="background:#060e1a; padding:12px; border-radius:8px; margin-top:12px; font-size:0.85rem; color:var(--cyan); overflow-x:auto;">
+ID A1B2          <span style="color:var(--grey)">← set your node ID (4 hex chars, unique per node)</span>
+KEY MyGroupKey16 <span style="color:var(--grey)">← set AES key (16 chars, same for all group members)</span>
+FREQ 868.0       <span style="color:var(--grey)">← set frequency (868 EU / 915 US)</span>
+SAVE             <span style="color:var(--grey)">← save to EEPROM</span>
+STATUS           <span style="color:var(--grey)">← confirm settings</span></pre>
+    <div class="note" style="margin-top:12px;">
+      📱 Then pair the Android app via Bluetooth — search for your node's name in the Scan tab.<br><br>
+      📖 <a href="../documentation.html">Read the full manual</a> for all commands and features.
+    </div>
+  </div>
+
+</div>
+
+<script>
+const boardInfo = {
+  'xiao-s3': '🟢 Ultra-cheap headless repeater. Tiny 10×21mm. Perfect for hiding in a weatherproof box on a hilltop. No screen.',
+  'heltec-v3': '🟡 Compact repeater with 0.96" OLED status display. Good all-rounder.',
+  'heltec-v4': '🔵 Best repeater option. 28dBm TX power (2× range), native solar input, 16MB flash.',
+  'tdeck-plus': '⌨️ Full communicator with 2.8" screen, keyboard, GPS, and trackball. The flagship device.'
+};
+
+function updateManifest() {
+  const sel = document.getElementById('boardSelect').value;
+  const btn = document.getElementById('installBtn');
+  const info = document.getElementById('boardInfo');
+  const txt = document.getElementById('selectFirst');
+
+  if (!sel) {
+    btn.style.display = 'none';
+    txt.style.display = 'block';
+    info.classList.add('hidden');
+    return;
+  }
+
+  // Point to the firmware manifest in the GitHub release
+  btn.setAttribute('manifest', `../../firmware/${sel}-manifest.json`);
+  btn.style.display = 'block';
+  txt.style.display = 'none';
+  info.textContent = boardInfo[sel] || '';
+  info.classList.remove('hidden');
+}
+</script>
+</body>
+</html>

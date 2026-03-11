@@ -1,0 +1,728 @@
+#!/usr/bin/env python3
+"""
+LoRa Mesh Gateway Client — GUI
+═══════════════════════════════
+Visual gateway client with mesh topology, packet waterfall, and inspector.
+Connects to a repeater via USB serial and to the hub via WebSocket.
+
+Double-click to run or:  python gateway_gui.py
+"""
+
+import asyncio
+import collections
+import json
+import math
+import queue
+import secrets
+import threading
+import time
+
+import customtkinter as ctk
+import serial
+import serial.tools.list_ports
+import websockets
+
+from gui_common import (COLORS, HexPacketParser, decrypt_message,
+                         detect_serial_ports, format_uptime, rssi_to_color)
+
+# ─── Theme ───────────────────────────────────────────────────
+
+ctk.set_appearance_mode("dark")
+ctk.set_default_color_theme("dark-blue")
+
+
+# ─── Gateway with Event Queue ───────────────────────────────
+
+class PacketDedup:
+    def __init__(self):
+        self._seen: dict[str, float] = {}
+
+    def is_duplicate(self, hex_data: str) -> bool:
+        now = time.time()
+        if len(self._seen) > 256:
+            self._seen = {k: v for k, v in self._seen.items() if now - v < 30}
+        if hex_data in self._seen and now - self._seen[hex_data] < 30:
+            return True
+        self._seen[hex_data] = now
+        return False
+
+
+class GUIGatewayServer:
+    """Gateway server that pushes events to a GUI queue."""
+
+    def __init__(self, serial_port: str, baud: int, hub_url: str | None,
+                 hub_key: str | None, name: str, eq: queue.Queue):
+        self.serial_port = serial_port
+        self.baud = baud
+        self.hub_url = hub_url if hub_url else None
+        self.hub_key = hub_key if hub_key else None
+        self.gateway_id = secrets.token_hex(4)
+        self.name = name or f"gw-{self.gateway_id[:6]}"
+        self.eq = eq
+        self.dedup = PacketDedup()
+        self.serial_conn: serial.Serial | None = None
+        self.hub_ws = None
+        self.running = True
+
+        self.packets_from_radio = 0
+        self.packets_from_peers = 0
+        self.packets_to_radio = 0
+        self.packets_to_peers = 0
+
+    def _emit(self, event_type: str, **kwargs):
+        self.eq.put({"type": event_type, "time": time.time(), **kwargs})
+
+    def open_serial(self):
+        try:
+            self.serial_conn = serial.Serial(self.serial_port, self.baud, timeout=0.1)
+            self._emit("log", text=f"Serial opened: {self.serial_port} @ {self.baud}", color=COLORS["good"])
+            time.sleep(2)
+            self.serial_conn.write(b"GATEWAY ON\n")
+            time.sleep(0.5)
+            while self.serial_conn.in_waiting:
+                line = self.serial_conn.readline().decode("ascii", errors="replace").strip()
+                if line:
+                    self._emit("serial_line", text=line)
+        except serial.SerialException as e:
+            self._emit("log", text=f"Serial error: {e}", color=COLORS["bad"])
+            self.running = False
+
+    async def serial_reader(self):
+        loop = asyncio.get_event_loop()
+        buf = b""
+        while self.running:
+            try:
+                data = await loop.run_in_executor(None, self._serial_read_chunk)
+                if not data:
+                    continue
+                buf += data
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    line_str = line.decode("ascii", errors="replace").strip()
+                    if line_str.startswith("PKT,"):
+                        hex_data = line_str[4:]
+                        if self.dedup.is_duplicate(hex_data):
+                            continue
+                        self.packets_from_radio += 1
+                        parsed = HexPacketParser.parse_raw(hex_data)
+                        self._emit("packet_from_radio", hex_data=hex_data, parsed=parsed)
+                        self._emit("stats", **self._stats())
+                        await self.send_to_hub(hex_data)
+                    elif line_str:
+                        self._emit("serial_line", text=line_str)
+            except Exception as e:
+                self._emit("log", text=f"Serial error: {e}", color=COLORS["bad"])
+                await asyncio.sleep(1)
+
+    def _serial_read_chunk(self) -> bytes:
+        if self.serial_conn and self.serial_conn.in_waiting:
+            return self.serial_conn.read(self.serial_conn.in_waiting)
+        time.sleep(0.05)
+        return b""
+
+    def inject_to_radio(self, hex_data: str):
+        if not self.serial_conn:
+            return
+        try:
+            self.serial_conn.write(f"PKT,{hex_data}\n".encode("ascii"))
+            self.packets_to_radio += 1
+        except serial.SerialException:
+            pass
+
+    async def send_to_hub(self, hex_data: str):
+        if not self.hub_ws:
+            return
+        try:
+            msg = json.dumps({"type": "pkt", "data": hex_data, "origin": self.gateway_id})
+            await self.hub_ws.send(msg)
+            self.packets_to_peers += 1
+        except websockets.ConnectionClosed:
+            self.hub_ws = None
+
+    async def connect_to_hub(self):
+        if not self.hub_url:
+            return
+        while self.running:
+            try:
+                self._emit("log", text=f"Connecting to hub: {self.hub_url}", color=COLORS["dim"])
+                async with websockets.connect(self.hub_url) as ws:
+                    self.hub_ws = ws
+                    auth_msg = json.dumps({
+                        "type": "auth", "gateway_id": self.gateway_id,
+                        "name": self.name, "key": self.hub_key or "",
+                    })
+                    await ws.send(auth_msg)
+                    response = await ws.recv()
+                    result = json.loads(response)
+                    if result.get("type") == "auth_result":
+                        if result.get("success"):
+                            peers = result.get("peers", 0)
+                            self._emit("hub_connected", peers=peers)
+                            self._emit("log", text=f"Hub connected! {peers} peer(s) online", color=COLORS["good"])
+                        else:
+                            self._emit("log", text=f"Hub auth failed: {result.get('error', '?')}", color=COLORS["bad"])
+                            await asyncio.sleep(10)
+                            continue
+
+                    async for message in ws:
+                        try:
+                            msg = json.loads(message)
+                        except json.JSONDecodeError:
+                            continue
+                        if msg.get("type") == "pkt":
+                            hex_data = msg.get("data", "")
+                            origin = msg.get("origin", "")
+                            if origin == self.gateway_id or self.dedup.is_duplicate(hex_data):
+                                continue
+                            self.packets_from_peers += 1
+                            parsed = HexPacketParser.parse_raw(hex_data)
+                            self._emit("packet_from_hub", hex_data=hex_data, parsed=parsed)
+                            self._emit("stats", **self._stats())
+                            self.inject_to_radio(hex_data)
+                        elif msg.get("type") == "peer_joined":
+                            self._emit("log", text=f"Peer joined: {msg.get('name', '?')}", color=COLORS["good"])
+                        elif msg.get("type") == "peer_left":
+                            self._emit("log", text=f"Peer left: {msg.get('name', '?')}", color=COLORS["warn"])
+            except (ConnectionRefusedError, OSError, websockets.ConnectionClosed) as e:
+                self._emit("hub_disconnected")
+                self._emit("log", text=f"Hub unavailable: {e}. Retrying...", color=COLORS["warn"])
+            finally:
+                self.hub_ws = None
+            await asyncio.sleep(10)
+
+    def _stats(self) -> dict:
+        return {
+            "radio_rx": self.packets_from_radio,
+            "radio_tx": self.packets_to_radio,
+            "peer_rx": self.packets_from_peers,
+            "peer_tx": self.packets_to_peers,
+            "hub_connected": self.hub_ws is not None,
+        }
+
+    async def run(self):
+        self.open_serial()
+        if not self.running:
+            return
+        tasks = [asyncio.create_task(self.serial_reader())]
+        if self.hub_url:
+            tasks.append(asyncio.create_task(self.connect_to_hub()))
+        try:
+            while self.running:
+                await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            pass
+
+    def shutdown(self):
+        self.running = False
+        if self.serial_conn:
+            try:
+                self.serial_conn.write(b"GATEWAY OFF\n")
+                time.sleep(0.2)
+                self.serial_conn.close()
+            except Exception:
+                pass
+
+
+# ─── Topology Node Physics ──────────────────────────────────
+
+class TopoNode:
+    def __init__(self, node_id: str, is_local=False):
+        self.id = node_id
+        self.x = 0.5 + (hash(node_id) % 100) / 500.0
+        self.y = 0.5 + (hash(node_id + "y") % 100) / 500.0
+        self.vx = 0.0
+        self.vy = 0.0
+        self.rssi = -100
+        self.last_seen = 0.0
+        self.hops = 0
+        self.next_hop = ""
+        self.is_local = is_local
+        self.packets = 0
+
+
+# ─── Client GUI App ─────────────────────────────────────────
+
+class GatewayGUIApp:
+    def __init__(self):
+        self.root = ctk.CTk()
+        self.root.title("LoRa Mesh Gateway Client")
+        self.root.geometry("1050x780")
+        self.root.configure(fg_color=COLORS["bg"])
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        self.event_queue = queue.Queue()
+        self.gateway: GUIGatewayServer | None = None
+        self.async_thread: threading.Thread | None = None
+        self.connected = False
+
+        # Mesh state
+        self.topo_nodes: dict[str, TopoNode] = {}
+        self.topo_edges: dict[tuple[str, str], float] = {}  # (src,dst) -> last_seen
+        self.local_id = "????"
+        self.packet_history: list[dict] = []
+        self.selected_packet: dict | None = None
+        self.particles: list = []
+
+        self.build_ui()
+        self.refresh_ports()
+        self.root.after(50, self.poll_events)
+        self.root.after(33, self.animate_topology)
+
+    # ─── UI Construction ────────────────────────────────────
+
+    def build_ui(self):
+        # Title bar
+        title_frame = ctk.CTkFrame(self.root, fg_color=COLORS["header"], height=40, corner_radius=0)
+        title_frame.pack(fill="x")
+        title_frame.pack_propagate(False)
+        ctk.CTkLabel(title_frame, text="  LoRa Mesh Gateway Client", font=("Consolas", 16, "bold"),
+                      text_color=COLORS["accent"]).pack(side="left", padx=10)
+        self.conn_label = ctk.CTkLabel(title_frame, text="Disconnected", font=("Consolas", 12),
+                                        text_color=COLORS["bad"])
+        self.conn_label.pack(side="right", padx=15)
+
+        # Connection controls
+        conn_frame = ctk.CTkFrame(self.root, fg_color=COLORS["panel"], corner_radius=8)
+        conn_frame.pack(fill="x", padx=10, pady=(10, 5))
+
+        row1 = ctk.CTkFrame(conn_frame, fg_color="transparent")
+        row1.pack(fill="x", padx=10, pady=(8, 2))
+        ctk.CTkLabel(row1, text="Serial:", text_color=COLORS["dim"], width=50).pack(side="left")
+        self.port_combo = ctk.CTkComboBox(row1, width=200, values=["(detecting...)"])
+        self.port_combo.pack(side="left", padx=5)
+        self.detect_btn = ctk.CTkButton(row1, text="Detect", width=60, command=self.refresh_ports,
+                                          fg_color=COLORS["faint"], text_color=COLORS["text"])
+        self.detect_btn.pack(side="left", padx=5)
+
+        ctk.CTkLabel(row1, text="Hub:", text_color=COLORS["dim"], width=35).pack(side="left", padx=(15, 0))
+        self.hub_entry = ctk.CTkEntry(row1, width=250, placeholder_text="ws://192.168.1.10:9000")
+        self.hub_entry.pack(side="left", padx=5)
+
+        row2 = ctk.CTkFrame(conn_frame, fg_color="transparent")
+        row2.pack(fill="x", padx=10, pady=(2, 8))
+        ctk.CTkLabel(row2, text="Name:", text_color=COLORS["dim"], width=50).pack(side="left")
+        self.name_entry = ctk.CTkEntry(row2, width=150, placeholder_text="My Gateway")
+        self.name_entry.pack(side="left", padx=5)
+        ctk.CTkLabel(row2, text="Hub Key:", text_color=COLORS["dim"]).pack(side="left", padx=(15, 0))
+        self.key_entry = ctk.CTkEntry(row2, width=140, placeholder_text="(optional)")
+        self.key_entry.pack(side="left", padx=5)
+
+        self.connect_btn = ctk.CTkButton(row2, text="CONNECT", width=100, fg_color=COLORS["good"],
+                                           text_color="#000", hover_color="#00CC00", command=self.connect)
+        self.connect_btn.pack(side="left", padx=(15, 5))
+        self.disconnect_btn = ctk.CTkButton(row2, text="DISCONNECT", width=100, fg_color=COLORS["bad"],
+                                              text_color="#FFF", hover_color="#CC0000",
+                                              command=self.disconnect, state="disabled")
+        self.disconnect_btn.pack(side="left", padx=5)
+
+        # Middle: Topology + Node Cards
+        mid_frame = ctk.CTkFrame(self.root, fg_color="transparent")
+        mid_frame.pack(fill="both", padx=10, pady=5, expand=True)
+        mid_frame.grid_columnconfigure(0, weight=3)
+        mid_frame.grid_columnconfigure(1, weight=2)
+        mid_frame.grid_rowconfigure(0, weight=1)
+
+        # Left: Topology canvas + stats
+        left_frame = ctk.CTkFrame(mid_frame, fg_color="transparent")
+        left_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
+        left_frame.grid_rowconfigure(0, weight=1)
+
+        topo_frame = ctk.CTkFrame(left_frame, fg_color=COLORS["panel"], corner_radius=8)
+        topo_frame.pack(fill="both", expand=True)
+        ctk.CTkLabel(topo_frame, text="  Mesh Topology", font=("Consolas", 11, "bold"),
+                      text_color=COLORS["accent"], anchor="w").pack(fill="x", padx=10, pady=(5, 0))
+        self.topo_canvas = ctk.CTkCanvas(topo_frame, bg=COLORS["bg"], highlightthickness=0, height=180)
+        self.topo_canvas.pack(fill="both", expand=True, padx=10, pady=(0, 5))
+
+        # Stats row
+        stats_frame = ctk.CTkFrame(left_frame, fg_color=COLORS["panel"], corner_radius=8, height=80)
+        stats_frame.pack(fill="x", pady=(5, 0))
+        stats_frame.pack_propagate(False)
+        stats_inner = ctk.CTkFrame(stats_frame, fg_color="transparent")
+        stats_inner.pack(expand=True)
+
+        self.stat_labels = {}
+        for label, key, color in [("Radio RX", "radio_rx", COLORS["accent"]),
+                                    ("Radio TX", "radio_tx", COLORS["good"]),
+                                    ("Peer RX", "peer_rx", COLORS["warn"]),
+                                    ("Peer TX", "peer_tx", COLORS["cursor"])]:
+            f = ctk.CTkFrame(stats_inner, fg_color="transparent")
+            f.pack(side="left", padx=15)
+            val = ctk.CTkLabel(f, text="0", font=("Consolas", 18, "bold"), text_color=color)
+            val.pack()
+            ctk.CTkLabel(f, text=label, font=("Consolas", 9), text_color=COLORS["dim"]).pack()
+            self.stat_labels[key] = val
+
+        # Hub status
+        f = ctk.CTkFrame(stats_inner, fg_color="transparent")
+        f.pack(side="left", padx=15)
+        self.hub_status_dot = ctk.CTkLabel(f, text="●", font=("Consolas", 18), text_color=COLORS["bad"])
+        self.hub_status_dot.pack()
+        ctk.CTkLabel(f, text="Hub", font=("Consolas", 9), text_color=COLORS["dim"]).pack()
+
+        # Right: Node cards
+        right_frame = ctk.CTkFrame(mid_frame, fg_color=COLORS["panel"], corner_radius=8)
+        right_frame.grid(row=0, column=1, sticky="nsew")
+        ctk.CTkLabel(right_frame, text="  Discovered Nodes", font=("Consolas", 11, "bold"),
+                      text_color=COLORS["accent"], anchor="w").pack(fill="x", padx=10, pady=(5, 0))
+        self.nodes_frame = ctk.CTkScrollableFrame(right_frame, fg_color=COLORS["bg"], corner_radius=0)
+        self.nodes_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        # Packet waterfall
+        wf_frame = ctk.CTkFrame(self.root, fg_color=COLORS["panel"], corner_radius=8, height=130)
+        wf_frame.pack(fill="x", padx=10, pady=5)
+        wf_frame.pack_propagate(False)
+        ctk.CTkLabel(wf_frame, text="  Packet Waterfall (click to inspect)", font=("Consolas", 11, "bold"),
+                      text_color=COLORS["accent"], anchor="w").pack(fill="x", padx=10, pady=(5, 0))
+        self.wf_text = ctk.CTkTextbox(wf_frame, font=("Consolas", 9), fg_color=COLORS["bg"],
+                                       text_color=COLORS["dim"], height=100, state="disabled")
+        self.wf_text.pack(fill="both", expand=True, padx=10, pady=(0, 5))
+        self.wf_text.bind("<Button-1>", self.on_waterfall_click)
+
+        # Packet inspector
+        insp_frame = ctk.CTkFrame(self.root, fg_color=COLORS["panel"], corner_radius=8, height=95)
+        insp_frame.pack(fill="x", padx=10, pady=(0, 10))
+        insp_frame.pack_propagate(False)
+        ctk.CTkLabel(insp_frame, text="  Packet Inspector", font=("Consolas", 11, "bold"),
+                      text_color=COLORS["accent"], anchor="w").pack(fill="x", padx=10, pady=(5, 0))
+
+        insp_inner = ctk.CTkFrame(insp_frame, fg_color="transparent")
+        insp_inner.pack(fill="x", padx=10)
+        self.insp_label = ctk.CTkLabel(insp_inner, text="Click a packet above to inspect",
+                                         font=("Consolas", 9), text_color=COLORS["dim"], anchor="w")
+        self.insp_label.pack(fill="x")
+
+        decrypt_row = ctk.CTkFrame(insp_frame, fg_color="transparent")
+        decrypt_row.pack(fill="x", padx=10, pady=(2, 5))
+        ctk.CTkLabel(decrypt_row, text="AES Key:", text_color=COLORS["dim"], font=("Consolas", 9)).pack(side="left")
+        self.aes_entry = ctk.CTkEntry(decrypt_row, width=180, placeholder_text="16-char key",
+                                       font=("Consolas", 9))
+        self.aes_entry.pack(side="left", padx=5)
+        self.decrypt_btn = ctk.CTkButton(decrypt_row, text="Decrypt", width=70, font=("Consolas", 9),
+                                           fg_color=COLORS["accent"], text_color="#000", command=self.decrypt_selected)
+        self.decrypt_btn.pack(side="left", padx=5)
+        self.decrypt_result = ctk.CTkLabel(decrypt_row, text="", font=("Consolas", 9),
+                                            text_color=COLORS["good"])
+        self.decrypt_result.pack(side="left", padx=10)
+
+    # ─── Serial Port Detection ──────────────────────────────
+
+    def refresh_ports(self):
+        ports = detect_serial_ports()
+        if ports:
+            values = [desc for _, desc in ports]
+            self.port_combo.configure(values=values)
+            self.port_combo.set(values[0])
+            self._port_map = {desc: dev for dev, desc in ports}
+        else:
+            self.port_combo.configure(values=["No ports found"])
+            self.port_combo.set("No ports found")
+            self._port_map = {}
+
+    def get_selected_port(self) -> str | None:
+        desc = self.port_combo.get()
+        if hasattr(self, "_port_map"):
+            return self._port_map.get(desc)
+        return None
+
+    # ─── Connection ─────────────────────────────────────────
+
+    def connect(self):
+        port = self.get_selected_port()
+        if not port:
+            return
+        hub = self.hub_entry.get().strip() or None
+        key = self.key_entry.get().strip() or None
+        name = self.name_entry.get().strip() or "Gateway"
+
+        self.gateway = GUIGatewayServer(port, 115200, hub, key, name, self.event_queue)
+        self.connected = True
+
+        def run_async():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(self.gateway.run())
+
+        self.async_thread = threading.Thread(target=run_async, daemon=True)
+        self.async_thread.start()
+
+        self.conn_label.configure(text=f"Connected — {port}", text_color=COLORS["good"])
+        self.connect_btn.configure(state="disabled")
+        self.disconnect_btn.configure(state="normal")
+
+    def disconnect(self):
+        if self.gateway:
+            self.gateway.shutdown()
+        self.connected = False
+        self.conn_label.configure(text="Disconnected", text_color=COLORS["bad"])
+        self.connect_btn.configure(state="normal")
+        self.disconnect_btn.configure(state="disabled")
+        self.hub_status_dot.configure(text_color=COLORS["bad"])
+
+    # ─── Event Processing ───────────────────────────────────
+
+    def poll_events(self):
+        try:
+            for _ in range(50):  # batch up to 50 events per tick
+                event = self.event_queue.get_nowait()
+                self.handle_event(event)
+        except queue.Empty:
+            pass
+        self.root.after(50, self.poll_events)
+
+    def handle_event(self, event):
+        etype = event.get("type", "")
+
+        if etype in ("packet_from_radio", "packet_from_hub"):
+            parsed = event.get("parsed")
+            direction = "RADIO" if etype == "packet_from_radio" else "HUB"
+            self.add_packet_to_waterfall(parsed, direction)
+            if parsed:
+                self.update_topology_from_packet(parsed)
+                self.packet_history.append(parsed)
+                if len(self.packet_history) > 500:
+                    self.packet_history.pop(0)
+
+        elif etype == "stats":
+            for key in ("radio_rx", "radio_tx", "peer_rx", "peer_tx"):
+                if key in event and key in self.stat_labels:
+                    self.stat_labels[key].configure(text=str(event[key]))
+            if "hub_connected" in event:
+                color = COLORS["good"] if event["hub_connected"] else COLORS["bad"]
+                self.hub_status_dot.configure(text_color=color)
+
+        elif etype == "hub_connected":
+            self.hub_status_dot.configure(text_color=COLORS["good"])
+
+        elif etype == "hub_disconnected":
+            self.hub_status_dot.configure(text_color=COLORS["bad"])
+
+        elif etype == "serial_line":
+            text = event.get("text", "")
+            # Try to extract node ID from status
+            if text.startswith("ID:"):
+                self.local_id = text.split()[-1].strip()
+
+        elif etype == "log":
+            pass  # Could add a log panel later
+
+    # ─── Topology ───────────────────────────────────────────
+
+    def update_topology_from_packet(self, parsed: dict):
+        if not parsed:
+            return
+        now = time.time()
+        ptype = parsed.get("type", "")
+        src = parsed.get("src", "")
+
+        if ptype == "HB":
+            hb_from = parsed.get("hb_from", src)
+            if hb_from and hb_from != "FFFF":
+                if hb_from not in self.topo_nodes:
+                    self.topo_nodes[hb_from] = TopoNode(hb_from, hb_from == self.local_id)
+                node = self.topo_nodes[hb_from]
+                node.last_seen = now
+                node.packets += 1
+
+        elif ptype == "MSG":
+            msg_from = parsed.get("msg_from", "")
+            route = parsed.get("route", "")
+            if msg_from and msg_from != "FFFF":
+                if msg_from not in self.topo_nodes:
+                    self.topo_nodes[msg_from] = TopoNode(msg_from, msg_from == self.local_id)
+                self.topo_nodes[msg_from].last_seen = now
+                self.topo_nodes[msg_from].packets += 1
+
+            # Build edges from route
+            if route:
+                hops = [h.strip() for h in route.split(",") if h.strip()]
+                for i in range(len(hops) - 1):
+                    a, b = hops[i], hops[i + 1]
+                    if a and b:
+                        self.topo_edges[(a, b)] = now
+                        for nid in (a, b):
+                            if nid not in self.topo_nodes:
+                                self.topo_nodes[nid] = TopoNode(nid, nid == self.local_id)
+                            self.topo_nodes[nid].last_seen = now
+                if len(hops) >= 1:
+                    # Hops for the sender
+                    self.topo_nodes.get(msg_from, TopoNode(msg_from)).hops = len(hops)
+
+        self.update_node_cards()
+
+    def update_node_cards(self):
+        for widget in self.nodes_frame.winfo_children():
+            widget.destroy()
+
+        now = time.time()
+        sorted_nodes = sorted(self.topo_nodes.values(), key=lambda n: n.last_seen, reverse=True)
+
+        for node in sorted_nodes[:15]:  # Show top 15
+            age = now - node.last_seen if node.last_seen else 9999
+            online = age < 120
+
+            card = ctk.CTkFrame(self.nodes_frame, fg_color=COLORS["panel"], corner_radius=6)
+            card.pack(fill="x", pady=2)
+
+            row1 = ctk.CTkFrame(card, fg_color="transparent")
+            row1.pack(fill="x", padx=8, pady=(5, 0))
+            dot_color = COLORS["good"] if online else COLORS["faint"]
+            ctk.CTkLabel(row1, text=f"● {node.id}", font=("Consolas", 11, "bold"),
+                          text_color=dot_color).pack(side="left")
+            if node.is_local:
+                ctk.CTkLabel(row1, text="(LOCAL)", font=("Consolas", 8),
+                              text_color=COLORS["accent"]).pack(side="left", padx=5)
+            status = "Online" if online else f"Last: {format_uptime(age)} ago"
+            ctk.CTkLabel(row1, text=status, font=("Consolas", 9),
+                          text_color=COLORS["dim"]).pack(side="right")
+
+            row2 = ctk.CTkFrame(card, fg_color="transparent")
+            row2.pack(fill="x", padx=8, pady=(0, 5))
+            ctk.CTkLabel(row2, text=f"Pkts: {node.packets}", font=("Consolas", 9),
+                          text_color=COLORS["dim"]).pack(side="left")
+            if node.hops:
+                ctk.CTkLabel(row2, text=f"Hops: {node.hops}", font=("Consolas", 9),
+                              text_color=COLORS["dim"]).pack(side="left", padx=10)
+
+    # ─── Topology Canvas Animation ──────────────────────────
+
+    def animate_topology(self):
+        canvas = self.topo_canvas
+        canvas.delete("all")
+        w = canvas.winfo_width() or 400
+        h = canvas.winfo_height() or 200
+        cx, cy = w / 2, h / 2
+        now = time.time()
+
+        nodes = list(self.topo_nodes.values())
+        n = len(nodes)
+
+        if n == 0:
+            canvas.create_text(cx, cy, text="Waiting for mesh traffic...",
+                                fill=COLORS["dim"], font=("Consolas", 10))
+            self.root.after(33, self.animate_topology)
+            return
+
+        # Circular layout
+        radius = min(w, h) * 0.35
+        for i, node in enumerate(nodes):
+            angle = i * (2 * math.pi / n) - math.pi / 2
+            node.x = cx + radius * math.cos(angle)
+            node.y = cy + radius * math.sin(angle)
+
+        # Draw edges
+        for (a, b), last in self.topo_edges.items():
+            na = self.topo_nodes.get(a)
+            nb = self.topo_nodes.get(b)
+            if na and nb:
+                age = now - last
+                alpha = max(0.2, 1.0 - age / 120.0)
+                # Approximate alpha with color blend
+                r = int(0x00 + (0x00 - 0x00) * alpha)
+                g = int(0x44 + (0xE5 - 0x44) * alpha)
+                b_val = int(0x44 + (0xFF - 0x44) * alpha)
+                color = f"#{r:02X}{g:02X}{b_val:02X}"
+                canvas.create_line(na.x, na.y, nb.x, nb.y, fill=color, width=1)
+
+        # Draw nodes
+        for node in nodes:
+            age = now - node.last_seen if node.last_seen else 9999
+            r = 14 if node.is_local else 10
+
+            if age < 120:
+                outline = COLORS["good"] if age < 30 else COLORS["warn"]
+            else:
+                outline = COLORS["faint"]
+
+            fill = COLORS["header"] if not node.is_local else COLORS["bubble_in"]
+            canvas.create_oval(node.x - r, node.y - r, node.x + r, node.y + r,
+                                fill=fill, outline=outline, width=2)
+            canvas.create_text(node.x, node.y, text=node.id, fill=COLORS["text"],
+                                font=("Consolas", 7 if not node.is_local else 8, "bold"))
+
+        self.root.after(33, self.animate_topology)
+
+    # ─── Packet Waterfall ───────────────────────────────────
+
+    def add_packet_to_waterfall(self, parsed: dict | None, direction: str):
+        if not parsed:
+            return
+        ts = time.strftime("%H:%M:%S")
+        ptype = parsed.get("type", "?")
+        src = parsed.get("src", "????")
+        dest = parsed.get("dest", "????")
+        ttl = parsed.get("ttl", "?")
+        size = parsed.get("size", 0)
+        route = parsed.get("route", "")
+
+        arrow = "◄" if direction == "RADIO" else "►"
+        line = f"{ts} {arrow}{direction:<5} {src}→{dest}  TTL:{ttl}  {size}B  {ptype}"
+        if route and ptype == "MSG":
+            line += f"  Route:{route}"
+
+        self.wf_text.configure(state="normal")
+        self.wf_text.insert("end", line + "\n")
+        lines = int(self.wf_text.index("end-1c").split(".")[0])
+        if lines > 300:
+            self.wf_text.delete("1.0", f"{lines - 300}.0")
+        self.wf_text.see("end")
+        self.wf_text.configure(state="disabled")
+
+    def on_waterfall_click(self, event):
+        try:
+            index = self.wf_text.index(f"@{event.x},{event.y}")
+            line_num = int(index.split(".")[0]) - 1
+            if 0 <= line_num < len(self.packet_history):
+                self.selected_packet = self.packet_history[line_num]
+                self.show_inspector(self.selected_packet)
+        except Exception:
+            pass
+
+    def show_inspector(self, pkt: dict):
+        src = pkt.get("src", "?")
+        dest = pkt.get("dest", "?")
+        seq = pkt.get("seq", "?")
+        ttl = pkt.get("ttl", "?")
+        ptype = pkt.get("type", "?")
+        route = pkt.get("route", "")
+        hex_preview = pkt.get("hex", "")
+
+        route_display = " → ".join(route.split(",")) if route else "(direct)"
+        info = f"[{ptype}]  Dest:{dest}  Src:{src}  Seq:{seq}  TTL:{ttl}  Route: {route_display}  Hex: {hex_preview}..."
+        self.insp_label.configure(text=info)
+        self.decrypt_result.configure(text="")
+
+    def decrypt_selected(self):
+        if not self.selected_packet:
+            self.decrypt_result.configure(text="No packet selected", text_color=COLORS["bad"])
+            return
+        key = self.aes_entry.get().strip()
+        if len(key) != 16:
+            self.decrypt_result.configure(text="Key must be 16 chars", text_color=COLORS["bad"])
+            return
+        encrypted = self.selected_packet.get("encrypted", "")
+        msg_id = self.selected_packet.get("msg_id", "")
+        if not encrypted or not msg_id:
+            self.decrypt_result.configure(text="Not an encrypted MSG packet", text_color=COLORS["bad"])
+            return
+        plain = decrypt_message(encrypted, msg_id, key)
+        if plain:
+            self.decrypt_result.configure(text=f'Plain: "{plain}"', text_color=COLORS["good"])
+        else:
+            self.decrypt_result.configure(text="Decrypt failed (wrong key or CRC mismatch)", text_color=COLORS["bad"])
+
+    # ─── Lifecycle ──────────────────────────────────────────
+
+    def on_close(self):
+        self.disconnect()
+        self.root.destroy()
+
+    def run(self):
+        self.root.mainloop()
+
+
+# ─── Entry Point ─────────────────────────────────────────────
+
+if __name__ == "__main__":
+    app = GatewayGUIApp()
+    app.run()
