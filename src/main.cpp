@@ -19,8 +19,8 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
 #include <TinyGPSPlus.h>
-#include <fonts/FreeSans12pt7b.h>
-#include <fonts/FreeSans9pt7b.h>
+#include <Fonts/FreeSans12pt7b.h>
+#include <Fonts/FreeSans9pt7b.h>
 #include <map>
 #include <vector>
 #include <deque>
