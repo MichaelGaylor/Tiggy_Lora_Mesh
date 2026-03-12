@@ -335,9 +335,11 @@ void onWsEvent(WStype_t type, uint8_t* payload, size_t length) {
 }
 
 // Helper — send JSON text if connected
+// sendTXT() takes non-const String& so we copy to a local
 void wsSend(const String& json) {
     if (!wsConnected) return;
-    ws.sendTXT(json);
+    String msg = json;
+    ws.sendTXT(msg);
 }
 
 // Parse hub_url into host, port, path
