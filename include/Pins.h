@@ -414,6 +414,83 @@
 #define SENSOR_PIN_COUNT    2
 
 // ═══════════════════════════════════════════════════════════════
+#elif defined(BOARD_HELTEC_V2)
+// ═══════════════════════════════════════════════════════════════
+// Heltec WiFi LoRa 32 V2
+// ESP32 (original, not S3) + SX1276 + 0.96" OLED
+// ~£15 — classic Heltec board, widely available
+// ═══════════════════════════════════════════════════════════════
+
+#define BOARD_NAME          "Heltec V2"
+#define HAS_DISPLAY         0
+#define HAS_KEYBOARD        0
+#define HAS_TRACKBALL       0
+#define HAS_GPS             0
+#define HAS_OLED            1
+#define RADIO_SX1276        1
+
+// Power (VEXT pin powers OLED — LOW = on)
+#define BOARD_POWERON       -1
+#define VEXT_CTRL           21    // Vext power for OLED (LOW = on)
+
+// SPI for LoRa
+#define BOARD_SPI_MOSI      27
+#define BOARD_SPI_MISO      19
+#define BOARD_SPI_SCK       5
+
+// No TFT display
+#define BOARD_TFT_CS        -1
+#define BOARD_TFT_DC        -1
+#define BOARD_TFT_BL        -1
+
+// SX1276 LoRa (DIO0 = RX-done interrupt on SX1276)
+#define RADIO_CS            18
+#define RADIO_RST           14
+#define RADIO_DIO0          26
+// SX1276 doesn't have DIO1/BUSY in the same way; alias DIO0
+#define RADIO_DIO1          RADIO_DIO0
+#define RADIO_BUSY          -1
+
+// No GPS
+#define BOARD_GPS_TX        -1
+#define BOARD_GPS_RX        -1
+
+// I2C (for OLED display)
+#define BOARD_I2C_SDA       4
+#define BOARD_I2C_SCL       15
+#define OLED_RST            16
+
+// No keyboard/trackball
+#define KB_I2C_ADDR         0
+#define BOARD_KB_INT        -1
+#define BOARD_TBALL_UP      -1
+#define BOARD_TBALL_DOWN    -1
+#define BOARD_TBALL_LEFT    -1
+#define BOARD_TBALL_RIGHT   -1
+#define BOARD_TBALL_CLICK   -1
+
+// No SD Card
+#define BOARD_SDCARD_CS     -1
+
+// Battery ADC (pin 37 is input-only on Heltec V2)
+#define BOARD_BAT_ADC       37
+
+// LED
+#define BOARD_LED           25
+
+// Button (PRG/BOOT button)
+#define BOARD_BUTTON        0
+
+// ─── User GPIO for relays & sensors ─────────────────────────
+// Free pins on Heltec V2:
+// 2, 12, 13, 17, 36, 39 — others are used by radio/OLED/SPI
+// (36, 39 are INPUT ONLY — good for sensors/ADC)
+#define USER_GPIO_COUNT     4
+#define DEFAULT_RELAY_PINS  { 2, 12, 13, 17 }
+#define DEFAULT_SENSOR_PINS { 36, 39 }
+#define SENSOR_PIN_COUNT    2
+
+// ═══════════════════════════════════════════════════════════════
 #elif defined(BOARD_CUSTOM)
 // ═══════════════════════════════════════════════════════════════
 // Custom board - fill in your own pins

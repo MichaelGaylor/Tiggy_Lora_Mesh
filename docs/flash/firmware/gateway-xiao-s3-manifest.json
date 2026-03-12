@@ -1,0 +1,13 @@
+{
+  "name": "LoRa Mesh — XIAO ESP32S3 + Wio-SX1262 Gateway",
+  "version": "1.0.0",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        { "path": "gateway-xiao-s3.bin", "offset": 0 }
+      ]
+    }
+  ]
+}

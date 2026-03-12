@@ -1,0 +1,13 @@
+{
+  "name": "LoRa Mesh — Heltec WiFi LoRa 32 V4 Gateway",
+  "version": "1.0.0",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        { "path": "gateway-heltec-v4.bin", "offset": 0 }
+      ]
+    }
+  ]
+}

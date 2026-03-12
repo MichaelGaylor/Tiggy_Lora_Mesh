@@ -34,6 +34,13 @@ jobs:
       - name: Build communicator target (T-Deck Plus)
         run: pio run -e tdeck-plus
 
+      - name: Build gateway targets (Heltec V2, V3, V4, XIAO)
+        run: |
+          pio run -e gateway-heltec-v2
+          pio run -e gateway-heltec-v3
+          pio run -e gateway-heltec-v4
+          pio run -e gateway-xiao-s3
+
       - name: Merge firmware binaries for web flasher
         run: |
           mkdir -p docs/flash/firmware
@@ -86,6 +93,42 @@ jobs:
             0x8000  .pio/build/lora32/partitions.bin \
             0xe000  "$BOOT_APP0" \
             0x10000 .pio/build/lora32/firmware.bin
+
+          # Gateway: Heltec V2 — WiFi gateway (ESP32, 4MB flash)
+          esptool.py --chip esp32 merge_bin \
+            -o docs/flash/firmware/gateway-heltec-v2.bin \
+            --flash_mode dio --flash_freq 80m --flash_size 4MB \
+            0x1000  .pio/build/gateway-heltec-v2/bootloader.bin \
+            0x8000  .pio/build/gateway-heltec-v2/partitions.bin \
+            0xe000  "$BOOT_APP0" \
+            0x10000 .pio/build/gateway-heltec-v2/firmware.bin
+
+          # Gateway: Heltec V3 — WiFi gateway (ESP32-S3, 8MB flash)
+          esptool.py --chip esp32s3 merge_bin \
+            -o docs/flash/firmware/gateway-heltec-v3.bin \
+            --flash_mode dio --flash_freq 80m --flash_size 8MB \
+            0x0     .pio/build/gateway-heltec-v3/bootloader.bin \
+            0x8000  .pio/build/gateway-heltec-v3/partitions.bin \
+            0xe000  "$BOOT_APP0" \
+            0x10000 .pio/build/gateway-heltec-v3/firmware.bin
+
+          # Gateway: Heltec V4 — WiFi gateway (ESP32-S3, 16MB flash)
+          esptool.py --chip esp32s3 merge_bin \
+            -o docs/flash/firmware/gateway-heltec-v4.bin \
+            --flash_mode dio --flash_freq 80m --flash_size 16MB \
+            0x0     .pio/build/gateway-heltec-v4/bootloader.bin \
+            0x8000  .pio/build/gateway-heltec-v4/partitions.bin \
+            0xe000  "$BOOT_APP0" \
+            0x10000 .pio/build/gateway-heltec-v4/firmware.bin
+
+          # Gateway: XIAO ESP32S3 — WiFi gateway (ESP32-S3, 4MB flash)
+          esptool.py --chip esp32s3 merge_bin \
+            -o docs/flash/firmware/gateway-xiao-s3.bin \
+            --flash_mode dio --flash_freq 80m --flash_size 4MB \
+            0x0     .pio/build/gateway-xiao-s3/bootloader.bin \
+            0x8000  .pio/build/gateway-xiao-s3/partitions.bin \
+            0xe000  "$BOOT_APP0" \
+            0x10000 .pio/build/gateway-xiao-s3/firmware.bin
 
       - name: Commit firmware binaries to docs
         run: |
