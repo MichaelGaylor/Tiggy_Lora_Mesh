@@ -488,6 +488,7 @@
   <a href="#eeprom">EEPROM Map</a>
   <a href="#building">Building</a>
   <a href="#gateway">Gateway Bridge</a>
+  <a href="#wifi-gateway">WiFi Gateway (ESP)</a>
   <a href="#solar">Solar Mode</a>
   <a href="#telegram">Telegram Alerts</a>
   <a href="#theme">Theme</a>
@@ -1706,9 +1707,92 @@ gateway/
 
 </section>
 
+<!-- ═══════════════ WIFI GATEWAY ═══════════════ -->
+<section id="wifi-gateway">
+<h2>17. WiFi ESP Gateway — No PC Required</h2>
+
+<p>The WiFi gateway firmware turns any ESP32 board into a standalone internet bridge. Unlike the PC-based gateway, it needs <strong>no computer</strong> — just power. Flash it, configure once via the Android app over BLE, mount it outside with a solar panel, and it runs forever.</p>
+
+<pre style="background:var(--panel);padding:12px;border-radius:6px;font-size:0.85em;">
+Old method:  LoRa nodes → ESP repeater → USB cable → PC → WebSocket → Hub
+New method:  LoRa nodes → ESP gateway → WiFi → WebSocket → Hub
+</pre>
+
+<h3>Supported Boards</h3>
+<div class="board-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;margin:16px 0;">
+  <div style="background:var(--panel);padding:14px;border-radius:8px;border-left:3px solid var(--cyan);">
+    <strong style="color:var(--cyan);">Heltec V2</strong> (~£15)<br>
+    <span style="color:var(--dim);font-size:0.88em;">ESP32 + SX1276 + OLED<br>Classic board, widely available</span>
+  </div>
+  <div style="background:var(--panel);padding:14px;border-radius:8px;border-left:3px solid var(--cyan);">
+    <strong style="color:var(--cyan);">Heltec V3</strong> (~£18)<br>
+    <span style="color:var(--dim);font-size:0.88em;">ESP32-S3 + SX1262 + OLED<br>Better radio sensitivity</span>
+  </div>
+  <div style="background:var(--panel);padding:14px;border-radius:8px;border-left:3px solid var(--good);">
+    <strong style="color:var(--good);">Heltec V4</strong> (~£20) ★ Best<br>
+    <span style="color:var(--dim);font-size:0.88em;">ESP32-S3 + SX1262 + 28dBm PA<br>Solar input, 16MB flash</span>
+  </div>
+  <div style="background:var(--panel);padding:14px;border-radius:8px;border-left:3px solid var(--warn);">
+    <strong style="color:var(--warn);">XIAO ESP32S3</strong> (~£10) ★ Cheapest<br>
+    <span style="color:var(--dim);font-size:0.88em;">+ Wio-SX1262 kit, tiny 10×21mm<br>Perfect for solar tree node</span>
+  </div>
+</div>
+
+<h3>Step 1 — Flash the Gateway Firmware</h3>
+<p>Use the <a href="flash/" style="color:var(--cyan);">web flasher</a>, select your board under <strong>WiFi Gateway</strong>, and click Flash.</p>
+
+<h3>Step 2 — Configure via Android App</h3>
+<p>Open the Android app, tap <strong>Connect</strong> to pair with the gateway over BLE, then send these commands from the terminal/config screen:</p>
+
+<div class="code-block">
+<pre><span class="keyword">WIFI</span>,YourSSID,YourPassword       <span class="comment">Set WiFi network</span>
+<span class="keyword">HUBURL</span>,ws://hub.example.com:9000 <span class="comment">Hub WebSocket address</span>
+<span class="keyword">HUBKEY</span>,your-secret-key           <span class="comment">Hub auth key (must match hub)</span>
+<span class="keyword">GWNAME</span>,Ridge Top Gateway         <span class="comment">Friendly name shown on hub</span>
+<span class="keyword">GWLOC</span>,51.5074,-3.1791            <span class="comment">Lat/lon (optional, for map)</span>
+<span class="keyword">GWANTENNA</span>,1                      <span class="comment">0=indoor  1=external  2=rooftop</span>
+<span class="keyword">SAVE</span>                              <span class="comment">Write to flash and reboot</span></pre>
+</div>
+
+<p>The gateway reboots, connects to WiFi, and begins bridging. The OLED shows the WiFi IP and hub connection status.</p>
+
+<h3>GWSTATUS — Check Connection</h3>
+<div class="code-block"><pre><span class="keyword">GWSTATUS</span>   <span class="comment">Returns: name, WiFi IP, hub connected/disconnected, RX/TX counts</span></pre></div>
+
+<h3>Solar Deployment Guide</h3>
+<p>Total BOM for a self-powered tree-mounted gateway:</p>
+<table>
+  <tr><th>Part</th><th>Cost</th><th>Notes</th></tr>
+  <tr><td>XIAO ESP32S3 + Wio-SX1262</td><td>~£10</td><td>From The Pi Hut</td></tr>
+  <tr><td>6V 2W mini solar panel</td><td>~£5</td><td>Point south, 30° tilt</td></tr>
+  <tr><td>TP4056 LiPo charger + 18650 cell</td><td>~£4</td><td>Powers overnight</td></tr>
+  <tr><td>IP65 weatherproof box (75×58mm)</td><td>~£3</td><td>Cable gland for antenna</td></tr>
+  <tr><td>868MHz fiberglass antenna (3dBi)</td><td>~£6</td><td>SMA-female pigtail</td></tr>
+  <tr><td><strong>Total</strong></td><td><strong>~£28</strong></td><td><strong>Zero running cost</strong></td></tr>
+</table>
+
+<p><strong>Power draw:</strong> ESP32S3 active ~160mA @ 3.3V = 0.53W. A 2W panel fully charges a 2000mAh cell in ~4 hours of sun. Runs 15+ hours overnight on the cell alone.</p>
+
+<h3>Hub Setup (Linux / Tailscale)</h3>
+<p>The hub runs on any always-on machine. With Tailscale Funnel it gets a public HTTPS/WSS URL with no VPS needed:</p>
+<div class="code-block"><pre><span class="comment"># Install Tailscale on your Linux box</span>
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up
+
+<span class="comment"># Start the hub</span>
+pip3 install websockets
+python3 gateway_hub.py --port 9000 --key your-secret-key
+
+<span class="comment"># Expose publicly via Tailscale Funnel</span>
+tailscale funnel 9000
+<span class="comment"># → public URL: wss://your-machine.tail1234.ts.net</span></pre></div>
+
+<p>Configure gateways with <code>HUBURL,wss://your-machine.tail1234.ts.net</code>. No port forwarding, no dynamic DNS, free SSL certificate.</p>
+</section>
+
 <!-- ═══════════════ SOLAR MODE ═══════════════ -->
 <section id="solar">
-<h2>17. Solar / Low-Power Repeater Mode</h2>
+<h2>18. Solar / Low-Power Repeater Mode</h2>
 
 <p>Remote repeater nodes on hilltops or rooftops often need to run indefinitely from a small solar panel and an 18650 battery. Solar mode dramatically reduces power consumption by disabling non-essential peripherals and using the SX1262's hardware duty-cycle RX.</p>
 
@@ -1782,7 +1866,7 @@ gateway/
 
 <!-- ═══════════════ TELEGRAM ═══════════════ -->
 <section id="telegram">
-<h2>18. Telegram Alerts (Android App)</h2>
+<h2>19. Telegram Alerts (Android App)</h2>
 
 <p>The Android app can forward <strong>group mesh messages</strong> and <strong>SOS emergencies</strong> to a Telegram chat via a bot. This lets family members, a base-camp coordinator, or anyone with Telegram receive real-time alerts — even if they are miles away with no LoRa hardware.</p>
 
@@ -1848,7 +1932,7 @@ gateway/
 
 <!-- ═══════════════ THEME ═══════════════ -->
 <section id="theme">
-<h2>19. Colour Theme Reference</h2>
+<h2>20. Colour Theme Reference</h2>
 
 <p>Consistent colour palette used across the TFT display, OLED, and Android app.</p>
 
