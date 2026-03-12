@@ -43,10 +43,8 @@ echo ""
 
 # ─── 1. Python dependencies ──────────────────────────────────
 echo -e "${CYAN}[1/4] Installing Python dependencies...${NC}"
-if ! command -v python3 &>/dev/null; then
-    sudo apt-get update -q && sudo apt-get install -y python3 python3-pip
-fi
-pip3 install --user websockets
+sudo apt-get update -q
+sudo apt-get install -y python3 python3-websockets
 
 echo -e "${GREEN}      ✓ Python dependencies installed${NC}"
 
