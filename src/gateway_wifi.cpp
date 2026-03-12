@@ -157,11 +157,9 @@ static uint32_t rxCount = 0;  // LoRa → hub
 static uint32_t txCount = 0;  // hub → LoRa
 
 // ─── Radio ───────────────────────────────────────────────────
-#ifdef CONFIG_IDF_TARGET_ESP32S3
-SPIClass loraSPI(SPI);
-#else
-SPIClass loraSPI(VSPI);
-#endif
+// Default constructor works on all ESP32 variants (arduino-esp32 v2 + v3).
+// Explicit pins are set in loraSPI.begin() so the bus number doesn't matter.
+SPIClass loraSPI;
 
 #if defined(RADIO_SX1262)
 SX1262 radio = new Module(RADIO_CS, RADIO_DIO1, RADIO_RST, RADIO_BUSY, loraSPI);
