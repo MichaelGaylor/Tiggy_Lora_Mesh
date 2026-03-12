@@ -36,10 +36,18 @@ jobs:
 
       - name: Build gateway targets (Heltec V2, V3, V4, XIAO)
         run: |
-          pio run -e gateway-heltec-v2
-          pio run -e gateway-heltec-v3
-          pio run -e gateway-heltec-v4
-          pio run -e gateway-xiao-s3
+          pio run -e gateway-heltec-v2 2>&1 | tee /tmp/gateway-build-log.txt; echo "heltec-v2 exit: ${PIPESTATUS[0]}" >> /tmp/gateway-build-log.txt
+          pio run -e gateway-heltec-v3 2>&1 | tee -a /tmp/gateway-build-log.txt; echo "heltec-v3 exit: ${PIPESTATUS[0]}" >> /tmp/gateway-build-log.txt
+          pio run -e gateway-heltec-v4 2>&1 | tee -a /tmp/gateway-build-log.txt; echo "heltec-v4 exit: ${PIPESTATUS[0]}" >> /tmp/gateway-build-log.txt
+          pio run -e gateway-xiao-s3 2>&1 | tee -a /tmp/gateway-build-log.txt; echo "xiao-s3 exit: ${PIPESTATUS[0]}" >> /tmp/gateway-build-log.txt
+        continue-on-error: true
+
+      - name: Upload gateway build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gateway-build-log
+          path: /tmp/gateway-build-log.txt
 
       - name: Merge firmware binaries for web flasher
         run: |
