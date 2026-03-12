@@ -133,6 +133,12 @@
         <option value="heltec-v3">Heltec WiFi LoRa 32 V3 (~£18) — repeater with OLED status</option>
         <option value="heltec-v4">Heltec WiFi LoRa 32 V4 (~£20) — best repeater, 28dBm, solar</option>
       </optgroup>
+      <optgroup label="── WiFi Gateway (bridge to cloud hub) ──">
+        <option value="gateway-heltec-v2">Heltec WiFi LoRa 32 V2 (~£15) — ESP32 + SX1276 gateway</option>
+        <option value="gateway-heltec-v3">Heltec WiFi LoRa 32 V3 (~£18) — ESP32-S3 + SX1262 gateway</option>
+        <option value="gateway-heltec-v4">Heltec WiFi LoRa 32 V4 (~£20) — best gateway, 28dBm, solar</option>
+        <option value="gateway-xiao-s3">Seeed XIAO ESP32S3 + Wio-SX1262 (~£10) — compact gateway</option>
+      </optgroup>
       <optgroup label="── Full communicator ──">
         <option value="tdeck-plus">LilyGO T-Deck Plus (~£55) — screen + keyboard + GPS</option>
       </optgroup>
@@ -189,6 +195,10 @@ const boardInfo = {
   'lora32':    '📡 REPEATER — LilyGO LoRa32 with 0.96" OLED status screen. Uses SX1276 radio (slightly less sensitive than SX1262).',
   'heltec-v3': '📡 REPEATER — Heltec V3 with 0.96" OLED. SX1262 radio, good range, compact.',
   'heltec-v4': '📡 REPEATER — Best repeater. SX1262 + 28dBm PA (double the range), solar input, 16MB flash. Runs indefinitely on a 1W panel.',
+  'gateway-heltec-v2': '🌐 GATEWAY — WiFi bridge to cloud hub. Heltec V2 (ESP32 + SX1276). Configure via BLE: WiFi credentials, hub URL, gateway name.',
+  'gateway-heltec-v3': '🌐 GATEWAY — WiFi bridge to cloud hub. Heltec V3 (ESP32-S3 + SX1262). Better radio sensitivity than V2. OLED status display.',
+  'gateway-heltec-v4': '🌐 GATEWAY — Best gateway option. Heltec V4 (ESP32-S3 + SX1262 + 28dBm PA), solar input, 16MB flash. Maximum range.',
+  'gateway-xiao-s3':   '🌐 GATEWAY — Compact WiFi bridge. XIAO ESP32S3 + Wio-SX1262 kit. Tiny form factor, configure via BLE.',
   'tdeck-plus': '📟 COMMUNICATOR — Full device with 2.8" colour screen, physical keyboard, GPS, trackball. Send messages, view mesh map, SOS beacon.'
 };
 
