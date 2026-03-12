@@ -19,7 +19,7 @@ RED='\033[0;31m'
 NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HUB_PORT=9000
+HUB_PORT=8443
 SERVICE_NAME="lora-mesh-hub"
 SERVICE_USER="$USER"
 
@@ -120,25 +120,8 @@ if [[ "$INSTALL_TS" =~ ^[Yy] ]]; then
 
     if [[ "$ENABLE_FUNNEL" =~ ^[Yy] ]]; then
         echo -e "${CYAN}      Enabling Tailscale Funnel on port ${HUB_PORT}...${NC}"
-        # Run funnel in background, create a systemd service for it too
-        sudo tee /etc/systemd/system/tailscale-funnel-hub.service > /dev/null <<EOF
-[Unit]
-Description=Tailscale Funnel for LoRa Mesh Hub
-After=tailscaled.service lora-mesh-hub.service
-Wants=tailscaled.service
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/tailscale funnel ${HUB_PORT}
-Restart=always
-RestartSec=15
-
-[Install]
-WantedBy=multi-user.target
-EOF
-        sudo systemctl daemon-reload
-        sudo systemctl enable tailscale-funnel-hub
-        sudo systemctl restart tailscale-funnel-hub
+        # --bg runs funnel persistently in the background and survives reboots
+        sudo tailscale funnel --bg ${HUB_PORT}
         sleep 2
 
         FUNNEL_URL=$(tailscale funnel status 2>/dev/null | grep "https://" | awk '{print $1}' || echo "")

@@ -343,23 +343,24 @@ void wsSend(const String& json) {
 }
 
 // Parse hub_url into host, port, path
-static void parseHubUrl(const char* url, String& host, uint16_t& port, String& path) {
-    // Format: ws://hostname:port/path  or  ws://hostname:port
+static bool parseHubUrl(const char* url, String& host, uint16_t& port, String& path, bool& tls) {
+    // Format: ws://hostname:port/path  or  wss://hostname (port defaults to 443)
     host = "";
     port = 9000;
     path = "/";
+    tls  = false;
 
     const char* p = url;
-    if (strncmp(p, "ws://", 5) == 0)   p += 5;
-    else if (strncmp(p, "wss://", 6) == 0) p += 6;  // TLS not supported by this lib without certs
+    if (strncmp(p, "wss://", 6) == 0) { tls = true;  p += 6; port = 443; }
+    else if (strncmp(p, "ws://", 5) == 0) {            p += 5; }
+    else return false;
 
     const char* colon = strchr(p, ':');
     const char* slash = strchr(p, '/');
 
     if (colon && (!slash || colon < slash)) {
         host = String(p).substring(0, colon - p);
-        const char* portStr = colon + 1;
-        port = (uint16_t)atoi(portStr);
+        port = (uint16_t)atoi(colon + 1);
         if (slash) path = String(slash);
     } else if (slash) {
         host = String(p).substring(0, slash - p);
@@ -367,6 +368,7 @@ static void parseHubUrl(const char* url, String& host, uint16_t& port, String& p
     } else {
         host = String(p);
     }
+    return true;
 }
 
 void setupWebSocket() {
@@ -375,10 +377,20 @@ void setupWebSocket() {
     String host;
     uint16_t port;
     String path;
-    parseHubUrl(cfg.hub_url, host, port, path);
+    bool tls;
+    if (!parseHubUrl(cfg.hub_url, host, port, path, tls)) {
+        dbg("WS: invalid hub URL");
+        return;
+    }
 
-    dbgf("WS: connecting to %s:%d%s\n", host.c_str(), port, path.c_str());
-    ws.begin(host, port, path);
+    dbgf("WS: connecting to %s%s:%d%s\n", tls ? "wss://" : "ws://", host.c_str(), port, path.c_str());
+    if (tls) {
+        // SSL — skip certificate verification (Tailscale Funnel uses valid certs but
+        // we avoid bundling a root CA by using insecure mode)
+        ws.beginSSL(host, port, path);
+    } else {
+        ws.begin(host, port, path);
+    }
     ws.onEvent(onWsEvent);
     ws.setReconnectInterval(WS_RECONNECT_INTERVAL_MS);
 }
