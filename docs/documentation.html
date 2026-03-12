@@ -1774,20 +1774,46 @@ New method:  LoRa nodes → ESP gateway → WiFi → WebSocket → Hub
 <p><strong>Power draw:</strong> ESP32S3 active ~160mA @ 3.3V = 0.53W. A 2W panel fully charges a 2000mAh cell in ~4 hours of sun. Runs 15+ hours overnight on the cell alone.</p>
 
 <h3>Hub Setup (Linux / Tailscale)</h3>
-<p>The hub runs on any always-on machine. With Tailscale Funnel it gets a public HTTPS/WSS URL with no VPS needed:</p>
-<div class="code-block"><pre><span class="comment"># Install Tailscale on your Linux box</span>
-curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up
+<p>The hub runs on any always-on Linux machine. The automated setup script handles everything — Python, systemd service, and Tailscale Funnel:</p>
+<div class="code-block"><pre><span class="comment"># Download and run the setup script (Debian/Ubuntu)</span>
+curl -fsSL https://raw.githubusercontent.com/MichaelGaylor/Tiggy_Lora_Mesh/main/gateway/setup-hub-linux.sh -o setup.sh
+bash setup.sh</pre></div>
 
-<span class="comment"># Start the hub</span>
-pip3 install websockets
-python3 gateway_hub.py --port 9000 --key your-secret-key
+<p>The script will:</p>
+<ol>
+  <li>Install Python <code>python3-websockets</code> via apt</li>
+  <li>Optionally install Tailscale and connect to your account</li>
+  <li>Create a systemd service that auto-starts on boot (<code>lora-mesh-hub.service</code>)</li>
+  <li>Optionally enable Tailscale Funnel for a public <code>wss://</code> URL</li>
+</ol>
 
-<span class="comment"># Expose publicly via Tailscale Funnel</span>
-tailscale funnel 9000
-<span class="comment"># → public URL: wss://your-machine.tail1234.ts.net</span></pre></div>
+<div class="info-box orange">
+  <p><strong>Tailscale Funnel port:</strong> Funnel only supports ports 443, 8443, and 10000. The hub runs on <strong>port 8443</strong> by default. Do not change this to 9000 or Funnel will not work.</p>
+</div>
 
-<p>Configure gateways with <code>HUBURL,wss://your-machine.tail1234.ts.net</code>. No port forwarding, no dynamic DNS, free SSL certificate.</p>
+<p>To enable Funnel manually after setup:</p>
+<div class="code-block"><pre><span class="comment"># Enable Tailscale Funnel on port 8443 (runs persistently in background)</span>
+sudo tailscale funnel --bg 8443
+
+<span class="comment"># Check the public URL assigned to your machine</span>
+tailscale funnel status
+<span class="comment"># → https://your-machine.tail1234.ts.net</span></pre></div>
+
+<p>Configure each gateway via BLE with:</p>
+<div class="code-block"><pre>HUBURL,wss://your-machine.tail1234.ts.net
+SAVE</pre></div>
+
+<p>No port forwarding, no dynamic DNS, free SSL certificate. The hub service and Funnel both survive reboots automatically.</p>
+
+<h3>Hub Management</h3>
+<div class="code-block"><pre><span class="comment"># View live logs</span>
+sudo journalctl -u lora-mesh-hub -f
+
+<span class="comment"># Restart hub</span>
+sudo systemctl restart lora-mesh-hub
+
+<span class="comment"># Check status</span>
+sudo systemctl status lora-mesh-hub</pre></div>
 </section>
 
 <!-- ═══════════════ SOLAR MODE ═══════════════ -->
