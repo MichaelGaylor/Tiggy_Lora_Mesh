@@ -1,6 +1,6 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════
-# LoRa Mesh Hub — Linux Setup Script
+# TiggyOpenMesh Hub — Linux Setup Script
 # ═══════════════════════════════════════════════════════════════
 # Run as your normal user (not root). Uses sudo where needed.
 # What this does:
@@ -20,12 +20,12 @@ NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HUB_PORT=8443
-SERVICE_NAME="lora-mesh-hub"
+SERVICE_NAME="tiggyopenmesh-hub"
 SERVICE_USER="$USER"
 
 echo -e "${CYAN}"
 echo "╔══════════════════════════════════════════╗"
-echo "║     LoRa Mesh Hub — Linux Setup          ║"
+echo "║     TiggyOpenMesh Hub — Linux Setup          ║"
 echo "╚══════════════════════════════════════════╝"
 echo -e "${NC}"
 
@@ -83,7 +83,7 @@ fi
 
 sudo tee /etc/systemd/system/${SERVICE_NAME}.service > /dev/null <<EOF
 [Unit]
-Description=LoRa Mesh Gateway Hub
+Description=TiggyOpenMesh Gateway Hub
 After=network-online.target
 Wants=network-online.target
 

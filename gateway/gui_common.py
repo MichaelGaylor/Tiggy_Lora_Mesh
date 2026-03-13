@@ -1,5 +1,5 @@
 """
-LoRa Mesh Gateway — Shared GUI Utilities
+TiggyOpenMesh Gateway — Shared GUI Utilities
 ═════════════════════════════════════════
 Color palette, packet parser, AES decryption, helpers.
 Used by both gateway_hub_gui.py and gateway_gui.py.

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-LoRa Mesh Gateway Hub — GUI Dashboard
+TiggyOpenMesh Gateway Hub — GUI Dashboard
 ══════════════════════════════════════
 Visual dashboard for the central hub relay server.
 Shows connected gateways, packet flow, live statistics.
@@ -220,7 +220,7 @@ class Particle:
 class HubGUIApp:
     def __init__(self):
         self.root = ctk.CTk()
-        self.root.title("LoRa Mesh Gateway Hub")
+        self.root.title("TiggyOpenMesh Gateway Hub")
         self.root.geometry("900x700")
         self.root.configure(fg_color=COLORS["bg"])
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -244,7 +244,7 @@ class HubGUIApp:
         title_frame = ctk.CTkFrame(self.root, fg_color=COLORS["header"], height=40, corner_radius=0)
         title_frame.pack(fill="x")
         title_frame.pack_propagate(False)
-        ctk.CTkLabel(title_frame, text="  LoRa Mesh Gateway Hub", font=("Consolas", 16, "bold"),
+        ctk.CTkLabel(title_frame, text="  TiggyOpenMesh Gateway Hub", font=("Consolas", 16, "bold"),
                       text_color=COLORS["accent"]).pack(side="left", padx=10)
         self.status_label = ctk.CTkLabel(title_frame, text="Stopped", font=("Consolas", 12),
                                           text_color=COLORS["bad"])

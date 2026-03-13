@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════
-// LoRa Mesh Repeater v4.0
+// TiggyOpenMesh Repeater v4.0
 // ═══════════════════════════════════════════════════════════════
 // Headless mesh repeater + relay/sensor node + BLE phone app
 // Uses shared MeshCore library for all mesh protocol logic.
@@ -472,7 +472,7 @@ class BleTxCB : public BLECharacteristicCallbacks {
 };
 
 void setupBLE() {
-    String bleName = "LoRaMesh-" + String(mesh.localID);
+    String bleName = "TOM-" + String(mesh.localID);
     BLEDevice::init(bleName.c_str());
     bleServer = BLEDevice::createServer();
     bleServer->setCallbacks(new BleServerCB());
@@ -764,7 +764,7 @@ void setup() {
     Serial.begin(115200);
     delay(500);
     Serial.println("\n═══════════════════════════════════");
-    Serial.println("  LoRa Mesh Repeater v4.0");
+    Serial.println("  TiggyOpenMesh Repeater v4.0");
     Serial.println("  Board: " + String(BOARD_NAME));
     Serial.println("═══════════════════════════════════");
 

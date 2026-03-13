@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════
-// LoRa Mesh Communicator v3.1 - T-Deck Plus Edition
+// TiggyOpenMesh v3.1 - T-Deck Plus Edition
 // ═══════════════════════════════════════════════════════════════
 //
 // Hardware: LilyGO T-Deck Plus (ESP32-S3 + SX1262 + GPS + Keyboard)
@@ -809,7 +809,7 @@ void drawChatView() {
 
 void drawMenu(int idx, const char* items[], uint8_t count, const uint16_t* colors) {
   display.fillScreen(COL_BG);
-  drawHeaderBar("LoRa Mesh v3.1");
+  drawHeaderBar("TiggyOpenMesh v3.1");
 
   display.setFont(nullptr);
   display.setTextSize(1);
@@ -1617,7 +1617,7 @@ void drawWizardStep() {
       display.setFont(&FreeSans9pt7b);
       display.setTextColor(COL_TEXT, COL_BG);
       display.setCursor(20, 85);
-      display.print("LoRa Mesh Communicator");
+      display.print("TiggyOpenMesh");
       display.setCursor(20, 110);
       display.print("T-Deck Plus Edition");
       display.setTextColor(COL_DIM, COL_BG);
@@ -1676,7 +1676,7 @@ void drawWizardStep() {
       display.print("to message a specific node.");
       display.setTextColor(COL_ACCENT, COL_BG);
       display.setCursor(20, 220);
-      display.print("[Enter] Start using LoRa Mesh");
+      display.print("[Enter] Start using TiggyOpenMesh");
       break;
   }
 }
@@ -1978,7 +1978,7 @@ void drawBootScreen() {
   display.setFont(&FreeSans12pt7b);
   display.setTextColor(COL_ACCENT);
   display.setCursor(60, 55);
-  display.print("LoRa Mesh");
+  display.print("TiggyOpenMesh");
 
   display.setFont(&FreeSans9pt7b);
   display.setTextColor(COL_GOOD);
@@ -2028,7 +2028,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(200);
-  debugPrint("\n=== LoRa Mesh v3.1 - T-Deck Plus ===");
+  debugPrint("\n=== TiggyOpenMesh v3.1 - T-Deck Plus ===");
   randomSeed(analogRead(0));
 
   // SPI chip selects HIGH before bus init

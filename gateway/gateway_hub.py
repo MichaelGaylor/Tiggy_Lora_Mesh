@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-LoRa Mesh Gateway Hub
+TiggyOpenMesh Gateway Hub
 ═════════════════════
 Central relay server that connects all gateway nodes together.
 
@@ -249,7 +249,7 @@ class GatewayHub:
 
     async def run(self):
         """Start the hub server."""
-        log.info(f"LoRa Mesh Gateway Hub starting on ws://0.0.0.0:{self.listen_port}")
+        log.info(f"TiggyOpenMesh Gateway Hub starting on ws://0.0.0.0:{self.listen_port}")
         if self.auth_key:
             log.info(f"Authentication: ENABLED (key required)")
         else:
@@ -274,7 +274,7 @@ class GatewayHub:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="LoRa Mesh Gateway Hub — central relay for all gateway nodes",
+        description="TiggyOpenMesh Gateway Hub — central relay for all gateway nodes",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:

@@ -78,7 +78,7 @@ class TelegramBridge(context: Context) {
             }
         } else {
             "\uD83D\uDCE1 *[$from]* $text\n" +
-            "_via LoRa Mesh \u2022 ${rssi}dBm_"
+            "_via TiggyOpenMesh \u2022 ${rssi}dBm_"
         }
     }
 
@@ -119,7 +119,7 @@ class TelegramBridge(context: Context) {
         if (cfg.botToken.isBlank() || cfg.chatId.isBlank()) return false
         return sendToTelegram(
             cfg.botToken, cfg.chatId,
-            "\u2705 *LoRa Mesh connected!*\nTelegram alerts are working. " +
+            "\u2705 *TiggyOpenMesh connected!*\nTelegram alerts are working. " +
             "Group broadcasts and SOS emergencies will appear here."
         )
     }

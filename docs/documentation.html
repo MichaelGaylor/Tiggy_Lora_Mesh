@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LoRa Mesh Communicator v3.1 - Complete Documentation</title>
+<title>TiggyOpenMesh v3.1 - Complete Documentation</title>
 <style>
   :root {
     --bg: #0a0e14;
@@ -462,7 +462,7 @@
 
 <!-- ═══════════════ HERO ═══════════════ -->
 <div class="hero">
-  <h1>LoRa Mesh Communicator</h1>
+  <h1>TiggyOpenMesh</h1>
   <div class="subtitle">T-Deck Plus &bull; LoRa32 &bull; Heltec V3 &bull; Heltec V4 &bull; XIAO ESP32S3</div>
   <span class="version">v3.1 &mdash; MeshCore Architecture</span>
   <p style="color:var(--dim); margin-top:16px; font-size:0.95em;">
@@ -500,7 +500,7 @@
 <section id="overview">
 <h2>1. System Overview</h2>
 
-<p>LoRa Mesh Communicator is a fully encrypted, self-healing mesh network built on cheap ESP32 LoRa boards. Messages hop across multiple nodes to reach their destination &mdash; no internet, no cellular, no infrastructure required.</p>
+<p>TiggyOpenMesh is a fully encrypted, self-healing mesh network built on cheap ESP32 LoRa boards. Messages hop across multiple nodes to reach their destination &mdash; no internet, no cellular, no infrastructure required.</p>
 
 <div class="info-box cyan">
   <p><strong>What makes this different from Meshtastic?</strong></p>
@@ -890,7 +890,7 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
 
 <div class="screen">
   <div class="screen-header">
-    <span class="title">LoRa Mesh v3.1</span>
+    <span class="title">TiggyOpenMesh v3.1</span>
     <span class="badge">ONLINE</span>
   </div>
   <div class="screen-content">
@@ -995,7 +995,7 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
 
 <h3>Settings Submenu</h3>
 <div class="screen">
-  <div class="screen-header"><span class="title">LoRa Mesh v3.1</span></div>
+  <div class="screen-header"><span class="title">TiggyOpenMesh v3.1</span></div>
   <div class="screen-content">
     <div class="menu-item selected"><div class="bar" style="background:var(--cyan);"></div> Set Local ID <span class="arrow">&gt;</span></div>
     <div class="menu-item"><div class="bar" style="background:var(--faint);"></div> Set Target ID</div>
@@ -1088,7 +1088,7 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
       <div style="flex:1; background:var(--orange);"></div>
       <div style="flex:1; background:var(--green);"></div>
     </div>
-    <div style="font-size:22px; color:var(--cyan); margin-top:14px; font-weight:700;">LoRa Mesh</div>
+    <div style="font-size:22px; color:var(--cyan); margin-top:14px; font-weight:700;">TiggyOpenMesh</div>
     <div style="color:var(--green); margin-top:4px;">T-Deck Plus Edition</div>
     <div style="display:inline-block; background:var(--cyan); color:#000; padding:2px 12px; border-radius:8px; font-size:11px; font-weight:700; margin-top:6px;">v3.1</div>
     <div style="background:var(--panel); border-radius:8px; padding:10px; margin:12px 20px 0; text-align:left; font-size:10px; color:var(--dim); line-height:1.8;">
@@ -1783,7 +1783,7 @@ bash setup.sh</pre></div>
 <ol>
   <li>Install Python <code>python3-websockets</code> via apt</li>
   <li>Optionally install Tailscale and connect to your account</li>
-  <li>Create a systemd service that auto-starts on boot (<code>lora-mesh-hub.service</code>)</li>
+  <li>Create a systemd service that auto-starts on boot (<code>tiggyopenmesh-hub.service</code>)</li>
   <li>Optionally enable Tailscale Funnel for a public <code>wss://</code> URL</li>
 </ol>
 
@@ -1807,13 +1807,13 @@ SAVE</pre></div>
 
 <h3>Hub Management</h3>
 <div class="code-block"><pre><span class="comment"># View live logs</span>
-sudo journalctl -u lora-mesh-hub -f
+sudo journalctl -u tiggyopenmesh-hub -f
 
 <span class="comment"># Restart hub</span>
-sudo systemctl restart lora-mesh-hub
+sudo systemctl restart tiggyopenmesh-hub
 
 <span class="comment"># Check status</span>
-sudo systemctl status lora-mesh-hub</pre></div>
+sudo systemctl status tiggyopenmesh-hub</pre></div>
 </section>
 
 <!-- ═══════════════ SOLAR MODE ═══════════════ -->
@@ -2006,7 +2006,7 @@ sudo systemctl status lora-mesh-hub</pre></div>
 
 <!-- Footer -->
 <div style="background:var(--panel); border-top:1px solid var(--faint); padding:30px 40px; text-align:center; color:var(--faint); font-size:0.85em;">
-  <p>LoRa Mesh Communicator v3.1 &mdash; MeshCore Architecture</p>
+  <p>TiggyOpenMesh v3.1 &mdash; MeshCore Architecture</p>
   <p>T-Deck Plus &bull; LoRa32 T3 V1.6.1 &bull; Heltec WiFi LoRa 32 V3 &bull; Heltec WiFi LoRa 32 V4</p>
   <p style="margin-top:8px;">Documentation generated March 2026</p>
 </div>
