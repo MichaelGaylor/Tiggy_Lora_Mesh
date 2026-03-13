@@ -754,9 +754,10 @@ void loop() {
     updateOLED();
 #endif
 
-    // 5. Serial status
+    // 5. Serial config — same commands as BLE, useful via web flasher terminal
     if (Serial.available()) {
         String line = Serial.readStringUntil('\n'); line.trim();
+        if (line.length() == 0) return;
         if (line == "STATUS") {
             Serial.println("═══ WiFi Gateway Status ═══");
             Serial.println("Name:    " + String(cfg.gw_name));
@@ -764,22 +765,21 @@ void loop() {
             Serial.println("Hub:     " + String(cfg.hub_url));
             Serial.println("WiFi:    " + String(WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "disconnected"));
             Serial.println("WS:      " + String(wsConnected ? "connected" : "disconnected"));
+            Serial.println("Ant:     " + String((const char*[]){"indoor","external","rooftop"}[cfg.antenna_type]));
             Serial.println("RX:      " + String(rxCount));
             Serial.println("TX:      " + String(txCount));
             Serial.println("Heap:    " + String(ESP.getFreeHeap()));
-        } else if (line.startsWith("WIFI,")) {
+        } else if (line.startsWith("WIFI,")     || line.startsWith("HUBURL,") ||
+                   line.startsWith("HUBKEY,")   || line.startsWith("GWNAME,") ||
+                   line.startsWith("GWLOC,")    || line.startsWith("GWANTENNA,") ||
+                   line == "SAVE"               || line == "GWSTATUS") {
+            // Route all config commands through the same handler as BLE
+            // Responses print to Serial via bleSend() only if BLE connected,
+            // so echo result directly here too
             processBleCommand(line);
-        } else if (line.startsWith("HUBURL,")) {
-            processBleCommand(line);
-        } else if (line.startsWith("GWNAME,")) {
-            processBleCommand(line);
-        } else if (line == "SAVE") {
-            saveConfig();
-            Serial.println("OK: Saved. Rebooting...");
-            delay(500);
-            ESP.restart();
+            Serial.println("OK");
         } else {
-            Serial.println("Commands: STATUS | WIFI,ssid,pass | HUBURL,wss://your-hub.ts.net | GWNAME,name | SAVE");
+            Serial.println("Commands: STATUS | WIFI,ssid,pass | HUBURL,wss://host | HUBKEY,secret | GWNAME,name | GWLOC,lat,lon | GWANTENNA,0-2 | SAVE");
         }
     }
 
