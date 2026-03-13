@@ -36,15 +36,15 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: LoRa-Mesh-Android-debug
+          name: TiggyOpenMesh-Android-debug
           path: android-app/app/build/outputs/apk/debug/app-debug.apk
 
       - name: Rename APK for release
         if: github.event_name == 'release'
-        run: cp android-app/app/build/outputs/apk/debug/app-debug.apk android-app/app/build/outputs/apk/debug/LoRa-Mesh.apk
+        run: cp android-app/app/build/outputs/apk/debug/app-debug.apk android-app/app/build/outputs/apk/debug/TiggyOpenMesh.apk
 
       - name: Attach to release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: android-app/app/build/outputs/apk/debug/LoRa-Mesh.apk
+          files: android-app/app/build/outputs/apk/debug/TiggyOpenMesh.apk

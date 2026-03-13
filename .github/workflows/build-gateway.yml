@@ -32,7 +32,7 @@ jobs:
           cd gateway
           pyinstaller --noconfirm --onefile --windowed `
             --collect-data customtkinter `
-            --name "LoRa-Mesh-Hub" `
+            --name "TiggyOpenMesh-Hub" `
             gateway_hub_gui.py
 
       - name: Build Gateway Client exe
@@ -40,7 +40,7 @@ jobs:
           cd gateway
           pyinstaller --noconfirm --onefile --windowed `
             --collect-data customtkinter `
-            --name "LoRa-Mesh-Gateway" `
+            --name "TiggyOpenMesh-Gateway" `
             gateway_gui.py
 
       - name: Upload exe artifacts
@@ -48,13 +48,13 @@ jobs:
         with:
           name: gateway-windows-exe
           path: |
-            gateway/dist/LoRa-Mesh-Hub.exe
-            gateway/dist/LoRa-Mesh-Gateway.exe
+            gateway/dist/TiggyOpenMesh-Hub.exe
+            gateway/dist/TiggyOpenMesh-Gateway.exe
 
       - name: Attach to release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            gateway/dist/LoRa-Mesh-Hub.exe
-            gateway/dist/LoRa-Mesh-Gateway.exe
+            gateway/dist/TiggyOpenMesh-Hub.exe
+            gateway/dist/TiggyOpenMesh-Gateway.exe
