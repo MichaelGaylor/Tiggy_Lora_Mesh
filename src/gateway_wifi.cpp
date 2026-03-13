@@ -9,7 +9,7 @@
 //
 // Configuration via BLE (Nordic UART Service):
 //   WIFI,ssid,password         → store WiFi credentials
-//   HUBURL,ws://host:port      → store hub WebSocket URL
+//   HUBURL,wss://your-hub.ts.net → store hub WebSocket URL (wss:// for Tailscale Funnel)
 //   HUBKEY,secret              → store hub auth key
 //   GWNAME,My Gateway          → store gateway display name
 //   GWLOC,51.5,-3.2            → store lat/lon
@@ -732,7 +732,7 @@ void setup() {
     }
 
     Serial.println("Ready. Connect via BLE to configure.");
-    Serial.println("BLE: WIFI,ssid,pass | HUBURL,ws://... | GWNAME,name | SAVE");
+    Serial.println("BLE: WIFI,ssid,pass | HUBURL,wss://your-hub.ts.net | GWNAME,name | SAVE");
     dbgf("Free heap: %u\n", ESP.getFreeHeap());
 }
 
@@ -779,7 +779,7 @@ void loop() {
             delay(500);
             ESP.restart();
         } else {
-            Serial.println("Commands: STATUS | WIFI,ssid,pass | HUBURL,ws://... | GWNAME,name | SAVE");
+            Serial.println("Commands: STATUS | WIFI,ssid,pass | HUBURL,wss://your-hub.ts.net | GWNAME,name | SAVE");
         }
     }
 
