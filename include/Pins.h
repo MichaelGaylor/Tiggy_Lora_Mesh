@@ -183,6 +183,7 @@
 #define HAS_GPS             0
 #define HAS_OLED            1
 #define RADIO_SX1262        1
+#define RADIO_TCXO_VOLTAGE  1.8f  // SX1262 TCXO on DIO3 at 1.8V — required or radio hangs
 
 // Power
 #define BOARD_POWERON       -1
@@ -259,6 +260,7 @@
 #define HAS_GPS             0
 #define HAS_OLED            1
 #define RADIO_SX1262        1
+#define RADIO_TCXO_VOLTAGE  1.8f  // SX1262 TCXO on DIO3 at 1.8V
 
 // Power
 #define BOARD_POWERON       -1
@@ -354,6 +356,7 @@
 #define HAS_GPS             0
 #define HAS_OLED            0    // set to 1 if you add an I2C SSD1306
 #define RADIO_SX1262        1
+#define RADIO_TCXO_VOLTAGE  1.6f  // Wio-SX1262 TCXO at 1.6V
 
 // No power-on pin needed
 #define BOARD_POWERON       -1
