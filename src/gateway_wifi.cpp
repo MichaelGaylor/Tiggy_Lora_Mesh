@@ -233,11 +233,15 @@ static int fromHex(const String& hex, uint8_t* out, size_t maxLen) {
 #define LORA_PREAMBLE 8
 #endif
 
+#ifndef RADIO_TCXO_VOLTAGE
+#define RADIO_TCXO_VOLTAGE 0
+#endif
+
 void setupRadio() {
     dbg("Initializing radio...");
 #if defined(RADIO_SX1262)
     int state = radio.begin(LORA_FREQ, LORA_BW, LORA_SF, LORA_CR,
-                            LORA_SYNC, LORA_POWER, LORA_PREAMBLE, 0, false);
+                            LORA_SYNC, LORA_POWER, LORA_PREAMBLE, RADIO_TCXO_VOLTAGE, false);
 #elif defined(RADIO_SX1276)
     int state = radio.begin(LORA_FREQ, LORA_BW, LORA_SF, LORA_CR,
                             LORA_SYNC, LORA_POWER, LORA_PREAMBLE, 0);

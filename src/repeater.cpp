@@ -137,11 +137,15 @@ bool radioChannelFree() {
     return rssi < -120.0;
 }
 
+#ifndef RADIO_TCXO_VOLTAGE
+#define RADIO_TCXO_VOLTAGE 0
+#endif
+
 void setupRadio() {
 #if defined(RADIO_SX1262)
     debugPrint("Initializing SX1262...");
     int state = radio.begin(LORA_FREQ, LORA_BW, LORA_SF, LORA_CR,
-                            LORA_SYNC, LORA_POWER, LORA_PREAMBLE, 0, false);
+                            LORA_SYNC, LORA_POWER, LORA_PREAMBLE, RADIO_TCXO_VOLTAGE, false);
 #elif defined(RADIO_SX1276)
     debugPrint("Initializing SX1276...");
     int state = radio.begin(LORA_FREQ, LORA_BW, LORA_SF, LORA_CR,
@@ -768,7 +772,7 @@ void setup() {
     Serial.println("  Board: " + String(BOARD_NAME));
     Serial.println("═══════════════════════════════════");
 
-    randomSeed(analogRead(0));
+    randomSeed(esp_random());
 
     if (BOARD_LED >= 0) { pinMode(BOARD_LED, OUTPUT); digitalWrite(BOARD_LED, LOW); }
 #ifdef VEXT_CTRL
