@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.bluetooth.*
 import android.bluetooth.le.*
 import android.content.Context
+import android.os.Build
 import android.os.ParcelUuid
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -138,32 +139,48 @@ class BleManager(private val context: Context) {
                 g.setCharacteristicNotification(rxChar, true)
                 val descriptor = rxChar.getDescriptor(CLIENT_CONFIG_UUID)
                 if (descriptor != null) {
-                    descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                    g.writeDescriptor(descriptor)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        g.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                        @Suppress("DEPRECATION")
+                        g.writeDescriptor(descriptor)
+                    }
                 }
             }
 
             _connectionState.value = ConnectionState.CONNECTED
         }
 
+        // Android 13+ uses new signature with value parameter
+        override fun onCharacteristicChanged(
+            g: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            value: ByteArray
+        ) {
+            if (characteristic.uuid == BLE_RX_CHAR_UUID) handleRxData(value)
+        }
+
+        // Android 12 and below uses old signature
+        @Suppress("DEPRECATION")
         override fun onCharacteristicChanged(
             g: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic
         ) {
             if (characteristic.uuid == BLE_RX_CHAR_UUID) {
-                val data = characteristic.value?.toString(Charsets.UTF_8) ?: return
-                rxBuffer.append(data)
-
-                // Process complete lines
-                while (rxBuffer.contains("\n")) {
-                    val nlIdx = rxBuffer.indexOf("\n")
-                    val line = rxBuffer.substring(0, nlIdx).trim()
-                    rxBuffer.delete(0, nlIdx + 1)
-                    if (line.isNotEmpty()) {
-                        _incomingData.value = line
-                    }
-                }
+                handleRxData(characteristic.value ?: return)
             }
+        }
+    }
+
+    private fun handleRxData(data: ByteArray) {
+        rxBuffer.append(data.toString(Charsets.UTF_8))
+        while (rxBuffer.contains("\n")) {
+            val nlIdx = rxBuffer.indexOf("\n")
+            val line = rxBuffer.substring(0, nlIdx).trim()
+            rxBuffer.delete(0, nlIdx + 1)
+            if (line.isNotEmpty()) _incomingData.value = line
         }
     }
 
@@ -171,14 +188,19 @@ class BleManager(private val context: Context) {
     fun send(data: String) {
         val char = txCharacteristic ?: return
         val g = gatt ?: return
-        // BLE max payload ~20 bytes, chunk if needed
         val bytes = (data + "\n").toByteArray(Charsets.UTF_8)
         val chunkSize = 20
         for (i in bytes.indices step chunkSize) {
             val chunk = bytes.sliceArray(i until minOf(i + chunkSize, bytes.size))
-            char.value = chunk
-            g.writeCharacteristic(char)
-            if (i + chunkSize < bytes.size) Thread.sleep(30) // small delay between chunks
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                g.writeCharacteristic(char, chunk, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+            } else {
+                @Suppress("DEPRECATION")
+                char.value = chunk
+                @Suppress("DEPRECATION")
+                g.writeCharacteristic(char)
+            }
+            if (i + chunkSize < bytes.size) Thread.sleep(30)
         }
     }
 
