@@ -103,40 +103,48 @@ jobs:
             0x10000 .pio/build/lora32/firmware.bin
 
           # Gateway: Heltec V2 — WiFi gateway (ESP32, 4MB flash)
-          esptool.py --chip esp32 merge_bin \
-            -o docs/flash/firmware/gateway-heltec-v2.bin \
-            --flash_mode dio --flash_freq 80m --flash_size 4MB \
-            0x1000  .pio/build/gateway-heltec-v2/bootloader.bin \
-            0x8000  .pio/build/gateway-heltec-v2/partitions.bin \
-            0xe000  "$BOOT_APP0" \
-            0x10000 .pio/build/gateway-heltec-v2/firmware.bin
+          if [ -f .pio/build/gateway-heltec-v2/firmware.bin ]; then
+            esptool.py --chip esp32 merge_bin \
+              -o docs/flash/firmware/gateway-heltec-v2.bin \
+              --flash_mode dio --flash_freq 80m --flash_size 4MB \
+              0x1000  .pio/build/gateway-heltec-v2/bootloader.bin \
+              0x8000  .pio/build/gateway-heltec-v2/partitions.bin \
+              0xe000  "$BOOT_APP0" \
+              0x10000 .pio/build/gateway-heltec-v2/firmware.bin
+          fi
 
           # Gateway: Heltec V3 — WiFi gateway (ESP32-S3, 8MB flash)
-          esptool.py --chip esp32s3 merge_bin \
-            -o docs/flash/firmware/gateway-heltec-v3.bin \
-            --flash_mode dio --flash_freq 80m --flash_size 8MB \
-            0x0     .pio/build/gateway-heltec-v3/bootloader.bin \
-            0x8000  .pio/build/gateway-heltec-v3/partitions.bin \
-            0xe000  "$BOOT_APP0" \
-            0x10000 .pio/build/gateway-heltec-v3/firmware.bin
+          if [ -f .pio/build/gateway-heltec-v3/firmware.bin ]; then
+            esptool.py --chip esp32s3 merge_bin \
+              -o docs/flash/firmware/gateway-heltec-v3.bin \
+              --flash_mode dio --flash_freq 80m --flash_size 8MB \
+              0x0     .pio/build/gateway-heltec-v3/bootloader.bin \
+              0x8000  .pio/build/gateway-heltec-v3/partitions.bin \
+              0xe000  "$BOOT_APP0" \
+              0x10000 .pio/build/gateway-heltec-v3/firmware.bin
+          fi
 
           # Gateway: Heltec V4 — WiFi gateway (ESP32-S3, 16MB flash)
-          esptool.py --chip esp32s3 merge_bin \
-            -o docs/flash/firmware/gateway-heltec-v4.bin \
-            --flash_mode dio --flash_freq 80m --flash_size 16MB \
-            0x0     .pio/build/gateway-heltec-v4/bootloader.bin \
-            0x8000  .pio/build/gateway-heltec-v4/partitions.bin \
-            0xe000  "$BOOT_APP0" \
-            0x10000 .pio/build/gateway-heltec-v4/firmware.bin
+          if [ -f .pio/build/gateway-heltec-v4/firmware.bin ]; then
+            esptool.py --chip esp32s3 merge_bin \
+              -o docs/flash/firmware/gateway-heltec-v4.bin \
+              --flash_mode dio --flash_freq 80m --flash_size 16MB \
+              0x0     .pio/build/gateway-heltec-v4/bootloader.bin \
+              0x8000  .pio/build/gateway-heltec-v4/partitions.bin \
+              0xe000  "$BOOT_APP0" \
+              0x10000 .pio/build/gateway-heltec-v4/firmware.bin
+          fi
 
           # Gateway: XIAO ESP32S3 — WiFi gateway (ESP32-S3, 4MB flash)
-          esptool.py --chip esp32s3 merge_bin \
-            -o docs/flash/firmware/gateway-xiao-s3.bin \
-            --flash_mode dio --flash_freq 80m --flash_size 4MB \
-            0x0     .pio/build/gateway-xiao-s3/bootloader.bin \
-            0x8000  .pio/build/gateway-xiao-s3/partitions.bin \
-            0xe000  "$BOOT_APP0" \
-            0x10000 .pio/build/gateway-xiao-s3/firmware.bin
+          if [ -f .pio/build/gateway-xiao-s3/firmware.bin ]; then
+            esptool.py --chip esp32s3 merge_bin \
+              -o docs/flash/firmware/gateway-xiao-s3.bin \
+              --flash_mode dio --flash_freq 80m --flash_size 4MB \
+              0x0     .pio/build/gateway-xiao-s3/bootloader.bin \
+              0x8000  .pio/build/gateway-xiao-s3/partitions.bin \
+              0xe000  "$BOOT_APP0" \
+              0x10000 .pio/build/gateway-xiao-s3/firmware.bin
+          fi
 
       - name: Commit firmware binaries to docs
         run: |
@@ -144,8 +152,8 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add docs/flash/firmware/*.bin
           git diff --staged --quiet || git commit -m "Auto-build: update firmware binaries [skip ci]"
-          git pull --rebase origin main
-          git push
+          git fetch origin main
+          git push origin HEAD:main
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
