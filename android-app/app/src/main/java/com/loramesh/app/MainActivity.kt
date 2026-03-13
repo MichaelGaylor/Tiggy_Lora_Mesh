@@ -93,7 +93,7 @@ fun MainApp(viewModel: MeshViewModel = viewModel()) {
             TopAppBar(
                 title = {
                     Column {
-                        Text("LoRa Mesh", style = MaterialTheme.typography.titleMedium)
+                        Text("TiggyOpenMesh", style = MaterialTheme.typography.titleMedium)
                         Text(
                             deviceName,
                             style = MaterialTheme.typography.bodySmall,

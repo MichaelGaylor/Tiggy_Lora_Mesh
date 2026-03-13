@@ -4,7 +4,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 
-// ─── LoRa Mesh colour scheme (matches firmware dark theme) ───
+// ─── TiggyOpenMesh colour scheme (matches firmware dark theme) ───
 val MeshCyan = Color(0xFF00E5FF)
 val MeshGreen = Color(0xFF00E676)
 val MeshDarkBg = Color(0xFF0A0E14)

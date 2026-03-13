@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-LoRa Mesh Gateway Server
+TiggyOpenMesh Gateway Server
 ═════════════════════════
 Bridges isolated LoRa mesh islands over the internet.
 
@@ -399,7 +399,7 @@ def list_serial_ports():
 
 def main():
     parser = argparse.ArgumentParser(
-        description="LoRa Mesh Gateway — bridge mesh islands over the internet",
+        description="TiggyOpenMesh Gateway — bridge mesh islands over the internet",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:

@@ -1,4 +1,4 @@
-# LoRa Mesh Communicator
+# TiggyOpenMesh
 
 **Off-grid encrypted mesh communication — no internet, no infrastructure, no subscription.**
 

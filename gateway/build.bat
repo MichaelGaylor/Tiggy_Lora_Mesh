@@ -1,6 +1,6 @@
 @echo off
 echo ============================================
-echo   LoRa Mesh Gateway — Build Executables
+echo   TiggyOpenMesh Gateway — Build Executables
 echo ============================================
 echo.
 
@@ -15,10 +15,10 @@ if errorlevel 1 (
 )
 echo.
 
-echo [2/3] Building LoRa-Mesh-Hub.exe...
+echo [2/3] Building TiggyOpenMesh-Hub.exe...
 %PYTHON% -m PyInstaller --noconfirm --onefile --windowed ^
     --collect-data customtkinter ^
-    --name "LoRa-Mesh-Hub" ^
+    --name "TiggyOpenMesh-Hub" ^
     gateway_hub_gui.py
 if errorlevel 1 (
     echo ERROR: Failed to build Hub executable.
@@ -27,10 +27,10 @@ if errorlevel 1 (
 )
 echo.
 
-echo [3/3] Building LoRa-Mesh-Gateway.exe...
+echo [3/3] Building TiggyOpenMesh-Gateway.exe...
 %PYTHON% -m PyInstaller --noconfirm --onefile --windowed ^
     --collect-data customtkinter ^
-    --name "LoRa-Mesh-Gateway" ^
+    --name "TiggyOpenMesh-Gateway" ^
     gateway_gui.py
 if errorlevel 1 (
     echo ERROR: Failed to build Gateway executable.
@@ -42,7 +42,7 @@ echo.
 echo ============================================
 echo   Build complete!
 echo   Executables are in: dist\
-echo     - LoRa-Mesh-Hub.exe
-echo     - LoRa-Mesh-Gateway.exe
+echo     - TiggyOpenMesh-Hub.exe
+echo     - TiggyOpenMesh-Gateway.exe
 echo ============================================
 pause

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-LoRa Mesh Gateway Client — GUI
+TiggyOpenMesh Gateway Client — GUI
 ═══════════════════════════════
 Visual gateway client with mesh topology, packet waterfall, and inspector.
 Connects to a repeater via USB serial and to the hub via WebSocket.
@@ -245,7 +245,7 @@ class TopoNode:
 class GatewayGUIApp:
     def __init__(self):
         self.root = ctk.CTk()
-        self.root.title("LoRa Mesh Gateway Client")
+        self.root.title("TiggyOpenMesh Gateway Client")
         self.root.geometry("1050x780")
         self.root.configure(fg_color=COLORS["bg"])
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -275,7 +275,7 @@ class GatewayGUIApp:
         title_frame = ctk.CTkFrame(self.root, fg_color=COLORS["header"], height=40, corner_radius=0)
         title_frame.pack(fill="x")
         title_frame.pack_propagate(False)
-        ctk.CTkLabel(title_frame, text="  LoRa Mesh Gateway Client", font=("Consolas", 16, "bold"),
+        ctk.CTkLabel(title_frame, text="  TiggyOpenMesh Gateway Client", font=("Consolas", 16, "bold"),
                       text_color=COLORS["accent"]).pack(side="left", padx=10)
         self.conn_label = ctk.CTkLabel(title_frame, text="Disconnected", font=("Consolas", 12),
                                         text_color=COLORS["bad"])

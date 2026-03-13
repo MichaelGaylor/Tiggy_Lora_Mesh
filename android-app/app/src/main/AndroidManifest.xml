@@ -19,7 +19,7 @@
         android:name=".LoRaMeshApp"
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
-        android:label="LoRa Mesh"
+        android:label="TiggyOpenMesh"
         android:supportsRtl="true"
         android:theme="@style/Theme.LoRaMesh">
 
