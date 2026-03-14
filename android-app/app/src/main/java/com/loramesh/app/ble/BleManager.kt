@@ -77,7 +77,7 @@ class BleManager(private val context: Context) {
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             val device = result.device
-            val name = device.name ?: "Unknown"
+            val name = result.scanRecord?.deviceName ?: device.name ?: "Unknown"
             val entry = ScannedDevice(name, device.address, result.rssi)
 
             val current = _discoveredDevices.value.toMutableList()

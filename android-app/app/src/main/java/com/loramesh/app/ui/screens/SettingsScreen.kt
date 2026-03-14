@@ -13,9 +13,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import com.loramesh.app.data.SfChangePhase
 import com.loramesh.app.data.TelegramConfig
 import com.loramesh.app.ui.MeshViewModel
 import com.loramesh.app.ui.theme.*
+import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -23,6 +25,7 @@ fun SettingsScreen(viewModel: MeshViewModel) {
     val config by viewModel.config.collectAsState()
     val nodes by viewModel.nodes.collectAsState()
     val telegramConfig by viewModel.telegramConfig.collectAsState()
+    val sfChange by viewModel.sfChange.collectAsState()
 
     var editId by remember { mutableStateOf(config.nodeId) }
     var editKey by remember { mutableStateOf(config.aesKey) }
@@ -75,6 +78,268 @@ fun SettingsScreen(viewModel: MeshViewModel) {
                 Row {
                     Text("Frequency: ", color = MeshGrey)
                     Text("${config.frequency} MHz")
+                }
+            }
+        }
+
+        // ── Spreading Factor ─────────────────────────────────
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    "Spreading Factor",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MeshCyan
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Current SF: ${config.spreadingFactor}  " +
+                        "(Higher = longer range but slower, Lower = faster but shorter range)",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MeshGrey
+                )
+                Spacer(Modifier.height(12.dp))
+
+                when (sfChange.phase) {
+                    SfChangePhase.IDLE -> {
+                        // SF slider + initiate button
+                        var sliderSF by remember { mutableStateOf(config.spreadingFactor.toFloat()) }
+                        LaunchedEffect(config.spreadingFactor) {
+                            sliderSF = config.spreadingFactor.toFloat()
+                        }
+
+                        Text(
+                            "New SF: ${sliderSF.roundToInt()}",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Slider(
+                            value = sliderSF,
+                            onValueChange = { sliderSF = it },
+                            valueRange = 7f..12f,
+                            steps = 4,
+                            colors = SliderDefaults.colors(
+                                thumbColor = MeshCyan,
+                                activeTrackColor = MeshCyan
+                            )
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("SF7", style = MaterialTheme.typography.labelSmall, color = MeshGrey)
+                            Text("SF12", style = MaterialTheme.typography.labelSmall, color = MeshGrey)
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        Button(
+                            onClick = { viewModel.initiateSpreadingFactorChange(sliderSF.roundToInt()) },
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = sliderSF.roundToInt() != config.spreadingFactor,
+                            colors = ButtonDefaults.buttonColors(containerColor = MeshOrange)
+                        ) {
+                            Icon(Icons.Default.CellTower, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Change SF on All Nodes")
+                        }
+                        if (sliderSF.roundToInt() == config.spreadingFactor) {
+                            Text(
+                                "Select a different SF to begin the change",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MeshGrey
+                            )
+                        }
+                    }
+
+                    SfChangePhase.COLLECTING -> {
+                        // Phase 1: Show ACK progress
+                        Text(
+                            "Changing to SF${sfChange.targetSF} — waiting for node responses...",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MeshOrange
+                        )
+                        Spacer(Modifier.height(8.dp))
+
+                        val acked = sfChange.ackedNodes.size
+                        val expected = sfChange.expectedNodes.size
+                        if (expected > 0) {
+                            LinearProgressIndicator(
+                                progress = { acked.toFloat() / expected.toFloat() },
+                                modifier = Modifier.fillMaxWidth(),
+                                color = MeshGreen,
+                                trackColor = MeshGrey.copy(alpha = 0.3f)
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "$acked / $expected nodes ready",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (acked == expected) MeshGreen else MeshOrange
+                            )
+                        } else {
+                            Text(
+                                "$acked nodes responded",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MeshOrange
+                            )
+                        }
+
+                        Spacer(Modifier.height(8.dp))
+
+                        // Per-node status
+                        for (nodeId in sfChange.expectedNodes) {
+                            val responded = sfChange.ackedNodes.contains(nodeId)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    if (responded) Icons.Default.CheckCircle else Icons.Default.Schedule,
+                                    contentDescription = null,
+                                    tint = if (responded) MeshGreen else MeshGrey,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    nodeId,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (responded) MeshGreen else MeshGrey
+                                )
+                            }
+                        }
+
+                        // Show any unexpected responders
+                        val unexpected = sfChange.ackedNodes.filter { it !in sfChange.expectedNodes }
+                        for (nodeId in unexpected) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    Icons.Default.CheckCircle,
+                                    contentDescription = null,
+                                    tint = MeshGreen,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    "$nodeId (new)",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MeshGreen
+                                )
+                            }
+                        }
+
+                        Spacer(Modifier.height(12.dp))
+
+                        // Warning if not all responded
+                        if (expected > 0 && acked < expected) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(bottom = 8.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.Warning,
+                                    contentDescription = null,
+                                    tint = MeshOrange,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    "Not all nodes responded. Committing now may strand unresponsive nodes.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MeshOrange
+                                )
+                            }
+                        }
+
+                        // Commit / Cancel buttons
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                onClick = { viewModel.commitSpreadingFactorChange() },
+                                modifier = Modifier.weight(1f),
+                                enabled = acked > 0,
+                                colors = ButtonDefaults.buttonColors(containerColor = MeshGreen)
+                            ) {
+                                Icon(Icons.Default.Check, contentDescription = null)
+                                Spacer(Modifier.width(4.dp))
+                                Text("Commit")
+                            }
+                            OutlinedButton(
+                                onClick = { viewModel.cancelSpreadingFactorChange() },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("Cancel", color = MeshRed)
+                            }
+                        }
+                    }
+
+                    SfChangePhase.COMMITTED -> {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                strokeWidth = 2.dp,
+                                color = MeshCyan
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Text(
+                                "Switching all nodes to SF${sfChange.targetSF}...",
+                                color = MeshCyan
+                            )
+                        }
+                    }
+
+                    SfChangePhase.COMPLETE -> {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(
+                                Icons.Default.CheckCircle,
+                                contentDescription = null,
+                                tint = MeshGreen,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "All nodes switched to SF${sfChange.targetSF}",
+                                color = MeshGreen
+                            )
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        TextButton(
+                            onClick = { viewModel.cancelSpreadingFactorChange() }
+                        ) { Text("Dismiss", color = MeshCyan) }
+                    }
+
+                    SfChangePhase.FAILED -> {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(
+                                Icons.Default.Error,
+                                contentDescription = null,
+                                tint = MeshRed,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text("SF change failed", color = MeshRed)
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        TextButton(
+                            onClick = { viewModel.cancelSpreadingFactorChange() }
+                        ) { Text("Dismiss", color = MeshCyan) }
+                    }
                 }
             }
         }

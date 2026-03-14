@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.loramesh.app.ble.BleManager
 import com.loramesh.app.ble.ConnectionState
 import com.loramesh.app.data.*
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
@@ -38,6 +39,13 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
     private val _telegramConfig = MutableStateFlow(telegram.config)
     val telegramConfig: StateFlow<TelegramConfig> = _telegramConfig
 
+    // ─── Message ACK tracking ─────────────────────────────
+    private val pendingAcks = mutableMapOf<String, Long>() // mid → timestamp
+
+    // ─── Spreading Factor change state ──────────────────
+    private val _sfChange = MutableStateFlow(SfChangeState())
+    val sfChange: StateFlow<SfChangeState> = _sfChange
+
     val connectionState = ble.connectionState
     val connectedDeviceName = ble.connectedDeviceName
     val discoveredDevices = ble.discoveredDevices
@@ -63,7 +71,8 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
         _messages.value = _messages.value + ChatMessage(
             from = _config.value.nodeId,
             text = text,
-            isOutgoing = true
+            isOutgoing = true,
+            deliveryStatus = DeliveryStatus.SENDING
         )
     }
 
@@ -73,6 +82,7 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
             from = _config.value.nodeId,
             text = text,
             isOutgoing = true
+            // broadcasts don't ACK — no deliveryStatus
         )
     }
 
@@ -100,6 +110,21 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
 
     fun saveConfig() = ble.send("SAVE")
     fun requestStatus() = ble.requestStatus()
+
+    // ─── Spreading Factor ──────────────────────────────────
+    fun initiateSpreadingFactorChange(newSF: Int) {
+        ble.send("SF,$newSF")
+    }
+
+    fun commitSpreadingFactorChange() {
+        val state = _sfChange.value
+        if (state.phase != SfChangePhase.COLLECTING) return
+        ble.send("SFGO,${state.targetSF},${state.changeId}")
+    }
+
+    fun cancelSpreadingFactorChange() {
+        _sfChange.value = SfChangeState()
+    }
 
     // ─── Telegram ────────────────────────────────────────────
     fun saveTelegramConfig(cfg: TelegramConfig) {
@@ -173,6 +198,111 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
                     addOrUpdateNode(id, rssi, hops)
                 }
             }
+
+            // ─── Message delivery tracking ────────────────────
+            // Firmware confirmed LoRa transmit: SENT,<target>,<mid>
+            line.startsWith("SENT,") -> {
+                val parts = line.split(",", limit = 3)
+                if (parts.size >= 3) {
+                    val mid = parts[2]
+                    val msgs = _messages.value.toMutableList()
+                    val idx = msgs.indexOfLast {
+                        it.isOutgoing && it.deliveryStatus == DeliveryStatus.SENDING && it.messageId == null
+                    }
+                    if (idx >= 0) {
+                        msgs[idx] = msgs[idx].copy(messageId = mid, deliveryStatus = DeliveryStatus.SENT)
+                        _messages.value = msgs
+                        pendingAcks[mid] = System.currentTimeMillis()
+                        scheduleAckTimeout(mid)
+                    }
+                }
+            }
+
+            // ACK received from remote node: ACK,<from>,<mid>
+            line.startsWith("ACK,") -> {
+                val parts = line.split(",", limit = 3)
+                if (parts.size >= 3) {
+                    val mid = parts[2]
+                    pendingAcks.remove(mid)
+                    val msgs = _messages.value.toMutableList()
+                    val idx = msgs.indexOfFirst { it.messageId == mid }
+                    if (idx >= 0) {
+                        msgs[idx] = msgs[idx].copy(deliveryStatus = DeliveryStatus.DELIVERED)
+                        _messages.value = msgs
+                    }
+                }
+            }
+
+            // Backward compat: old firmware sends OK,SENT,<target> (no mid)
+            line.startsWith("OK,SENT,") -> {
+                val msgs = _messages.value.toMutableList()
+                val idx = msgs.indexOfLast {
+                    it.isOutgoing && it.deliveryStatus == DeliveryStatus.SENDING
+                }
+                if (idx >= 0) {
+                    msgs[idx] = msgs[idx].copy(deliveryStatus = DeliveryStatus.SENT)
+                    _messages.value = msgs
+                }
+            }
+
+            // ─── Spreading Factor change protocol ─────────────
+            // SF change initiated: CFGSTART,SF,<value>,<changeId>
+            line.startsWith("CFGSTART,") -> {
+                val parts = line.split(",")
+                if (parts.size >= 4 && parts[1] == "SF") {
+                    val newSF = parts[2].toIntOrNull() ?: return
+                    val changeId = parts[3]
+                    _sfChange.value = SfChangeState(
+                        targetSF = newSF,
+                        changeId = changeId,
+                        expectedNodes = _nodes.value.map { it.id },
+                        phase = SfChangePhase.COLLECTING
+                    )
+                }
+            }
+
+            // Node ACKed the SF change: CFGACK,SF,<value>,<changeId>,<nodeId>
+            line.startsWith("CFGACK,") -> {
+                val parts = line.split(",")
+                if (parts.size >= 5 && parts[1] == "SF") {
+                    val changeId = parts[3]
+                    val nodeId = parts[4]
+                    val current = _sfChange.value
+                    if (current.changeId == changeId && current.phase == SfChangePhase.COLLECTING) {
+                        if (!current.ackedNodes.contains(nodeId)) {
+                            _sfChange.value = current.copy(ackedNodes = current.ackedNodes + nodeId)
+                        }
+                    }
+                }
+            }
+
+            // CFGGO acknowledged by firmware: OK,SFGO,<value>
+            line.startsWith("OK,SFGO,") -> {
+                val newSF = line.substringAfter("OK,SFGO,").toIntOrNull()
+                _sfChange.value = _sfChange.value.copy(phase = SfChangePhase.COMMITTED)
+                viewModelScope.launch {
+                    delay(3000) // wait for all nodes to switch
+                    _sfChange.value = _sfChange.value.copy(phase = SfChangePhase.COMPLETE)
+                    if (newSF != null) {
+                        _config.value = _config.value.copy(spreadingFactor = newSF)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun scheduleAckTimeout(mid: String) {
+        viewModelScope.launch {
+            delay(3000) // ACK_TIMEOUT = 3s, matches firmware
+            if (pendingAcks.containsKey(mid)) {
+                pendingAcks.remove(mid)
+                val msgs = _messages.value.toMutableList()
+                val idx = msgs.indexOfFirst { it.messageId == mid }
+                if (idx >= 0 && msgs[idx].deliveryStatus == DeliveryStatus.SENT) {
+                    msgs[idx] = msgs[idx].copy(deliveryStatus = DeliveryStatus.FAILED)
+                    _messages.value = msgs
+                }
+            }
         }
     }
 
@@ -216,6 +346,7 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
                 "ID" -> cfg.nodeId = kv[1]
                 "BOARD" -> cfg.boardName = kv[1]
                 "FREQ" -> cfg.frequency = kv[1].toFloatOrNull() ?: 868.0f
+                "SF" -> cfg.spreadingFactor = kv[1].toIntOrNull() ?: 9
             }
         }
         _config.value = cfg
