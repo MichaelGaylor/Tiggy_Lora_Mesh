@@ -33,6 +33,7 @@
 
 #define ACK_TIMEOUT     3000
 #define MAX_RETRIES     3
+#define CFG_SWITCH_DELAY 2000  // ms delay after CFGGO before applying SF change
 #define HB_INTERVAL     30000UL
 #define HB_INTERVAL_SOLAR 60000UL // Solar mode: 60s heartbeat (saves power)
 #define STALE_TIMEOUT   120000UL  // 2min (was 60s) — less aggressive pruning
@@ -126,6 +127,21 @@ public:
     // Called when an ACK arrives
     typedef void (*AckFunc)(const String& from, const String& mid);
     AckFunc onAck = nullptr;
+
+    // Called when a CFG config-change request arrives
+    typedef void (*CfgFunc)(const String& cfgType, const String& value, const String& changeId, const String& from);
+    CfgFunc onCfg = nullptr;
+
+    // Called when a CFGACK arrives (initiator tracks which nodes responded)
+    typedef void (*CfgAckFunc)(const String& cfgType, const String& value, const String& changeId, const String& nodeId);
+    CfgAckFunc onCfgAck = nullptr;
+
+    // Called when CFGGO arrives — node should apply the config change
+    typedef void (*CfgGoFunc)(const String& cfgType, const String& value, const String& changeId);
+    CfgGoFunc onCfgGo = nullptr;
+
+    // Runtime spreading factor (may differ from compile-time LORA_SF after a CFG change)
+    uint8_t currentSF = LORA_SF;
 
     // ─── CRC ─────────────────────────────────────────────────
     static uint16_t crc16(const uint8_t* data, size_t len, uint16_t seed = 0xFFFF);

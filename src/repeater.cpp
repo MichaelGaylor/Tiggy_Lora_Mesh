@@ -83,6 +83,12 @@ unsigned long lastOledRefresh = 0;
 // ─── Gateway Mode ───────────────────────────────────────────
 bool gatewayMode = false;
 
+// ─── Pending SF Change (two-phase commit) ───────────────────
+bool sfChangePending = false;
+uint8_t sfChangeTarget = LORA_SF;
+unsigned long sfChangeAt = 0;
+#define EEPROM_SF_ADDR 431
+
 // ─── Solar Mode ─────────────────────────────────────────────
 // Low-power mode: OLED off, BLE off, SX1262 duty-cycle RX, ESP32 light sleep.
 // Persisted to EEPROM so it survives power cycles.
@@ -150,11 +156,11 @@ void setupRadio() {
         }
 #if defined(RADIO_SX1262)
         debugPrint("Initializing SX1262...");
-        state = radio.begin(LORA_FREQ, LORA_BW, LORA_SF, LORA_CR,
+        state = radio.begin(LORA_FREQ, LORA_BW, mesh.currentSF, LORA_CR,
                             LORA_SYNC, LORA_POWER, LORA_PREAMBLE, RADIO_TCXO_VOLTAGE, false);
 #elif defined(RADIO_SX1276)
         debugPrint("Initializing SX1276...");
-        state = radio.begin(LORA_FREQ, LORA_BW, LORA_SF, LORA_CR,
+        state = radio.begin(LORA_FREQ, LORA_BW, mesh.currentSF, LORA_CR,
                             LORA_SYNC, LORA_POWER, LORA_PREAMBLE, 0);
 #endif
         if (state == RADIOLIB_ERR_NONE) break;
@@ -449,6 +455,40 @@ void handleMessage(const String& from, const String& text, int rssi) {
     bleSend("RX," + from + "," + text + "," + String(rssi));
 }
 
+// ACK handler — called by MeshCore when an ACK arrives for us
+void handleAck(const String& from, const String& mid) {
+    debugPrint("ACK from " + from + " mid=" + mid);
+    bleSend("ACK," + from + "," + mid);
+}
+
+// CFG handler — a config change request arrived over the mesh
+void handleCfg(const String& cfgType, const String& value, const String& changeId, const String& from) {
+    debugPrint("CFG: " + cfgType + "=" + value + " from=" + from);
+    bleSend("CFG," + cfgType + "," + value + "," + changeId + "," + from);
+}
+
+// CFGACK handler — a node acknowledged the config change
+void handleCfgAck(const String& cfgType, const String& value, const String& changeId, const String& nodeId) {
+    debugPrint("CFGACK: " + cfgType + "=" + value + " node=" + nodeId);
+    bleSend("CFGACK," + cfgType + "," + value + "," + changeId + "," + nodeId);
+}
+
+// CFGGO handler — commit the config change after delay
+void handleCfgGo(const String& cfgType, const String& value, const String& changeId) {
+    debugPrint("CFGGO: " + cfgType + "=" + value);
+    bleSend("CFGGO," + cfgType + "," + value + "," + changeId);
+
+    if (cfgType == "SF") {
+        int newSF = value.toInt();
+        if (newSF >= 7 && newSF <= 12) {
+            sfChangePending = true;
+            sfChangeTarget = newSF;
+            sfChangeAt = millis() + CFG_SWITCH_DELAY;
+            debugPrint("SF change scheduled: SF" + String(newSF) + " in " + String(CFG_SWITCH_DELAY) + "ms");
+        }
+    }
+}
+
 // Node discovery handler
 void handleNodeDiscovered(const String& id, int rssi) {
     debugPrint("New node: " + id);
@@ -557,7 +597,7 @@ void processBleCommand(const String& line) {
                          String(TTL_DEFAULT) + "," + String(mesh.localID) + "," +
                          mesh.encryptMsg(text, mid);
         mesh.transmitPacket(dest, payload);
-        bleSend("OK,SENT," + target);
+        bleSend("SENT," + target + "," + mid);
     }
     else if (line.startsWith("CMD,")) {
         handleCmd("LOCAL", line.substring(4));
@@ -583,9 +623,35 @@ void processBleCommand(const String& line) {
                 ",FREQ:" + String(LORA_FREQ, 1) + ",NODES:" + String(mesh.knownCount) +
                 ",RX:" + String(mesh.packetsReceived) + ",FWD:" + String(mesh.packetsForwarded) +
                 ",GW:" + String(gatewayMode ? "ON" : "OFF") +
+                ",SF:" + String(mesh.currentSF) +
                 ",HEAP:" + String(ESP.getFreeHeap()));
     }
     else if (line == "SAVE") { saveConfig(); bleSend("OK,SAVED"); }
+    else if (line.startsWith("SF,")) {
+        // SF,<value> — initiate mesh-wide SF change (Phase 1: broadcast CFG)
+        int newSF = line.substring(3).toInt();
+        if (newSF < 7 || newSF > 12) { bleSend("ERR,SF,RANGE"); return; }
+        String changeId = mesh.generateMsgID();
+        String cfgPayload = "CFG,SF," + String(newSF) + "," + changeId + "," + String(mesh.localID);
+        mesh.transmitPacket(0xFFFF, cfgPayload);
+        bleSend("CFGSTART,SF," + String(newSF) + "," + changeId);
+    }
+    else if (line.startsWith("SFGO,")) {
+        // SFGO,<value>,<changeId> — commit SF change (Phase 2: broadcast CFGGO)
+        int c1 = line.indexOf(',', 5);
+        if (c1 < 0) return;
+        String value = line.substring(5, c1);
+        String changeId = line.substring(c1 + 1);
+        int newSF = value.toInt();
+        if (newSF < 7 || newSF > 12) { bleSend("ERR,SF,RANGE"); return; }
+        String goPayload = "CFGGO,SF," + String(newSF) + "," + changeId;
+        mesh.transmitPacket(0xFFFF, goPayload);
+        // Initiator switches LAST (extra 500ms so CFGGO propagates first)
+        sfChangePending = true;
+        sfChangeTarget = newSF;
+        sfChangeAt = millis() + CFG_SWITCH_DELAY + 500;
+        bleSend("OK,SFGO," + String(newSF));
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -715,6 +781,7 @@ void saveConfig() {
     EEPROM.put(EEPROM_GPIO_ADDR + 1 + MAX_RELAY_PINS_CFG, sensorCount);
     EEPROM.put(EEPROM_GPIO_ADDR + 2 + MAX_RELAY_PINS_CFG, sensorPins);
     EEPROM.write(EEPROM_SOLAR_ADDR, solarMode ? 1 : 0);
+    EEPROM.write(EEPROM_SF_ADDR, mesh.currentSF);
     EEPROM.write(EEPROM_MAGIC_ADDR, EEPROM_MAGIC_VAL);
     EEPROM.commit();
 }
@@ -746,6 +813,10 @@ void loadConfig() {
     // Load solar mode flag
     uint8_t solarByte = EEPROM.read(EEPROM_SOLAR_ADDR);
     solarMode = (solarByte == 1);
+
+    // Load persisted SF (valid range 7-12, else use compile-time default)
+    uint8_t storedSF = EEPROM.read(EEPROM_SF_ADDR);
+    mesh.currentSF = (storedSF >= 7 && storedSF <= 12) ? storedSF : LORA_SF;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -828,6 +899,10 @@ void setup() {
     mesh.onMessage = handleMessage;
     mesh.onCmd = handleCmd;
     mesh.onNodeDiscovered = handleNodeDiscovered;
+    mesh.onAck = handleAck;
+    mesh.onCfg = handleCfg;
+    mesh.onCfgAck = handleCfgAck;
+    mesh.onCfgGo = handleCfgGo;
 
     // SPI + Radio (retry up to 3 times — SX1262 TCXO can be slow to stabilize)
     loraSPI.begin(BOARD_SPI_SCK, BOARD_SPI_MISO, BOARD_SPI_MOSI, RADIO_CS);
@@ -952,6 +1027,24 @@ void loop() {
 
     // 2. Process jittered forwards
     mesh.processPendingForwards();
+
+    // 2b. SF change execution (after delay from CFGGO)
+    if (sfChangePending && millis() >= sfChangeAt) {
+        sfChangePending = false;
+        radio.standby();
+        int sfState = radio.setSpreadingFactor(sfChangeTarget);
+        if (sfState == RADIOLIB_ERR_NONE) {
+            mesh.currentSF = sfChangeTarget;
+            EEPROM.write(EEPROM_SF_ADDR, sfChangeTarget);
+            EEPROM.commit();
+            debugPrint("SF changed to " + String(sfChangeTarget));
+            bleSend("OK,SF," + String(sfChangeTarget));
+        } else {
+            debugPrint("SF change FAILED: " + String(sfState));
+            bleSend("ERR,SF," + String(sfState));
+        }
+        radioStartListening();
+    }
 
     // 3. Heartbeat
     if (millis() > nextHeartbeatTime) {

@@ -7,7 +7,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -16,6 +16,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.loramesh.app.data.ChatMessage
+import com.loramesh.app.data.DeliveryStatus
 import com.loramesh.app.ui.MeshViewModel
 import com.loramesh.app.ui.theme.*
 import java.text.SimpleDateFormat
@@ -168,6 +169,36 @@ private fun ChatBubble(msg: ChatMessage) {
                         style = MaterialTheme.typography.labelSmall,
                         color = MeshGrey
                     )
+                    // Delivery status for outgoing messages
+                    if (isOut && msg.deliveryStatus != null) {
+                        Spacer(Modifier.width(4.dp))
+                        when (msg.deliveryStatus) {
+                            DeliveryStatus.SENDING -> Icon(
+                                Icons.Default.Schedule,
+                                contentDescription = "Sending",
+                                modifier = Modifier.size(14.dp),
+                                tint = MeshGrey
+                            )
+                            DeliveryStatus.SENT -> Icon(
+                                Icons.Default.Check,
+                                contentDescription = "Sent",
+                                modifier = Modifier.size(14.dp),
+                                tint = MeshGrey
+                            )
+                            DeliveryStatus.DELIVERED -> Icon(
+                                Icons.Default.DoneAll,
+                                contentDescription = "Delivered",
+                                modifier = Modifier.size(14.dp),
+                                tint = MeshGreen
+                            )
+                            DeliveryStatus.FAILED -> Icon(
+                                Icons.Default.ErrorOutline,
+                                contentDescription = "Not confirmed",
+                                modifier = Modifier.size(14.dp),
+                                tint = Color(0xFFFF5252)
+                            )
+                        }
+                    }
                 }
             }
         }

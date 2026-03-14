@@ -375,6 +375,82 @@ void MeshCore::processPacket(const MeshPacket& pkt) {
         return;
     }
 
+    // ─── CFG packets (two-phase config change protocol) ──────
+    if (pkt.payload.startsWith("CFG,")) {
+        // Format: CFG,<type>,<value>,<changeId>,<initiatorID>
+        int c1 = pkt.payload.indexOf(',', 4);
+        int c2 = (c1 > 0) ? pkt.payload.indexOf(',', c1 + 1) : -1;
+        int c3 = (c2 > 0) ? pkt.payload.indexOf(',', c2 + 1) : -1;
+        if (c1 > 0 && c2 > 0 && c3 > 0) {
+            String cfgType  = pkt.payload.substring(4, c1);
+            String value    = pkt.payload.substring(c1 + 1, c2);
+            String changeId = pkt.payload.substring(c2 + 1, c3);
+            String from     = pkt.payload.substring(c3 + 1);
+
+            if (!isDuplicate(changeId)) {
+                markSeen(changeId);
+                if (onCfg) onCfg(cfgType, value, changeId, from);
+
+                // Send CFGACK back to the initiator
+                String ackBody = "CFGACK," + cfgType + "," + value + "," + changeId + "," + String(localID);
+                uint16_t destAddr = strtol(from.c_str(), nullptr, 16);
+                transmitPacket(destAddr, ackBody);
+
+                // Rebroadcast CFG so other nodes hear it
+                if (pkt.ttl > 1) {
+                    transmitPacket(0xFFFF, pkt.payload);
+                    packetsForwarded++;
+                }
+            }
+        }
+        return;
+    }
+
+    if (pkt.payload.startsWith("CFGACK,")) {
+        // Format: CFGACK,<type>,<value>,<changeId>,<nodeId>
+        if (pkt.dest == myAddr && onCfgAck) {
+            int c1 = pkt.payload.indexOf(',', 7);
+            int c2 = (c1 > 0) ? pkt.payload.indexOf(',', c1 + 1) : -1;
+            int c3 = (c2 > 0) ? pkt.payload.indexOf(',', c2 + 1) : -1;
+            if (c1 > 0 && c2 > 0 && c3 > 0) {
+                String cfgType  = pkt.payload.substring(7, c1);
+                String value    = pkt.payload.substring(c1 + 1, c2);
+                String changeId = pkt.payload.substring(c2 + 1, c3);
+                String nodeId   = pkt.payload.substring(c3 + 1);
+                onCfgAck(cfgType, value, changeId, nodeId);
+            }
+        } else if (pkt.dest != myAddr && pkt.dest != 0xFFFF && pkt.ttl > 1) {
+            // Forward CFGACK toward the initiator
+            transmitPacket(pkt.dest, pkt.payload);
+            packetsForwarded++;
+        }
+        return;
+    }
+
+    if (pkt.payload.startsWith("CFGGO,")) {
+        // Format: CFGGO,<type>,<value>,<changeId>
+        int c1 = pkt.payload.indexOf(',', 6);
+        int c2 = (c1 > 0) ? pkt.payload.indexOf(',', c1 + 1) : -1;
+        if (c1 > 0 && c2 > 0) {
+            String cfgType  = pkt.payload.substring(6, c1);
+            String value    = pkt.payload.substring(c1 + 1, c2);
+            String changeId = pkt.payload.substring(c2 + 1);
+
+            String dedupKey = "GO" + changeId;
+            if (!isDuplicate(dedupKey)) {
+                markSeen(dedupKey);
+                if (onCfgGo) onCfgGo(cfgType, value, changeId);
+
+                // Rebroadcast CFGGO so all nodes hear it
+                if (pkt.ttl > 1) {
+                    transmitPacket(0xFFFF, pkt.payload);
+                    packetsForwarded++;
+                }
+            }
+        }
+        return;
+    }
+
     // ─── Heartbeat ───────────────────────────────────────────
     if (pkt.payload.startsWith("HB,")) {
         String hbFrom = pkt.payload.substring(3);
