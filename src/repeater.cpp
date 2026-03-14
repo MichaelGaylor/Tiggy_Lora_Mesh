@@ -58,7 +58,7 @@ bool oledAvailable = false;
 
 // ─── Hardware ────────────────────────────────────────────────
 #ifdef CONFIG_IDF_TARGET_ESP32S3
-SPIClass loraSPI(SPI);
+SPIClass loraSPI(FSPI);
 #else
 SPIClass loraSPI(VSPI);
 #endif
