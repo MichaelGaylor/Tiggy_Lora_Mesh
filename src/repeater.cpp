@@ -22,6 +22,9 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
+#ifdef CONFIG_IDF_TARGET_ESP32S3
+#include <WiFi.h>  // ESP32-S3 BLE needs WiFi coex layer or BTC_TASK stack overflows
+#endif
 #include "Pins.h"
 #include "MeshCore.h"
 #if defined(RADIO_SX1262)
@@ -784,6 +787,11 @@ void setup() {
     Serial.println("═══════════════════════════════════");
 
     randomSeed(esp_random());
+
+    // ESP32-S3: init WiFi coex layer before BLE — prevents BTC_TASK stack overflow
+#ifdef CONFIG_IDF_TARGET_ESP32S3
+    WiFi.mode(WIFI_OFF);
+#endif
 
     if (BOARD_LED >= 0) { pinMode(BOARD_LED, OUTPUT); digitalWrite(BOARD_LED, LOW); }
 #ifdef VEXT_CTRL
