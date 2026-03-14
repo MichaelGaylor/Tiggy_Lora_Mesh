@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════
-// TiggyOpenMesh WiFi Gateway v1.0
+// TiggyOpenMesh WiFi Gateway v1.1
 // ═══════════════════════════════════════════════════════════════
 // Bridges the LoRa mesh network to a cloud hub via WebSocket.
 //
@@ -726,7 +726,7 @@ void setup() {
     Serial.begin(115200);
     delay(500);
     Serial.println("\n═══════════════════════════════════");
-    Serial.println("  TiggyOpenMesh WiFi Gateway v1.0");
+    Serial.println("  TiggyOpenMesh WiFi Gateway v1.1");
     Serial.println("  Board: " BOARD_NAME);
     Serial.println("═══════════════════════════════════");
 
