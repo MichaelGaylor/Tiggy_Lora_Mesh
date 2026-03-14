@@ -142,22 +142,33 @@ bool radioChannelFree() {
 #endif
 
 void setupRadio() {
+    int state = RADIOLIB_ERR_UNKNOWN;
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if (attempt > 0) {
+            debugPrint("Radio retry " + String(attempt + 1) + "/3...");
+            delay(500);  // Let TCXO stabilize between retries
+        }
 #if defined(RADIO_SX1262)
-    debugPrint("Initializing SX1262...");
-    int state = radio.begin(LORA_FREQ, LORA_BW, LORA_SF, LORA_CR,
+        debugPrint("Initializing SX1262...");
+        state = radio.begin(LORA_FREQ, LORA_BW, LORA_SF, LORA_CR,
                             LORA_SYNC, LORA_POWER, LORA_PREAMBLE, RADIO_TCXO_VOLTAGE, false);
 #elif defined(RADIO_SX1276)
-    debugPrint("Initializing SX1276...");
-    int state = radio.begin(LORA_FREQ, LORA_BW, LORA_SF, LORA_CR,
+        debugPrint("Initializing SX1276...");
+        state = radio.begin(LORA_FREQ, LORA_BW, LORA_SF, LORA_CR,
                             LORA_SYNC, LORA_POWER, LORA_PREAMBLE, 0);
 #endif
+        if (state == RADIOLIB_ERR_NONE) break;
+        debugPrint("Radio init failed: " + String(state));
+    }
     if (state != RADIOLIB_ERR_NONE) {
-        debugPrint("Radio FAILED: " + String(state));
+        debugPrint("Radio FAILED after 3 attempts: " + String(state));
         if (BOARD_LED >= 0) {
-            while (1) {
+            // Blink LED for 5s then reboot
+            for (int i = 0; i < 25; i++) {
                 digitalWrite(BOARD_LED, HIGH); delay(100);
                 digitalWrite(BOARD_LED, LOW); delay(100);
             }
+            ESP.restart();
         }
     }
 #if defined(RADIO_SX1262)
@@ -777,6 +788,7 @@ void setup() {
     if (BOARD_LED >= 0) { pinMode(BOARD_LED, OUTPUT); digitalWrite(BOARD_LED, LOW); }
 #ifdef VEXT_CTRL
     pinMode(VEXT_CTRL, OUTPUT); digitalWrite(VEXT_CTRL, LOW);
+    delay(100);  // Let VEXT power stabilize before radio/OLED init
 #endif
 #ifdef ADC_CTRL
     pinMode(ADC_CTRL, OUTPUT); digitalWrite(ADC_CTRL, HIGH);  // Enable battery voltage divider
@@ -795,7 +807,7 @@ void setup() {
     mesh.onCmd = handleCmd;
     mesh.onNodeDiscovered = handleNodeDiscovered;
 
-    // SPI + Radio
+    // SPI + Radio (retry up to 3 times — SX1262 TCXO can be slow to stabilize)
     loraSPI.begin(BOARD_SPI_SCK, BOARD_SPI_MISO, BOARD_SPI_MOSI, RADIO_CS);
     setupRadio();
 
