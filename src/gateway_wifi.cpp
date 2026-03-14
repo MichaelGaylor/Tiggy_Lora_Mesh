@@ -113,6 +113,7 @@ struct GwConfig {
     char  hub_url[128];   // e.g. ws://hub.example.com:9000
     char  hub_key[64];
     char  gw_name[64];
+    char  ble_password[32]; // BLE auth password (empty = no protection)
     float gw_lat;
     float gw_lon;
     uint8_t antenna_type; // 0=indoor 1=external 2=rooftop
@@ -128,6 +129,7 @@ void loadConfig() {
     prefs.getString("hub_url",   cfg.hub_url,   sizeof(cfg.hub_url));
     prefs.getString("hub_key",   cfg.hub_key,   sizeof(cfg.hub_key));
     prefs.getString("gw_name",   cfg.gw_name,   sizeof(cfg.gw_name));
+    prefs.getString("ble_pass",   cfg.ble_password, sizeof(cfg.ble_password));
     cfg.gw_lat      = prefs.getFloat("gw_lat",      0.0f);
     cfg.gw_lon      = prefs.getFloat("gw_lon",      0.0f);
     cfg.antenna_type = prefs.getUChar("antenna",    0);
@@ -145,6 +147,7 @@ void saveConfig() {
     prefs.putString("hub_url",   cfg.hub_url);
     prefs.putString("hub_key",   cfg.hub_key);
     prefs.putString("gw_name",   cfg.gw_name);
+    prefs.putString("ble_pass",   cfg.ble_password);
     prefs.putFloat("gw_lat",     cfg.gw_lat);
     prefs.putFloat("gw_lon",     cfg.gw_lon);
     prefs.putUChar("antenna",    cfg.antenna_type);
@@ -210,7 +213,7 @@ static int fromHex(const String& hex, uint8_t* out, size_t maxLen) {
     return n;
 }
 
-// ─── LoRa parameters (default — 868 MHz EU, SF7, 125 kHz) ────
+// ─── LoRa parameters — must match MeshCore.h exactly ─────────
 #ifndef LORA_FREQ
 #define LORA_FREQ     868.0
 #endif
@@ -218,7 +221,7 @@ static int fromHex(const String& hex, uint8_t* out, size_t maxLen) {
 #define LORA_BW       125.0
 #endif
 #ifndef LORA_SF
-#define LORA_SF       7
+#define LORA_SF       9
 #endif
 #ifndef LORA_CR
 #define LORA_CR       5
@@ -227,7 +230,7 @@ static int fromHex(const String& hex, uint8_t* out, size_t maxLen) {
 #define LORA_SYNC     0x12
 #endif
 #ifndef LORA_POWER
-#define LORA_POWER    17
+#define LORA_POWER    20
 #endif
 #ifndef LORA_PREAMBLE
 #define LORA_PREAMBLE 8
@@ -441,6 +444,7 @@ void checkWifi() {
 static BLEServer* bleServer = nullptr;
 static BLECharacteristic* bleNotifyChar = nullptr;
 static bool bleConnected = false;
+static bool bleAuthenticated = false;  // Must AUTH before config commands
 static String bleRxBuffer;
 
 // Forward declaration
@@ -448,7 +452,7 @@ void processBleCommand(const String& line);
 
 class BleServerCB : public BLEServerCallbacks {
     void onConnect(BLEServer* s)    override { bleConnected = true;  dbg("BLE: connected"); }
-    void onDisconnect(BLEServer* s) override { bleConnected = false; dbg("BLE: disconnected"); s->startAdvertising(); }
+    void onDisconnect(BLEServer* s) override { bleConnected = false; bleAuthenticated = false; dbg("BLE: disconnected"); s->startAdvertising(); }
 };
 
 class BleWriteCB : public BLECharacteristicCallbacks {
@@ -476,8 +480,70 @@ void bleSend(const String& line) {
     }
 }
 
+// Check if password is set and user hasn't authenticated yet
+bool bleNeedsAuth() {
+    return strlen(cfg.ble_password) > 0 && !bleAuthenticated;
+}
+
 void processBleCommand(const String& line) {
     dbg("BLE CMD: " + line);
+
+    // AUTH command — always allowed
+    if (line.startsWith("AUTH,")) {
+        String pass = line.substring(5); pass.trim();
+        if (strlen(cfg.ble_password) == 0) {
+            bleAuthenticated = true;
+            bleSend("OK,AUTH,no password set");
+        } else if (pass == String(cfg.ble_password)) {
+            bleAuthenticated = true;
+            bleSend("OK,AUTH");
+            dbg("BLE: authenticated");
+        } else {
+            bleSend("ERR,AUTH,wrong password");
+            dbg("BLE: auth failed");
+        }
+        return;
+    }
+
+    // SETPASS — set or change the BLE password (requires existing auth if password is set)
+    if (line.startsWith("SETPASS,")) {
+        if (bleNeedsAuth()) { bleSend("ERR,AUTH_REQUIRED"); return; }
+        String newPass = line.substring(8); newPass.trim();
+        if (newPass.length() > 30) { bleSend("ERR,PASS_TOO_LONG"); return; }
+        strncpy(cfg.ble_password, newPass.c_str(), sizeof(cfg.ble_password) - 1);
+        cfg.ble_password[sizeof(cfg.ble_password) - 1] = '\0';
+        saveConfig();
+        bleAuthenticated = true;  // Stay authenticated after setting
+        bleSend("OK,SETPASS");
+        dbg("BLE: password updated");
+        return;
+    }
+
+    // STATUS/GWSTATUS — always allowed (read-only, doesn't expose secrets)
+    if (line == "GWSTATUS" || line == "STATUS") {
+        const char* antNames[] = { "indoor", "external", "rooftop" };
+        String s = "GWSTATUS";
+        s += ",NAME:" + String(cfg.gw_name);
+        s += ",SSID:" + String(cfg.wifi_ssid);
+        s += ",HUB:"  + String(cfg.hub_url);
+        s += ",WIFI:" + String(WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "disconnected");
+        s += ",WS:"   + String(wsConnected ? "connected" : "disconnected");
+        s += ",ANT:"  + String(antNames[cfg.antenna_type]);
+        s += ",LAT:"  + String(cfg.gw_lat, 5);
+        s += ",LON:"  + String(cfg.gw_lon, 5);
+        s += ",RX:"   + String(rxCount);
+        s += ",TX:"   + String(txCount);
+        s += ",HEAP:" + String(ESP.getFreeHeap());
+        s += ",LOCKED:" + String(bleNeedsAuth() ? "YES" : "NO");
+        bleSend(s);
+        return;
+    }
+
+    // All other commands require authentication
+    if (bleNeedsAuth()) {
+        bleSend("ERR,AUTH_REQUIRED");
+        return;
+    }
 
     if (line.startsWith("WIFI,")) {
         // WIFI,ssid,password
@@ -527,22 +593,6 @@ void processBleCommand(const String& line) {
         bleSend("OK,SAVED,rebooting");
         delay(500);
         ESP.restart();
-    }
-    else if (line == "GWSTATUS" || line == "STATUS") {
-        const char* antNames[] = { "indoor", "external", "rooftop" };
-        String s = "GWSTATUS";
-        s += ",NAME:" + String(cfg.gw_name);
-        s += ",SSID:" + String(cfg.wifi_ssid);
-        s += ",HUB:"  + String(cfg.hub_url);
-        s += ",WIFI:" + String(WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "disconnected");
-        s += ",WS:"   + String(wsConnected ? "connected" : "disconnected");
-        s += ",ANT:"  + String(antNames[cfg.antenna_type]);
-        s += ",LAT:"  + String(cfg.gw_lat, 5);
-        s += ",LON:"  + String(cfg.gw_lon, 5);
-        s += ",RX:"   + String(rxCount);
-        s += ",TX:"   + String(txCount);
-        s += ",HEAP:" + String(ESP.getFreeHeap());
-        bleSend(s);
     }
     else {
         bleSend("ERR,UNKNOWN_CMD");
@@ -736,7 +786,9 @@ void setup() {
     }
 
     Serial.println("Ready. Connect via BLE to configure.");
-    Serial.println("BLE: WIFI,ssid,pass | HUBURL,wss://your-hub.ts.net | GWNAME,name | SAVE");
+    Serial.println("BLE: AUTH,pass | WIFI,ssid,pass | HUBURL,wss://host | GWNAME,name | SAVE");
+    if (strlen(cfg.ble_password) > 0) Serial.println("BLE password protection: ENABLED");
+    else Serial.println("BLE password protection: DISABLED (use SETPASS,yourpassword to enable)");
     dbgf("Free heap: %u\n", ESP.getFreeHeap());
 }
 
@@ -772,18 +824,28 @@ void loop() {
             Serial.println("Ant:     " + String((const char*[]){"indoor","external","rooftop"}[cfg.antenna_type]));
             Serial.println("RX:      " + String(rxCount));
             Serial.println("TX:      " + String(txCount));
+            Serial.println("BLE PW:  " + String(strlen(cfg.ble_password) > 0 ? "SET" : "NONE"));
             Serial.println("Heap:    " + String(ESP.getFreeHeap()));
+        } else if (line.startsWith("SETPASS,")) {
+            // Serial can always set password (physical access = trusted)
+            String newPass = line.substring(8); newPass.trim();
+            if (newPass.length() > 30) { Serial.println("ERROR: Password too long (max 30)"); }
+            else {
+                strncpy(cfg.ble_password, newPass.c_str(), sizeof(cfg.ble_password) - 1);
+                cfg.ble_password[sizeof(cfg.ble_password) - 1] = '\0';
+                saveConfig();
+                Serial.println("OK: BLE password " + String(newPass.length() > 0 ? "set" : "removed"));
+            }
         } else if (line.startsWith("WIFI,")     || line.startsWith("HUBURL,") ||
                    line.startsWith("HUBKEY,")   || line.startsWith("GWNAME,") ||
                    line.startsWith("GWLOC,")    || line.startsWith("GWANTENNA,") ||
                    line == "SAVE"               || line == "GWSTATUS") {
-            // Route all config commands through the same handler as BLE
-            // Responses print to Serial via bleSend() only if BLE connected,
-            // so echo result directly here too
+            // Serial is trusted (physical access) — bypass BLE auth
+            bleAuthenticated = true;
             processBleCommand(line);
             Serial.println("OK");
         } else {
-            Serial.println("Commands: STATUS | WIFI,ssid,pass | HUBURL,wss://host | HUBKEY,secret | GWNAME,name | GWLOC,lat,lon | GWANTENNA,0-2 | SAVE");
+            Serial.println("Commands: STATUS | WIFI,ssid,pass | HUBURL,wss://host | HUBKEY,secret | GWNAME,name | SETPASS,password | SAVE");
         }
     }
 
