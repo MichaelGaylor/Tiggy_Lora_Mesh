@@ -22,9 +22,6 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
-#ifdef CONFIG_IDF_TARGET_ESP32S3
-#include <WiFi.h>  // ESP32-S3 BLE needs WiFi coex layer or BTC_TASK stack overflows
-#endif
 #include "Pins.h"
 #include "MeshCore.h"
 #if defined(RADIO_SX1262)
@@ -476,6 +473,12 @@ class BleServerCB : public BLEServerCallbacks {
     void onDisconnect(BLEServer* s) override { bleConnected = false; debugPrint("BLE: disconnected"); s->startAdvertising(); }
 };
 
+// Queue for BLE commands — processed in loop() to avoid BTC_TASK stack overflow
+#define BLE_CMD_QUEUE_SIZE 4
+String bleCmdQueue[BLE_CMD_QUEUE_SIZE];
+volatile uint8_t bleCmdHead = 0;
+volatile uint8_t bleCmdTail = 0;
+
 class BleTxCB : public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic* c) override {
         String data = c->getValue().c_str();
@@ -484,10 +487,26 @@ class BleTxCB : public BLECharacteristicCallbacks {
             int nl = bleRxBuffer.indexOf('\n');
             String line = bleRxBuffer.substring(0, nl); line.trim();
             bleRxBuffer = bleRxBuffer.substring(nl + 1);
-            if (line.length() > 0) processBleCommand(line);
+            if (line.length() > 0) {
+                // Queue command for processing in loop() — BTC_TASK stack is too small
+                uint8_t nextHead = (bleCmdHead + 1) % BLE_CMD_QUEUE_SIZE;
+                if (nextHead != bleCmdTail) {
+                    bleCmdQueue[bleCmdHead] = line;
+                    bleCmdHead = nextHead;
+                }
+            }
         }
     }
 };
+
+// Process queued BLE commands from main loop (safe stack)
+void processBleQueue() {
+    while (bleCmdTail != bleCmdHead) {
+        String cmd = bleCmdQueue[bleCmdTail];
+        bleCmdTail = (bleCmdTail + 1) % BLE_CMD_QUEUE_SIZE;
+        processBleCommand(cmd);
+    }
+}
 
 void setupBLE() {
     String bleName = "TOM-" + String(mesh.localID);
@@ -788,11 +807,6 @@ void setup() {
 
     randomSeed(esp_random());
 
-    // ESP32-S3: init WiFi coex layer before BLE — prevents BTC_TASK stack overflow
-#ifdef CONFIG_IDF_TARGET_ESP32S3
-    WiFi.mode(WIFI_OFF);
-#endif
-
     if (BOARD_LED >= 0) { pinMode(BOARD_LED, OUTPUT); digitalWrite(BOARD_LED, LOW); }
 #ifdef VEXT_CTRL
     pinMode(VEXT_CTRL, OUTPUT); digitalWrite(VEXT_CTRL, LOW);
@@ -930,6 +944,9 @@ void loop() {
 #endif
 
     // ─── Normal loop ───────────────────────────────────────────
+    // 0. Process queued BLE commands (runs on main stack, not BTC_TASK)
+    processBleQueue();
+
     // 1. Radio RX — MeshCore handles routing, forwarding, decryption
     receiveCheck();
 
