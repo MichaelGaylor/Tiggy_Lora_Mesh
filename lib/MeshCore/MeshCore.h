@@ -10,6 +10,7 @@
 #include <Arduino.h>
 #include <AES.h>
 #include <CTR.h>
+#include <GCM.h>
 #include <RadioLib.h>
 #include <map>
 #include <vector>
@@ -39,7 +40,10 @@
 #define STALE_TIMEOUT   120000UL  // 2min (was 60s) — less aggressive pruning
 #define ROUTE_TIMEOUT   120000UL
 
-#define DEDUP_SIZE      64        // Increased from 20 — bloom-style dedup
+#define DEDUP_SIZE      128       // Hash-based dedup ring
+#define GCM_NONCE_LEN   12        // AES-GCM nonce size (96 bits)
+#define GCM_TAG_LEN     16        // AES-GCM auth tag size (128 bits)
+#define MSG_ID_LEN      6         // Message ID length (was 4, now 26^6 = ~309M)
 #define COST_WEIGHT     10
 #define EEPROM_KEY_ADDR 450
 #define EEPROM_MAGIC_ADDR 508
@@ -91,7 +95,7 @@ public:
     char localID[NODE_ID_LEN + 1]  = "0001";
     char knownNodes[MAX_NODES][NODE_ID_LEN + 1];
     uint8_t knownCount = 0;
-    char aes_key_string[AES_KEY_LEN + 1] = "DONTSHARETHEKEY!";
+    char aes_key_string[AES_KEY_LEN + 1] = "";
 
     std::map<String, Route> routingTable;
     uint16_t seqCounter = 0;
@@ -151,17 +155,15 @@ public:
     // ─── CRC ─────────────────────────────────────────────────
     static uint16_t crc16(const uint8_t* data, size_t len, uint16_t seed = 0xFFFF);
 
-    // ─── Crypto ──────────────────────────────────────────────
+    // ─── Crypto (AES-128-GCM AEAD) ─────────────────────────
     byte* getAESKey();
     String toHex(const byte* data, int len);
     void hexToBytes(const String& hex, byte* out, int& outLen);
-    void buildIV(const String& seed, byte* iv);
-    String encryptMsg(const String& msg, const String& iv_seed);
-    String decryptMsg(const String& hexstr, const String& iv_seed);
+    String encryptMsg(const String& msg);
+    String decryptMsg(const String& hexstr);
     String generateMsgID();
 
-    // ─── CFG Auth ─────────────────────────────────────────────
-    // 4-hex-char tag = CRC16(changeId + AES key) — proves same key group
+    // ─── CFG Auth (GCM-based MAC) ────────────────────────────
     String cfgAuthTag(const String& changeId);
     bool   cfgAuthValid(const String& changeId, const String& tag);
 
@@ -204,7 +206,10 @@ public:
 private:
     // Dedup: hash ring for O(1) lookups
     uint32_t dedupHashes[DEDUP_SIZE] = {0};
-    uint8_t  dedupIdx = 0;
+    uint8_t dedupIdx = 0;
+
+    // Nonce generation for AES-GCM
+    void generateNonce(byte* nonce);
 
     // Duty cycle tracking
     unsigned long txTimeThisHour = 0;

@@ -54,7 +54,7 @@
 #define MAX_CHUNKS      5
 #define MAX_PARTS       5
 #define MAX_INPUT_LEN   160
-#define CHUNK_PLAINTEXT 80
+#define CHUNK_PLAINTEXT 70
 
 #define SCREEN_W        320
 #define SCREEN_H        240
@@ -243,6 +243,7 @@ void IRAM_ATTR onRadioRx() { mesh.rxFlag = true; }
 void radioTransmit(uint8_t* pkt, size_t len) {
   radio.standby();
   radio.transmit(pkt, len);
+  mesh.rxFlag = false;  // Clear false RX flag from TX_DONE DIO1 interrupt
   radio.startReceive();
 }
 
@@ -351,7 +352,7 @@ void sendMeshMessage(const String& payload) {
   }
 
   String mid = mesh.generateMsgID();
-  String hex = mesh.encryptMsg(payload, mid);
+  String hex = mesh.encryptMsg(payload);
   if (hex.length() == 0) { showNotification("Encrypt failed!"); return; }
 
   bool noAck = payload.startsWith("POS,") || payload.startsWith("SOS,")
@@ -432,7 +433,7 @@ void sendSmartMessage(const String& baseMsg) {
     String header = "#" + String(i + 1) + "/" + String(chunks.size()) + "|";
     String payload = "MSG," + header + chunks[i];
 
-    String hex = mesh.encryptMsg(payload, chunkMid);
+    String hex = mesh.encryptMsg(payload);
     if (hex.length() == 0) continue;
 
     String route = String(mesh.localID);
@@ -2046,9 +2047,12 @@ void loadKeyFromEEPROM() {
     }
   }
   if (!valid) {
-    strncpy(mesh.aes_key_string, "DONTSHARETHEKEY!", AES_KEY_LEN);
+    // Generate random key using ESP32 hardware RNG
+    for (int i = 0; i < AES_KEY_LEN; i++)
+      mesh.aes_key_string[i] = 33 + (esp_random() % 94);  // printable ASCII !-~
     mesh.aes_key_string[AES_KEY_LEN] = '\0';
     saveKeyToEEPROM();
+    Serial.println("Generated new AES key: " + String(mesh.aes_key_string));
   }
 }
 
@@ -2139,7 +2143,12 @@ void setup() {
   Serial.begin(115200);
   delay(200);
   debugPrint("\n=== TiggyOpenMesh v3.1 - T-Deck Plus ===");
-  randomSeed(analogRead(0));
+  // Seed RNG with hardware random XOR'd with unique MAC address
+  uint8_t mac[6];
+  esp_efuse_mac_get_default(mac);
+  uint32_t macSeed = ((uint32_t)mac[2] << 24) | ((uint32_t)mac[3] << 16) |
+                     ((uint32_t)mac[4] << 8)  | mac[5];
+  randomSeed(esp_random() ^ macSeed);
 
   // SPI chip selects HIGH before bus init
   pinMode(BOARD_TFT_CS, OUTPUT);    digitalWrite(BOARD_TFT_CS, HIGH);

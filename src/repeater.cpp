@@ -89,8 +89,48 @@ uint8_t sfChangeTarget = LORA_SF;
 unsigned long sfChangeAt = 0;
 #define EEPROM_SF_ADDR 431
 
+// ─── Auto-Poll (periodic sensor reporting) ──────────────────
+#define EEPROM_AUTOPOLL_ADDR 433  // 7 bytes: enabled(1) + target(4) + interval(2)
+#define AUTOPOLL_MIN_INTERVAL 30  // seconds
+bool autoPollEnabled = false;
+char autoPollTarget[NODE_ID_LEN + 1] = "";
+uint16_t autoPollInterval = 300;  // default 5 min
+unsigned long nextAutoPollTime = 0;
+
+// ─── Relay Timers (ephemeral, not persisted) ────────────────
+#define MAX_TIMERS 4
+struct RelayTimer {
+    bool active = false;
+    uint8_t pin;
+    uint8_t phase;        // 0=waiting first action, 1=ON phase, 2=OFF phase
+    bool onAction;        // true=turn ON, false=turn OFF (for simple timers)
+    bool isPulse;         // true=repeating pulse mode
+    unsigned long nextAt; // millis() when next action fires
+    uint16_t onSec;       // pulse ON duration (seconds)
+    uint16_t offSec;      // pulse OFF duration (seconds)
+    uint16_t repeats;     // 0=forever, else countdown
+    uint16_t remaining;   // repeats remaining
+};
+RelayTimer timers[MAX_TIMERS];
+
+// ─── Cross-Node Setpoints (RAM only for v1) ────────────────
+#define MAX_SETPOINTS 4
+#define SETPOINT_COOLDOWN 10000  // 10s between triggers
+struct SetpointRule {
+    bool active = false;
+    uint8_t sensorPin;
+    uint8_t op;           // 0=GT, 1=LT, 2=EQ
+    uint16_t threshold;
+    char targetNode[NODE_ID_LEN + 1];
+    uint8_t relayPin;
+    uint8_t action;       // 0=LOW, 1=HIGH
+    bool triggered;       // hysteresis: true after first trigger
+    unsigned long lastFired;
+};
+SetpointRule setpoints[MAX_SETPOINTS];
+
 // ─── Solar Mode ─────────────────────────────────────────────
-// Low-power mode: OLED off, BLE off, SX1262 duty-cycle RX, ESP32 light sleep.
+// Low-power mode: OLED off, radio+BLE stay active.
 // Persisted to EEPROM so it survives power cycles.
 bool solarMode = false;
 bool solarOledTemporary = false;
@@ -114,25 +154,16 @@ bool isPinSafe(int pin);
 
 void IRAM_ATTR onRadioRx() { mesh.rxFlag = true; }
 
-// Start listening — uses duty-cycle RX in solar mode (SX1262 only)
+// Start listening — always continuous RX (no packet loss)
 void radioStartListening() {
-#if defined(RADIO_SX1262)
-    if (solarMode) {
-        // Duty-cycle RX: radio sleeps between brief RX windows
-        // Auto-calculates optimal timing from preamble length
-        radio.startReceiveDutyCycleAuto(LORA_PREAMBLE, 2);
-    } else {
-        radio.startReceive();
-    }
-#else
     radio.startReceive();
-#endif
 }
 
 // MeshCore calls this to transmit raw packets
 void radioTransmit(uint8_t* pkt, size_t len) {
     radio.standby();
     radio.transmit(pkt, len);
+    mesh.rxFlag = false;  // Clear false RX flag from TX_DONE DIO1 interrupt
     radioStartListening();
 }
 
@@ -220,52 +251,21 @@ void startSolarMode() {
     solarMode = true;
     debugPrint("SOLAR: Entering low-power mode");
 
-    // Disable OLED
+    // Disable OLED (biggest power draw after radio)
 #ifdef VEXT_CTRL
     digitalWrite(VEXT_CTRL, HIGH);  // Vext OFF
 #endif
     oledAvailable = false;
 
-    // Disable BLE
-    BLEDevice::deinit(true);
-    bleConnected = false;
-    debugPrint("SOLAR: BLE disabled");
-
-    // Disable ADC (saves a tiny bit)
-#ifdef ADC_CTRL
-    digitalWrite(ADC_CTRL, LOW);
-#endif
-
-    // Switch radio to duty-cycle RX
-    radio.standby();
-    radioStartListening();
-    debugPrint("SOLAR: Radio in duty-cycle RX");
-
-    // Configure ESP32-S3 light sleep wake sources
-    // Wake on DIO1 (radio packet detected)
-    gpio_num_t dio1 = (gpio_num_t)RADIO_DIO1;
-    esp_sleep_enable_gpio_wakeup();
-    gpio_wakeup_enable(dio1, GPIO_INTR_HIGH_LEVEL);
-
-    // Wake on timer (for heartbeat every 60s)
-    esp_sleep_enable_timer_wakeup(10000000ULL);  // 10 seconds max sleep
-
-#if defined(BOARD_BUTTON) && BOARD_BUTTON >= 0
-    // Wake on PRG button press (for OLED status check)
-    gpio_num_t btn = (gpio_num_t)BOARD_BUTTON;
-    gpio_wakeup_enable(btn, GPIO_INTR_LOW_LEVEL);
-#endif
-
-    debugPrint("SOLAR: Light sleep configured");
+    // Keep BLE alive — user can still configure/monitor via app
+    // Keep radio in continuous RX — no packet loss
+    // Heartbeat interval extended to 60s to save TX power
+    debugPrint("SOLAR: OLED off, BLE+radio stay active");
 }
 
 void stopSolarMode() {
     solarMode = false;
     debugPrint("SOLAR: Restoring normal operation");
-
-    // Disable light sleep wake sources
-    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
-    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_GPIO);
 
     // Re-enable OLED
 #ifdef VEXT_CTRL
@@ -284,64 +284,40 @@ void stopSolarMode() {
         oled.display();
     }
 
-    // Re-enable ADC
-#ifdef ADC_CTRL
-    digitalWrite(ADC_CTRL, HIGH);
-#endif
-
-    // Switch radio back to continuous RX
-    radio.standby();
-    radioStartListening();
-    debugPrint("SOLAR: Radio in continuous RX");
-
-    // Re-init BLE
-    setupBLE();
-    debugPrint("SOLAR: BLE re-enabled");
+    debugPrint("SOLAR: OLED restored");
 }
 
-void solarEnterLightSleep() {
-    // Brief LED blink as sign-of-life before sleeping
-    if (BOARD_LED >= 0) { digitalWrite(BOARD_LED, HIGH); delay(2); digitalWrite(BOARD_LED, LOW); }
-
-    // Enter light sleep — CPU stops, wakes on DIO1/timer/button
-    esp_light_sleep_start();
-
-    // Woke up — check why
-    esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
-
+void solarCheckButton() {
 #if defined(BOARD_BUTTON) && BOARD_BUTTON >= 0
-    if (cause == ESP_SLEEP_WAKEUP_GPIO && !digitalRead(BOARD_BUTTON)) {
+    if (!digitalRead(BOARD_BUTTON) && !solarOledTemporary) {
         // Button pressed — temporarily show OLED status
-        if (!solarOledTemporary) {
-            solarOledTemporary = true;
-            solarOledWakeUntil = millis() + SOLAR_OLED_WAKE_MS;
+        solarOledTemporary = true;
+        solarOledWakeUntil = millis() + SOLAR_OLED_WAKE_MS;
 #ifdef VEXT_CTRL
-            digitalWrite(VEXT_CTRL, LOW);  // Vext ON
-            delay(50);
+        digitalWrite(VEXT_CTRL, LOW);  // Vext ON
+        delay(50);
 #endif
-            Wire.begin(BOARD_I2C_SDA, BOARD_I2C_SCL);
-            if (oled.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-                oledAvailable = true;
-                oled.clearDisplay();
-                oled.setTextSize(1); oled.setTextColor(SSD1306_WHITE);
-                oled.setCursor(0, 0);
-                oled.println("SOLAR MODE");
-                oled.print("ID: "); oled.println(mesh.localID);
-                oled.print("N:"); oled.print(mesh.knownCount);
-                oled.print(" RX:"); oled.println(mesh.packetsReceived);
-                oled.print("FWD:"); oled.println(mesh.packetsForwarded);
-                oled.print("RSSI:"); oled.print(mesh.lastRSSI); oled.println("dBm");
-                unsigned long up = millis() / 1000;
-                oled.print("Up:");
-                if (up > 3600) { oled.print(up / 3600); oled.print("h"); }
-                oled.print((up % 3600) / 60); oled.print("m");
-                oled.display();
-            }
+        Wire.begin(BOARD_I2C_SDA, BOARD_I2C_SCL);
+        if (oled.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+            oledAvailable = true;
+            oled.clearDisplay();
+            oled.setTextSize(1); oled.setTextColor(SSD1306_WHITE);
+            oled.setCursor(0, 0);
+            oled.println("SOLAR MODE");
+            oled.print("ID: "); oled.println(mesh.localID);
+            oled.print("N:"); oled.print(mesh.knownCount);
+            oled.print(" RX:"); oled.println(mesh.packetsReceived);
+            oled.print("FWD:"); oled.println(mesh.packetsForwarded);
+            oled.print("RSSI:"); oled.print(mesh.lastRSSI); oled.println("dBm");
+            unsigned long up = millis() / 1000;
+            oled.print("Up:");
+            if (up > 3600) { oled.print(up / 3600); oled.print("h"); }
+            oled.print((up % 3600) / 60); oled.print("m");
+            oled.display();
         }
     }
-#endif
 
-    // Check if temporary OLED should be turned off
+    // Turn off temporary OLED after timeout
     if (solarOledTemporary && millis() > solarOledWakeUntil) {
         solarOledTemporary = false;
         oledAvailable = false;
@@ -349,6 +325,7 @@ void solarEnterLightSleep() {
         digitalWrite(VEXT_CTRL, HIGH);  // Vext OFF
 #endif
     }
+#endif
 }
 
 #endif // RADIO_SX1262
@@ -386,6 +363,324 @@ void setupGPIO() {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════
+// SECTION: Timer / Setpoint / Auto-Poll Handlers
+// ═══════════════════════════════════════════════════════════════
+
+// Core timer logic — returns response string, used by both mesh and BLE paths
+String processTimerCommand(const String& args) {
+    if (args == "CLEAR") {
+        for (int i = 0; i < MAX_TIMERS; i++) timers[i].active = false;
+        return "OK,TIMER,CLEAR";
+    }
+    if (args == "LIST") {
+        String resp = "TIMERS";
+        int count = 0;
+        for (int i = 0; i < MAX_TIMERS; i++) {
+            if (!timers[i].active) continue;
+            count++;
+            resp += "," + String(timers[i].pin) + ":";
+            if (timers[i].isPulse) {
+                resp += "PULSE:" + String(timers[i].onSec) + "/" + String(timers[i].offSec);
+                if (timers[i].repeats > 0) resp += "x" + String(timers[i].remaining);
+            } else {
+                resp += (timers[i].onAction ? "ON" : "OFF");
+                unsigned long remain = (timers[i].nextAt > millis()) ? (timers[i].nextAt - millis()) / 1000 : 0;
+                resp += ":" + String((unsigned long)remain) + "s";
+            }
+        }
+        if (count == 0) resp += ",NONE";
+        return resp;
+    }
+
+    // Parse: <pin>,ON|OFF,<seconds> or <pin>,PULSE,<onSec>,<offSec>,<repeats>
+    int c1 = args.indexOf(',');
+    if (c1 < 0) return "ERR,TIMER,FORMAT";
+    int pin = args.substring(0, c1).toInt();
+    if (!isPinSafe(pin)) return "ERR,TIMER,BADPIN";
+
+    String rest = args.substring(c1 + 1);
+    int c2 = rest.indexOf(',');
+    String action = (c2 > 0) ? rest.substring(0, c2) : rest;
+    action.toUpperCase();
+
+    // Find existing slot for same pin, or allocate free slot
+    int slot = -1;
+    for (int i = 0; i < MAX_TIMERS; i++) {
+        if (timers[i].active && timers[i].pin == pin) { slot = i; break; }
+    }
+    if (slot < 0) {
+        for (int i = 0; i < MAX_TIMERS; i++) {
+            if (!timers[i].active) { slot = i; break; }
+        }
+    }
+    if (slot < 0) return "ERR,TIMER,FULL";
+
+    if (action == "ON" || action == "OFF") {
+        if (c2 < 0) return "ERR,TIMER,FORMAT";
+        int seconds = rest.substring(c2 + 1).toInt();
+        if (seconds < 1 || seconds > 86400) return "ERR,TIMER,RANGE";
+        pinMode(pin, OUTPUT);
+        timers[slot].active = true;
+        timers[slot].pin = pin;
+        timers[slot].isPulse = false;
+        timers[slot].onAction = (action == "ON");
+        timers[slot].nextAt = millis() + (unsigned long)seconds * 1000UL;
+        timers[slot].phase = 0;
+        return "OK,TIMER," + String(pin) + "," + action + "," + String(seconds);
+    }
+    else if (action == "PULSE") {
+        // PULSE,<onSec>,<offSec>,<repeats>
+        if (c2 < 0) return "ERR,TIMER,FORMAT";
+        String pulseArgs = rest.substring(c2 + 1);
+        int p1 = pulseArgs.indexOf(',');
+        int p2 = pulseArgs.indexOf(',', p1 + 1);
+        if (p1 < 0 || p2 < 0) return "ERR,TIMER,FORMAT";
+        int onSec = pulseArgs.substring(0, p1).toInt();
+        int offSec = pulseArgs.substring(p1 + 1, p2).toInt();
+        int repeats = pulseArgs.substring(p2 + 1).toInt();
+        if (onSec < 1 || offSec < 1 || onSec > 3600 || offSec > 3600) return "ERR,TIMER,RANGE";
+        pinMode(pin, OUTPUT);
+        digitalWrite(pin, HIGH);  // Start ON immediately
+        timers[slot].active = true;
+        timers[slot].pin = pin;
+        timers[slot].isPulse = true;
+        timers[slot].phase = 1;  // Currently in ON phase
+        timers[slot].onSec = onSec;
+        timers[slot].offSec = offSec;
+        timers[slot].repeats = repeats;
+        timers[slot].remaining = (repeats > 0) ? repeats : 0;
+        timers[slot].nextAt = millis() + (unsigned long)onSec * 1000UL;
+        return "OK,TIMER," + String(pin) + ",PULSE," + String(onSec) + "," + String(offSec) + "," + String(repeats);
+    }
+
+    return "ERR,TIMER,BADACTION";
+}
+
+// Handle TIMER command received over mesh (CMD,TIMER,...)
+void handleTimerCmd(const String& args, const String& from) {
+    String resp = processTimerCommand(args);
+    mesh.cmdsExecuted++;
+    // Send response back over mesh to requester
+    String mid = mesh.generateMsgID();
+    String hex = mesh.encryptMsg(resp);
+    String payload = String(mesh.localID) + "," + from + "," + mid + "," +
+                     String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+    mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+    bleSend(resp);
+}
+
+// Handle TIMER command from BLE
+void handleTimerBle(const String& args) {
+    String resp = processTimerCommand(args);
+    bleSend(resp);
+}
+
+// Core setpoint logic — returns response string
+String processSetpointCommand(const String& args) {
+    if (args == "CLEAR") {
+        for (int i = 0; i < MAX_SETPOINTS; i++) setpoints[i].active = false;
+        return "OK,SETPOINT,CLEAR";
+    }
+    if (args == "LIST") {
+        String resp = "SETPOINTS";
+        int count = 0;
+        const char* ops[] = {"GT", "LT", "EQ"};
+        for (int i = 0; i < MAX_SETPOINTS; i++) {
+            if (!setpoints[i].active) continue;
+            count++;
+            resp += "," + String(setpoints[i].sensorPin) + ":" +
+                    String(ops[setpoints[i].op]) + ":" +
+                    String(setpoints[i].threshold) + "->" +
+                    String(setpoints[i].targetNode) + ":" +
+                    String(setpoints[i].relayPin) + ":" +
+                    String(setpoints[i].action);
+        }
+        if (count == 0) resp += ",NONE";
+        return resp;
+    }
+
+    // Parse: <sensorPin>,<op>,<threshold>,<targetNode>,<relayPin>,<action>
+    // Example: 34,GT,2000,0010,4,1
+    int c[5];
+    c[0] = args.indexOf(',');
+    for (int i = 1; i < 5; i++) c[i] = args.indexOf(',', c[i-1] + 1);
+    if (c[4] < 0) return "ERR,SETPOINT,FORMAT";
+
+    uint8_t sensorPin = args.substring(0, c[0]).toInt();
+    String opStr = args.substring(c[0] + 1, c[1]); opStr.toUpperCase();
+    uint16_t threshold = args.substring(c[1] + 1, c[2]).toInt();
+    String targetNode = args.substring(c[2] + 1, c[3]); targetNode.trim(); targetNode.toUpperCase();
+    uint8_t relayPin = args.substring(c[3] + 1, c[4]).toInt();
+    uint8_t action = args.substring(c[4] + 1).toInt();
+
+    if (!isPinSafe(sensorPin)) return "ERR,SETPOINT,BADSENSOR";
+    if (!mesh.isValidNodeID(targetNode)) return "ERR,SETPOINT,BADTARGET";
+
+    uint8_t op = 255;
+    if (opStr == "GT") op = 0;
+    else if (opStr == "LT") op = 1;
+    else if (opStr == "EQ") op = 2;
+    if (op > 2) return "ERR,SETPOINT,BADOP";
+
+    int slot = -1;
+    for (int i = 0; i < MAX_SETPOINTS; i++) {
+        if (!setpoints[i].active) { slot = i; break; }
+    }
+    if (slot < 0) return "ERR,SETPOINT,FULL";
+
+    setpoints[slot].active = true;
+    setpoints[slot].sensorPin = sensorPin;
+    setpoints[slot].op = op;
+    setpoints[slot].threshold = threshold;
+    strncpy(setpoints[slot].targetNode, targetNode.c_str(), NODE_ID_LEN);
+    setpoints[slot].targetNode[NODE_ID_LEN] = '\0';
+    setpoints[slot].relayPin = relayPin;
+    setpoints[slot].action = action;
+    setpoints[slot].triggered = false;
+    setpoints[slot].lastFired = 0;
+
+    const char* ops[] = {"GT", "LT", "EQ"};
+    return "OK,SETPOINT," + String(sensorPin) + "," + String(ops[op]) + "," +
+           String(threshold) + "," + targetNode + "," + String(relayPin) + "," + String(action);
+}
+
+// Handle SETPOINT command received over mesh (CMD,SETPOINT,...)
+void handleSetpointCmd(const String& args, const String& from) {
+    String resp = processSetpointCommand(args);
+    mesh.cmdsExecuted++;
+    String mid = mesh.generateMsgID();
+    String hex = mesh.encryptMsg(resp);
+    String payload = String(mesh.localID) + "," + from + "," + mid + "," +
+                     String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+    mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+    bleSend(resp);
+}
+
+// Handle SETPOINT command from BLE
+void handleSetpointBle(const String& args) {
+    String resp = processSetpointCommand(args);
+    bleSend(resp);
+}
+
+// Process active relay timers — called from loop()
+void processTimers() {
+    unsigned long now = millis();
+    for (int i = 0; i < MAX_TIMERS; i++) {
+        if (!timers[i].active || now < timers[i].nextAt) continue;
+
+        if (!timers[i].isPulse) {
+            // Simple delay timer — fire once and deactivate
+            digitalWrite(timers[i].pin, timers[i].onAction ? HIGH : LOW);
+            debugPrint("TIMER: pin " + String(timers[i].pin) + " -> " + String(timers[i].onAction ? "ON" : "OFF"));
+            bleSend("TIMER,FIRED," + String(timers[i].pin) + "," + String(timers[i].onAction ? "ON" : "OFF"));
+            timers[i].active = false;
+        } else {
+            // Pulse timer — alternate ON/OFF phases
+            if (timers[i].phase == 1) {
+                // Was ON, switch to OFF
+                digitalWrite(timers[i].pin, LOW);
+                timers[i].phase = 2;
+                timers[i].nextAt = now + (unsigned long)timers[i].offSec * 1000UL;
+            } else {
+                // Was OFF, check repeats then switch to ON
+                if (timers[i].repeats > 0) {
+                    timers[i].remaining--;
+                    if (timers[i].remaining == 0) {
+                        digitalWrite(timers[i].pin, LOW);
+                        debugPrint("TIMER: pin " + String(timers[i].pin) + " pulse DONE");
+                        bleSend("TIMER,DONE," + String(timers[i].pin));
+                        timers[i].active = false;
+                        continue;
+                    }
+                }
+                digitalWrite(timers[i].pin, HIGH);
+                timers[i].phase = 1;
+                timers[i].nextAt = now + (unsigned long)timers[i].onSec * 1000UL;
+            }
+        }
+    }
+}
+
+// Check setpoint rules against current sensor values — called from loop()
+void checkSetpoints() {
+    unsigned long now = millis();
+    for (int i = 0; i < MAX_SETPOINTS; i++) {
+        if (!setpoints[i].active) continue;
+        if (now - setpoints[i].lastFired < SETPOINT_COOLDOWN) continue;
+
+        int value = (setpoints[i].sensorPin >= 34) ? analogRead(setpoints[i].sensorPin)
+                                                     : digitalRead(setpoints[i].sensorPin);
+        bool condition = false;
+        switch (setpoints[i].op) {
+            case 0: condition = (value > setpoints[i].threshold); break;  // GT
+            case 1: condition = (value < setpoints[i].threshold); break;  // LT
+            case 2: condition = (value == setpoints[i].threshold); break; // EQ
+        }
+
+        if (condition && !setpoints[i].triggered) {
+            // Threshold crossed — fire CMD,SET to target node over mesh
+            setpoints[i].triggered = true;
+            setpoints[i].lastFired = now;
+
+            String target = String(setpoints[i].targetNode);
+            String cmdText = "CMD,SET," + String(setpoints[i].relayPin) + "," + String(setpoints[i].action);
+            uint16_t dest = strtol(target.c_str(), nullptr, 16);
+            String mid = mesh.generateMsgID();
+            String hex = mesh.encryptMsg(cmdText);
+            String payload = String(mesh.localID) + "," + target + "," + mid + "," +
+                             String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+            mesh.transmitPacket(dest, payload);
+
+            debugPrint("SETPOINT: pin " + String(setpoints[i].sensorPin) + "=" + String(value) +
+                       " -> " + target + " pin " + String(setpoints[i].relayPin) + "=" + String(setpoints[i].action));
+            bleSend("SETPOINT,FIRED," + String(setpoints[i].sensorPin) + "," + String(value) + "," + target);
+        }
+        else if (!condition && setpoints[i].triggered) {
+            // Hysteresis: reset trigger when value moves past threshold by 10% margin
+            uint16_t margin = setpoints[i].threshold / 10;
+            if (margin < 1) margin = 1;
+            bool clearCondition = false;
+            switch (setpoints[i].op) {
+                case 0: clearCondition = (value < (int)(setpoints[i].threshold - margin)); break;
+                case 1: clearCondition = (value > (int)(setpoints[i].threshold + margin)); break;
+                case 2: clearCondition = (value != setpoints[i].threshold); break;
+            }
+            if (clearCondition) {
+                setpoints[i].triggered = false;
+            }
+        }
+    }
+}
+
+// Execute auto-poll — read all sensors and send SDATA to target
+void executeAutoPoll() {
+    if (!autoPollEnabled || sensorCount == 0) return;
+    unsigned long now = millis();
+    if (now < nextAutoPollTime) return;
+
+    // Schedule next poll with ±2s jitter to avoid synchronized collisions
+    nextAutoPollTime = now + (unsigned long)autoPollInterval * 1000UL + random(-2000, 2000);
+
+    String sdata = "SDATA," + String(mesh.localID);
+    for (int i = 0; i < sensorCount; i++) {
+        int pin = sensorPins[i];
+        int value = (pin >= 34) ? analogRead(pin) : digitalRead(pin);
+        sdata += "," + String(pin) + ":" + String(value);
+    }
+
+    // Send to target node over mesh
+    uint16_t dest = strtol(autoPollTarget, nullptr, 16);
+    String mid = mesh.generateMsgID();
+    String hex = mesh.encryptMsg(sdata);
+    String payload = String(mesh.localID) + "," + String(autoPollTarget) + "," + mid + "," +
+                     String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+    mesh.transmitPacket(dest, payload);
+
+    debugPrint("AUTOPOLL: sent SDATA to " + String(autoPollTarget));
+    bleSend(sdata);  // Also notify local BLE client
+}
+
 // CMD handler — called by MeshCore when a CMD arrives for us
 void handleCmd(const String& from, const String& cmdBody) {
     int c1 = cmdBody.indexOf(',');
@@ -404,7 +699,7 @@ void handleCmd(const String& from, const String& cmdBody) {
         // Send response back over mesh
         String mid = mesh.generateMsgID();
         String rsp = "CMD,RSP," + String(pin) + "," + String(val);
-        String hex = mesh.encryptMsg(rsp, mid);
+        String hex = mesh.encryptMsg(rsp);
         String payload = String(mesh.localID) + "," + from + "," + mid + "," +
                          String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
         mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
@@ -417,7 +712,7 @@ void handleCmd(const String& from, const String& cmdBody) {
         mesh.cmdsExecuted++;
         String mid = mesh.generateMsgID();
         String rsp = "CMD,RSP," + String(pin) + "," + String(value);
-        String hex = mesh.encryptMsg(rsp, mid);
+        String hex = mesh.encryptMsg(rsp);
         String payload = String(mesh.localID) + "," + from + "," + mid + "," +
                          String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
         mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
@@ -434,7 +729,7 @@ void handleCmd(const String& from, const String& cmdBody) {
         mesh.cmdsExecuted++;
         String mid = mesh.generateMsgID();
         String rsp = "CMD,RSP," + String(pin) + ",0";
-        String hex = mesh.encryptMsg(rsp, mid);
+        String hex = mesh.encryptMsg(rsp);
         String payload = String(mesh.localID) + "," + from + "," + mid + "," +
                          String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
         mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
@@ -446,6 +741,32 @@ void handleCmd(const String& from, const String& cmdBody) {
         rsp += "|S:";
         for (int i = 0; i < sensorCount; i++) { if (i) rsp += ","; rsp += String(sensorPins[i]); }
         bleSend(rsp);
+    }
+    else if (action == "POLL") {
+        // Read all sensor pins and return bundled SDATA response
+        String sdata = "SDATA," + String(mesh.localID);
+        for (int i = 0; i < sensorCount; i++) {
+            int pin = sensorPins[i];
+            int value = (pin >= 34) ? analogRead(pin) : digitalRead(pin);
+            sdata += "," + String(pin) + ":" + String(value);
+        }
+        mesh.cmdsExecuted++;
+        String mid = mesh.generateMsgID();
+        String hex = mesh.encryptMsg(sdata);
+        String payload = String(mesh.localID) + "," + from + "," + mid + "," +
+                         String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+        mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+        bleSend(sdata);
+    }
+    else if (action == "TIMER") {
+        // TIMER,<pin>,ON,<seconds> | TIMER,<pin>,OFF,<seconds>
+        // TIMER,<pin>,PULSE,<onSec>,<offSec>,<repeats> | TIMER,CLEAR | TIMER,LIST
+        handleTimerCmd(rest, from);
+    }
+    else if (action == "SETPOINT") {
+        // SETPOINT,<sensorPin>,<op>,<threshold>,<targetNode>,<relayPin>,<action>
+        // SETPOINT,CLEAR | SETPOINT,LIST
+        handleSetpointCmd(rest, from);
     }
 }
 
@@ -612,7 +933,7 @@ void processBleCommand(const String& line) {
         String mid = mesh.generateMsgID();
         String payload = String(mesh.localID) + "," + target + "," + mid + "," +
                          String(TTL_DEFAULT) + "," + String(mesh.localID) + "," +
-                         mesh.encryptMsg(text, mid);
+                         mesh.encryptMsg(text);
         mesh.transmitPacket(dest, payload);
         bleSend("SENT," + target + "," + mid);
     }
@@ -624,6 +945,7 @@ void processBleCommand(const String& line) {
         if (mesh.isValidNodeID(id)) {
             strncpy(mesh.localID, id.c_str(), NODE_ID_LEN);
             mesh.localID[NODE_ID_LEN] = '\0';
+            mesh.idConflictDetected = false;  // Clear stale conflict on ID change
             bleSend("OK,ID," + String(mesh.localID));
         }
     }
@@ -642,6 +964,7 @@ void processBleCommand(const String& line) {
                 ",GW:" + String(gatewayMode ? "ON" : "OFF") +
                 ",SF:" + String(mesh.currentSF) +
                 ",POWER:" + String(solarMode ? "SOLAR" : "NORMAL") +
+                ",AUTOPOLL:" + String(autoPollEnabled ? (String(autoPollTarget) + "/" + String(autoPollInterval) + "s").c_str() : "OFF") +
                 ",HEAP:" + String(ESP.getFreeHeap()));
     }
     else if (line == "SAVE") { saveConfig(); bleSend("OK,SAVED"); }
@@ -676,15 +999,92 @@ void processBleCommand(const String& line) {
     else if (line == "POWER,SOLAR") {
         solarMode = true;
         saveConfig();
+        startSolarMode();
         bleSend("OK,POWER,SOLAR");
-        delay(100);
-        startSolarMode();  // Disables BLE — connection will drop
     }
     else if (line == "POWER,NORMAL") {
         if (solarMode) { stopSolarMode(); saveConfig(); }
         bleSend("OK,POWER,NORMAL");
     }
 #endif
+    else if (line == "NODES") {
+        // Send full list of known nodes with routing info
+        bleSend("NODELIST," + String(mesh.knownCount));
+        for (uint8_t i = 0; i < mesh.knownCount; i++) {
+            String nodeId = String(mesh.knownNodes[i]);
+            int rssi = 0;
+            int hops = 0;
+            unsigned long age = 0;  // seconds since last seen
+            auto it = mesh.routingTable.find(nodeId);
+            if (it != mesh.routingTable.end()) {
+                rssi = it->second.rssi;
+                hops = it->second.cost / COST_WEIGHT;
+                if (hops < 1) hops = 1;
+                age = (millis() - it->second.lastSeen) / 1000;
+            }
+            bool active = (age < (STALE_TIMEOUT / 1000));
+            // Format: NODE,<id>,<rssi>,<hops>,<age_seconds>,<active>
+            bleSend("NODE," + nodeId + "," + String(rssi) + "," +
+                    String(hops) + "," + String(age) + "," +
+                    String(active ? "1" : "0"));
+        }
+        bleSend("NODEEND");
+    }
+    else if (line == "POLL") {
+        // Poll all local sensors — return bundled SDATA
+        String sdata = "SDATA," + String(mesh.localID);
+        for (int i = 0; i < sensorCount; i++) {
+            int pin = sensorPins[i];
+            int value = (pin >= 34) ? analogRead(pin) : digitalRead(pin);
+            sdata += "," + String(pin) + ":" + String(value);
+        }
+        bleSend(sdata);
+    }
+    else if (line.startsWith("POLL,")) {
+        // Poll remote node's sensors over mesh: POLL,<targetNodeId>
+        String target = line.substring(5); target.trim(); target.toUpperCase();
+        if (!mesh.isValidNodeID(target)) { bleSend("ERR,POLL,BADID"); return; }
+        uint16_t dest = strtol(target.c_str(), nullptr, 16);
+        String mid = mesh.generateMsgID();
+        String cmdText = "CMD,POLL";
+        String hex = mesh.encryptMsg(cmdText);
+        String payload = String(mesh.localID) + "," + target + "," + mid + "," +
+                         String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+        mesh.transmitPacket(dest, payload);
+        bleSend("SENT," + target + "," + mid);
+    }
+    else if (line.startsWith("AUTOPOLL,")) {
+        // Configure auto-poll: AUTOPOLL,<target>,<interval> or AUTOPOLL,OFF
+        String args = line.substring(9); args.trim();
+        if (args == "OFF") {
+            autoPollEnabled = false;
+            saveConfig();
+            bleSend("OK,AUTOPOLL,OFF");
+        } else {
+            int comma = args.indexOf(',');
+            if (comma > 0) {
+                String target = args.substring(0, comma); target.trim(); target.toUpperCase();
+                int interval = args.substring(comma + 1).toInt();
+                if (!mesh.isValidNodeID(target)) { bleSend("ERR,AUTOPOLL,BADID"); return; }
+                if (interval < AUTOPOLL_MIN_INTERVAL) { bleSend("ERR,AUTOPOLL,MIN30S"); return; }
+                autoPollEnabled = true;
+                strncpy(autoPollTarget, target.c_str(), NODE_ID_LEN);
+                autoPollTarget[NODE_ID_LEN] = '\0';
+                autoPollInterval = interval;
+                nextAutoPollTime = millis() + (unsigned long)interval * 1000UL;
+                saveConfig();
+                bleSend("OK,AUTOPOLL," + String(autoPollTarget) + "," + String(interval));
+            } else {
+                bleSend("ERR,AUTOPOLL,FORMAT");
+            }
+        }
+    }
+    else if (line.startsWith("TIMER,")) {
+        handleTimerBle(line.substring(6));
+    }
+    else if (line.startsWith("SETPOINT,")) {
+        handleSetpointBle(line.substring(9));
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -701,6 +1101,7 @@ void handleSerialConfig() {
         if (mesh.isValidNodeID(id)) {
             strncpy(mesh.localID, id.c_str(), NODE_ID_LEN);
             mesh.localID[NODE_ID_LEN] = '\0';
+            mesh.idConflictDetected = false;  // Clear stale conflict on ID change
             Serial.println("OK: ID set to " + String(mesh.localID));
         } else Serial.println("ERROR: ID must be 4 hex chars");
     }
@@ -747,14 +1148,23 @@ void handleSerialConfig() {
         Serial.println("Heap:     " + String(ESP.getFreeHeap()));
         Serial.println("Gateway:  " + String(gatewayMode ? "ON" : "OFF"));
         Serial.println("Solar:    " + String(solarMode ? "ON" : "OFF"));
+        if (autoPollEnabled) {
+            Serial.println("AutoPoll: " + String(autoPollTarget) + " every " + String(autoPollInterval) + "s");
+        } else {
+            Serial.println("AutoPoll: OFF");
+        }
     }
     else if (line == "SAVE") { saveConfig(); Serial.println("OK: Saved"); }
     else if (line == "RESET") {
         strncpy(mesh.localID, "0010", NODE_ID_LEN + 1);
-        strncpy(mesh.aes_key_string, "DONTSHARETHEKEY!", AES_KEY_LEN + 1);
+        // Generate random AES key
+        for (int i = 0; i < AES_KEY_LEN; i++)
+            mesh.aes_key_string[i] = 33 + (esp_random() % 94);
+        mesh.aes_key_string[AES_KEY_LEN] = '\0';
         uint8_t d[] = DEFAULT_RELAY_PINS; relayCount = sizeof(d)/sizeof(d[0]); memcpy(relayPins, d, relayCount);
         uint8_t s[] = DEFAULT_SENSOR_PINS; sensorCount = sizeof(s)/sizeof(s[0]); memcpy(sensorPins, s, sensorCount);
-        saveConfig(); Serial.println("OK: Reset to defaults");
+        saveConfig();
+        Serial.println("OK: Reset. New key: " + String(mesh.aes_key_string));
     }
     else if (line.startsWith("PKT,")) {
         // Gateway inject: receive hex-encoded raw packet from bridge server
@@ -781,6 +1191,32 @@ void handleSerialConfig() {
         gatewayMode = false;
         Serial.println("OK: Gateway mode OFF");
     }
+    else if (line.startsWith("AUTOPOLL ")) {
+        String args = line.substring(9); args.trim();
+        if (args == "OFF") {
+            autoPollEnabled = false;
+            saveConfig();
+            Serial.println("OK: Auto-poll disabled");
+        } else {
+            // AUTOPOLL <target> <interval>
+            int sp = args.indexOf(' ');
+            if (sp > 0) {
+                String target = args.substring(0, sp); target.trim(); target.toUpperCase();
+                int interval = args.substring(sp + 1).toInt();
+                if (!mesh.isValidNodeID(target)) { Serial.println("ERROR: Invalid target ID"); return; }
+                if (interval < AUTOPOLL_MIN_INTERVAL) { Serial.println("ERROR: Minimum interval is 30s"); return; }
+                autoPollEnabled = true;
+                strncpy(autoPollTarget, target.c_str(), NODE_ID_LEN);
+                autoPollTarget[NODE_ID_LEN] = '\0';
+                autoPollInterval = interval;
+                nextAutoPollTime = millis() + (unsigned long)interval * 1000UL;
+                saveConfig();
+                Serial.println("OK: Auto-poll to " + String(autoPollTarget) + " every " + String(interval) + "s");
+            } else {
+                Serial.println("Usage: AUTOPOLL <targetId> <seconds> | AUTOPOLL OFF");
+            }
+        }
+    }
 #if defined(RADIO_SX1262)
     else if (line == "SOLAR ON") {
         solarMode = true;
@@ -795,7 +1231,7 @@ void handleSerialConfig() {
         Serial.println("OK: Solar mode OFF — normal operation restored");
     }
 #endif
-    else Serial.println("Commands: ID xxxx | KEY xxx... | RELAY 2,4,12 | SENSOR 34,36 | STATUS | SAVE | RESET | GATEWAY ON/OFF"
+    else Serial.println("Commands: ID xxxx | KEY xxx... | RELAY 2,4,12 | SENSOR 34,36 | STATUS | SAVE | RESET | GATEWAY ON/OFF | AUTOPOLL <id> <sec>"
 #if defined(RADIO_SX1262)
         " | SOLAR ON/OFF"
 #endif
@@ -815,6 +1251,10 @@ void saveConfig() {
     EEPROM.put(EEPROM_GPIO_ADDR + 2 + MAX_RELAY_PINS_CFG, sensorPins);
     EEPROM.write(EEPROM_SOLAR_ADDR, solarMode ? 1 : 0);
     EEPROM.write(EEPROM_SF_ADDR, mesh.currentSF);
+    // Auto-poll config: enabled(1) + target(5) + interval(2) = 8 bytes at addr 433
+    EEPROM.write(EEPROM_AUTOPOLL_ADDR, autoPollEnabled ? 1 : 0);
+    EEPROM.put(EEPROM_AUTOPOLL_ADDR + 1, autoPollTarget);
+    EEPROM.put(EEPROM_AUTOPOLL_ADDR + 6, autoPollInterval);
     EEPROM.write(EEPROM_MAGIC_ADDR, EEPROM_MAGIC_VAL);
     EEPROM.commit();
 }
@@ -842,7 +1282,13 @@ void loadConfig() {
     bool keyValid = (strlen(mesh.aes_key_string) == AES_KEY_LEN);
     if (keyValid) for (int i = 0; i < AES_KEY_LEN; i++)
         if (mesh.aes_key_string[i] < 0x20 || mesh.aes_key_string[i] > 0x7E) { keyValid = false; break; }
-    if (!keyValid) strncpy(mesh.aes_key_string, "DONTSHARETHEKEY!", AES_KEY_LEN + 1);
+    if (!keyValid) {
+        // Generate random AES key
+        for (int i = 0; i < AES_KEY_LEN; i++)
+            mesh.aes_key_string[i] = 33 + (esp_random() % 94);
+        mesh.aes_key_string[AES_KEY_LEN] = '\0';
+        debugPrint("Generated new AES key: " + String(mesh.aes_key_string));
+    }
 
     EEPROM.get(EEPROM_GPIO_ADDR, relayCount);
     if (relayCount > MAX_RELAY_PINS_CFG) relayCount = 0;
@@ -858,6 +1304,18 @@ void loadConfig() {
     // Load persisted SF (valid range 7-12, else use compile-time default)
     uint8_t storedSF = EEPROM.read(EEPROM_SF_ADDR);
     mesh.currentSF = (storedSF >= 7 && storedSF <= 12) ? storedSF : LORA_SF;
+
+    // Load auto-poll config
+    uint8_t apEnabled = EEPROM.read(EEPROM_AUTOPOLL_ADDR);
+    if (apEnabled == 1) {
+        autoPollEnabled = true;
+        EEPROM.get(EEPROM_AUTOPOLL_ADDR + 1, autoPollTarget);
+        autoPollTarget[NODE_ID_LEN] = '\0';
+        EEPROM.get(EEPROM_AUTOPOLL_ADDR + 6, autoPollInterval);
+        if (autoPollInterval < AUTOPOLL_MIN_INTERVAL) autoPollInterval = 300;
+        if (!mesh.isValidNodeID(String(autoPollTarget))) autoPollEnabled = false;
+        if (autoPollEnabled) nextAutoPollTime = millis() + 10000;  // Start 10s after boot
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -917,7 +1375,13 @@ void setup() {
     Serial.println("  Board: " + String(BOARD_NAME));
     Serial.println("═══════════════════════════════════");
 
-    randomSeed(esp_random());
+    // Seed RNG with hardware random XOR'd with unique MAC address
+    // esp_random() alone may not be truly random this early in boot (before WiFi/BT)
+    uint8_t mac[6];
+    esp_efuse_mac_get_default(mac);
+    uint32_t macSeed = ((uint32_t)mac[2] << 24) | ((uint32_t)mac[3] << 16) |
+                       ((uint32_t)mac[4] << 8)  | mac[5];
+    randomSeed(esp_random() ^ macSeed);
 
     if (BOARD_LED >= 0) { pinMode(BOARD_LED, OUTPUT); digitalWrite(BOARD_LED, LOW); }
 #ifdef VEXT_CTRL
@@ -1035,10 +1499,11 @@ void setup() {
     setupGPIO();
 
     // ─── Solar mode boot path ──────────────────────────────────
-    // Skip BLE and OLED init — go straight to low-power operation
+    // BLE stays active, OLED off — full radio, no packet loss
 #if defined(RADIO_SX1262)
     if (solarMode) {
-        // Brief OLED splash then enter solar mode
+        setupBLE();  // BLE stays on for app access
+        // Brief OLED splash then turn it off
         Wire.begin(BOARD_I2C_SDA, BOARD_I2C_SCL);
         if (oled.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
             oled.clearDisplay();
@@ -1047,12 +1512,14 @@ void setup() {
             oled.println("SOLAR MODE");
             oled.println("ID: " + String(mesh.localID));
             oled.println(String(LORA_FREQ, 1) + " MHz");
+            oled.println("OLED off, BLE+radio on");
             oled.display();
             delay(2000);
         }
         nextHeartbeatTime = millis() + random(2000, 8000);
         startSolarMode();
-        Serial.println("Solar mode active. Send SOLAR OFF to restore normal operation.");
+        Serial.println("Solar mode active. OLED off, BLE+radio stay on.");
+        Serial.println("Send SOLAR OFF via serial or POWER,NORMAL via BLE to restore.");
         return;
     }
 #endif
@@ -1085,59 +1552,39 @@ void setup() {
 }
 
 void loop() {
-    // ─── Solar mode fast-path ──────────────────────────────────
+    // ─── Solar mode — OLED off, everything else runs normally ──
 #if defined(RADIO_SX1262)
     if (solarMode) {
-        // 1. Radio RX
-        receiveCheck();
+        // BLE commands still processed
+        processBleQueue();
 
-        // 2. Process jittered forwards
+        // Radio RX — continuous, no packet loss
+        receiveCheck();
         mesh.processPendingForwards();
 
-        // 3. Heartbeat (60s interval in solar mode)
+        // Heartbeat (60s interval in solar mode to save TX power)
         if (millis() > nextHeartbeatTime) {
             mesh.sendHeartbeat();
             nextHeartbeatTime = millis() + HB_INTERVAL_SOLAR + random(-5000, 5000);
             if (BOARD_LED >= 0) { digitalWrite(BOARD_LED, HIGH); delay(2); digitalWrite(BOARD_LED, LOW); }
         }
 
-        // 4. Route cleanup (every 60s in solar mode)
+        // Route cleanup
         if (millis() - lastRouteClean > 60000) {
             mesh.pruneStale();
             lastRouteClean = millis();
         }
 
-        // 5. Serial — only SOLAR OFF, STATUS, and gateway PKT commands
-        if (Serial.available()) {
-            String line = Serial.readStringUntil('\n'); line.trim();
-            if (line == "SOLAR OFF") {
-                stopSolarMode();
-                saveConfig();
-                Serial.println("OK: Solar mode OFF — normal operation restored");
-            } else if (line == "STATUS") {
-                Serial.println("═══ Solar Repeater Status ═══");
-                Serial.println("ID:       " + String(mesh.localID));
-                Serial.println("Nodes:    " + String(mesh.knownCount));
-                Serial.println("RX:       " + String(mesh.packetsReceived));
-                Serial.println("Fwd:      " + String(mesh.packetsForwarded));
-                Serial.println("Solar:    ON");
-                Serial.println("Heap:     " + String(ESP.getFreeHeap()));
-            } else if (line.startsWith("PKT,") && gatewayMode) {
-                // Gateway inject still works in solar mode
-                String hexData = line.substring(4); hexData.trim();
-                if (hexData.length() >= 14 && hexData.length() <= 512) {
-                    uint8_t pkt[256]; int pktLen = 0;
-                    mesh.hexToBytes(hexData, pkt, pktLen);
-                    if (pktLen >= 7 && mesh.canTransmit()) {
-                        radioTransmit(pkt, pktLen);
-                        Serial.println("OK,PKT,TX," + String(pktLen));
-                    }
-                }
-            }
-        }
+        // Button: temporarily show OLED status
+        solarCheckButton();
 
-        // 6. Enter light sleep until next event
-        solarEnterLightSleep();
+        // Timers, setpoints, and auto-poll run in solar mode too
+        processTimers();
+        checkSetpoints();
+        executeAutoPoll();
+
+        // Serial commands (full set, not restricted)
+        handleSerialConfig();
         return;
     }
 #endif
@@ -1189,7 +1636,16 @@ void loop() {
     // 6. OLED refresh
     updateOLED();
 
-    // 7. Button → manual heartbeat
+    // 7. Relay timers
+    processTimers();
+
+    // 8. Setpoint rules
+    checkSetpoints();
+
+    // 9. Auto-poll periodic sensor reporting
+    executeAutoPoll();
+
+    // 10. Button → manual heartbeat
 #if defined(BOARD_BUTTON) && BOARD_BUTTON >= 0
     static bool lastBtn = true;
     bool btn = digitalRead(BOARD_BUTTON);

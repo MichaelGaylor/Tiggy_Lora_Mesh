@@ -18,11 +18,10 @@ import threading
 import time
 
 import customtkinter as ctk
-import websockets
-from websockets.asyncio.server import serve
+import aiohttp
 from aiohttp import web
 
-from gui_common import COLORS, HexPacketParser, format_uptime
+from gui_common import COLORS, HexPacketParser, format_uptime, decrypt_message
 
 # ─── Theme ───────────────────────────────────────────────────
 
@@ -77,6 +76,9 @@ class GUIGatewayHub:
         self.registry_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gateways.json")
         self.registry: dict[str, dict] = {}
         self._load_registry()
+
+        # Sensor history — written by GUI when it decrypts SDATA packets
+        self.sensor_history: dict[str, list[tuple[float, int]]] = {}
 
     def _load_registry(self):
         try:
@@ -133,51 +135,49 @@ class GUIGatewayHub:
     async def handle_api_gateways(self, request):
         return web.json_response(self._get_gateways_json())
 
-    async def handle_map_page(self, request):
-        web_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
-        map_file = os.path.join(web_dir, "map.html")
-        if os.path.exists(map_file):
-            return web.FileResponse(map_file)
-        return web.Response(text="map.html not found", status=404)
-
-    async def start_http_server(self):
-        app = web.Application()
-        app.router.add_get("/", self.handle_map_page)
-        app.router.add_get("/api/gateways", self.handle_api_gateways)
-        web_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
-        if os.path.isdir(web_dir):
-            app.router.add_static("/static/", web_dir)
-        http_port = self.listen_port + 1
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, "0.0.0.0", http_port)
-        await site.start()
-        self._emit("hub_started_http", port=http_port)
-        return runner
+    async def handle_api_sensors(self, request):
+        """Return sensor data for the web dashboard."""
+        result = {}
+        for key, readings in self.sensor_history.items():
+            if readings:
+                result[key] = {
+                    "current": readings[-1][1],
+                    "min": min(v for _, v in readings),
+                    "max": max(v for _, v in readings),
+                    "count": len(readings),
+                    "history": [{"t": t, "v": v} for t, v in readings[-60:]],
+                }
+        return web.json_response(result)
 
     def _emit(self, event_type: str, **kwargs):
         self.eq.put({"type": event_type, "time": time.time(), **kwargs})
 
-    async def ws_handler(self, websocket):
-        remote = str(websocket.remote_address)
+    async def ws_handler(self, request):
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+
+        remote = str(request.remote)
         self.total_connections += 1
-        gw = ConnectedGateway(websocket)
-        self.gateways[websocket] = gw
+        gw = ConnectedGateway(ws)
+        self.gateways[ws] = gw
 
         try:
-            async for message in websocket:
-                await self.handle_message(message, websocket)
-        except websockets.ConnectionClosed:
-            pass
+            async for msg in ws:
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    await self.handle_message(msg.data, ws)
+                elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
+                    break
         finally:
-            if websocket in self.gateways:
-                gw = self.gateways.pop(websocket)
+            if ws in self.gateways:
+                gw = self.gateways.pop(ws)
                 self._emit("gateway_disconnected", name=gw.name, gw_id=gw.gateway_id)
                 # Notify others
                 await self.broadcast_event({
                     "type": "peer_left", "name": gw.name,
-                }, exclude=websocket)
+                }, exclude=ws)
             self._emit("stats", **self._stats())
+
+        return ws
 
     async def handle_message(self, raw: str, source_ws):
         try:
@@ -199,13 +199,13 @@ class GUIGatewayHub:
             gw.antenna_height = float(msg.get("height", 2.0))
             key = msg.get("key", "")
             if self.auth_key and key != self.auth_key:
-                await source_ws.send(json.dumps({"type": "auth_result", "success": False, "error": "Invalid key"}))
+                await source_ws.send_str(json.dumps({"type": "auth_result", "success": False, "error": "Invalid key"}))
                 await source_ws.close()
                 return
             gw.authenticated = True
             self._update_registry(gw)
             peer_count = sum(1 for g in self.gateways.values() if g.authenticated and g.ws is not source_ws)
-            await source_ws.send(json.dumps({"type": "auth_result", "success": True, "peers": peer_count}))
+            await source_ws.send_str(json.dumps({"type": "auth_result", "success": True, "peers": peer_count}))
             await self.broadcast_event({"type": "peer_joined", "gateway_id": gw.gateway_id, "name": gw.name, "peers": peer_count + 1}, exclude=source_ws)
             self._emit("gateway_connected", name=gw.name, gw_id=gw.gateway_id)
             self._emit("stats", **self._stats())
@@ -227,10 +227,10 @@ class GUIGatewayHub:
                 if ws is source_ws or (self.auth_key and not other.authenticated):
                     continue
                 try:
-                    await ws.send(relay_msg)
+                    await ws.send_str(relay_msg)
                     relay_count += 1
                     targets.append(other.name)
-                except websockets.ConnectionClosed:
+                except (ConnectionError, ConnectionResetError):
                     pass
 
             parsed = HexPacketParser.parse_raw(hex_data)
@@ -242,7 +242,7 @@ class GUIGatewayHub:
 
         elif msg_type == "status":
             authenticated = [g for g in self.gateways.values() if g.authenticated]
-            await source_ws.send(json.dumps({
+            await source_ws.send_str(json.dumps({
                 "type": "hub_status",
                 "gateways": [{"id": g.gateway_id, "name": g.name,
                               "uptime": int(time.time() - g.connected_at),
@@ -257,8 +257,8 @@ class GUIGatewayHub:
             if ws is exclude or not gw.authenticated:
                 continue
             try:
-                await ws.send(raw)
-            except websockets.ConnectionClosed:
+                await ws.send_str(raw)
+            except (ConnectionError, ConnectionResetError):
                 pass
 
     def _stats(self) -> dict:
@@ -272,9 +272,31 @@ class GUIGatewayHub:
                               "packets": g.packets_relayed} for g in auth],
         }
 
+    async def handle_root(self, request):
+        """GET / — WebSocket upgrade → gateway handler; normal GET → map.html."""
+        if request.headers.get("Upgrade", "").lower() == "websocket":
+            return await self.ws_handler(request)
+        web_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+        map_file = os.path.join(web_dir, "map.html")
+        if os.path.exists(map_file):
+            return web.FileResponse(map_file)
+        return web.Response(text="map.html not found", status=404)
+
     async def run(self):
-        server = await serve(self.ws_handler, "0.0.0.0", self.listen_port)
-        http_runner = await self.start_http_server()
+        app = web.Application()
+        app.router.add_get("/ws", self.ws_handler)
+        app.router.add_get("/api/gateways", self.handle_api_gateways)
+        app.router.add_get("/api/sensors", self.handle_api_sensors)
+        web_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+        if os.path.isdir(web_dir):
+            app.router.add_static("/static/", web_dir)
+        app.router.add_get("/", self.handle_root)
+
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", self.listen_port)
+        await site.start()
+
         self._emit("hub_started", port=self.listen_port)
         try:
             while self.running:
@@ -282,8 +304,7 @@ class GUIGatewayHub:
         except asyncio.CancelledError:
             pass
         finally:
-            server.close()
-            await http_runner.cleanup()
+            await runner.cleanup()
 
     def shutdown(self):
         self.running = False
@@ -316,7 +337,7 @@ class HubGUIApp:
     def __init__(self):
         self.root = ctk.CTk()
         self.root.title("TiggyOpenMesh Gateway Hub")
-        self.root.geometry("900x700")
+        self.root.geometry("900x800")
         self.root.configure(fg_color=COLORS["bg"])
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -328,9 +349,14 @@ class HubGUIApp:
         self.particles: list[Particle] = []
         self.hub_running = False
 
+        # Sensor monitoring
+        self.sensor_data: dict[str, list[tuple[float, int]]] = {}  # "node:pin" -> [(ts, val)]
+        self.max_sensor_history = 120
+
         self.build_ui()
         self.root.after(50, self.poll_events)
         self.root.after(33, self.animate_canvas)
+        self.root.after(2000, self.redraw_sensors)
 
     # ─── UI Construction ────────────────────────────────────
 
@@ -355,8 +381,12 @@ class HubGUIApp:
         self.port_entry.pack(side="left", padx=5)
 
         ctk.CTkLabel(ctrl_frame, text="Auth Key:", text_color=COLORS["dim"]).pack(side="left", padx=(15, 5))
-        self.key_entry = ctk.CTkEntry(ctrl_frame, width=180, placeholder_text="(optional)")
+        self.key_entry = ctk.CTkEntry(ctrl_frame, width=120, placeholder_text="(optional)")
         self.key_entry.pack(side="left", padx=5)
+
+        ctk.CTkLabel(ctrl_frame, text="AES Key:", text_color=COLORS["dim"]).pack(side="left", padx=(10, 5))
+        self.aes_entry = ctk.CTkEntry(ctrl_frame, width=140, placeholder_text="16-char decrypt")
+        self.aes_entry.pack(side="left", padx=5)
 
         self.start_btn = ctk.CTkButton(ctrl_frame, text="START", width=80, fg_color=COLORS["good"],
                                          text_color="#000", hover_color="#00CC00", command=self.start_hub)
@@ -421,6 +451,15 @@ class HubGUIApp:
                       text_color=COLORS["accent"], anchor="w").pack(fill="x", padx=10, pady=(5, 0))
         self.canvas = ctk.CTkCanvas(canvas_frame, bg=COLORS["bg"], highlightthickness=0, height=120)
         self.canvas.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        # Sensor dashboard
+        sensor_frame = ctk.CTkFrame(self.root, fg_color=COLORS["panel"], corner_radius=8, height=140)
+        sensor_frame.pack(fill="x", padx=10, pady=5)
+        sensor_frame.pack_propagate(False)
+        ctk.CTkLabel(sensor_frame, text="  Sensor Monitor", font=("Consolas", 11, "bold"),
+                      text_color=COLORS["accent"], anchor="w").pack(fill="x", padx=10, pady=(5, 0))
+        self.sensor_canvas = ctk.CTkCanvas(sensor_frame, bg=COLORS["bg"], highlightthickness=0, height=100)
+        self.sensor_canvas.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
         # Packet log
         log_frame = ctk.CTkFrame(self.root, fg_color=COLORS["panel"], corner_radius=8)
@@ -511,6 +550,16 @@ class HubGUIApp:
             ptype = parsed.get("type", "?") if parsed else "?"
             dest_str = ", ".join(targets) if targets else "ALL"
             self.log_append(f"{src} → {dest_str}  {size}B  [{ptype}]  relay OK", COLORS["accent"])
+
+            # Try to decrypt and extract SDATA
+            aes_key = self.aes_entry.get().strip()
+            if len(aes_key) == 16 and parsed and parsed.get("type") == "MSG":
+                encrypted = parsed.get("encrypted", "")
+                msg_id = parsed.get("msg_id", "")
+                if encrypted:
+                    plain = decrypt_message(encrypted, msg_id, aes_key)
+                    if plain and plain.startswith("SDATA,"):
+                        self._parse_sdata(plain)
 
             # Fire particles on canvas
             src_id = event.get("source_id", "")
@@ -615,6 +664,94 @@ class HubGUIApp:
                                      fill=COLORS["dim"], font=("Consolas", 10))
 
         self.root.after(33, self.animate_canvas)
+
+    # ─── Sensor Dashboard ─────────────────────────────────
+
+    def _parse_sdata(self, line: str):
+        """Parse SDATA,<nodeId>,<pin>:<val>,... and store readings."""
+        parts = line.split(",")
+        if len(parts) < 3:
+            return
+        node_id = parts[1]
+        now = time.time()
+        for part in parts[2:]:
+            pv = part.split(":")
+            if len(pv) != 2:
+                continue
+            try:
+                pin, val = int(pv[0]), int(pv[1])
+            except ValueError:
+                continue
+            key = f"{node_id}:{pin}"
+            if key not in self.sensor_data:
+                self.sensor_data[key] = []
+            self.sensor_data[key].append((now, val))
+            if len(self.sensor_data[key]) > self.max_sensor_history:
+                self.sensor_data[key] = self.sensor_data[key][-self.max_sensor_history:]
+            # Also write to hub's sensor_history for the API
+            if self.hub:
+                if key not in self.hub.sensor_history:
+                    self.hub.sensor_history[key] = []
+                self.hub.sensor_history[key].append((now, val))
+                if len(self.hub.sensor_history[key]) > self.max_sensor_history:
+                    self.hub.sensor_history[key] = self.hub.sensor_history[key][-self.max_sensor_history:]
+        self.log_append(f"SDATA from {node_id}: {len(parts)-2} sensors", COLORS["good"])
+
+    def redraw_sensors(self):
+        """Redraw sensor sparkline canvas."""
+        c = self.sensor_canvas
+        c.delete("all")
+        w = c.winfo_width() or 400
+        h = c.winfo_height() or 100
+
+        if not self.sensor_data:
+            aes_key = self.aes_entry.get().strip()
+            hint = "Enter 16-char AES key to decode sensor data" if len(aes_key) != 16 else "Waiting for SDATA packets..."
+            c.create_text(w // 2, h // 2, text=hint,
+                           fill=COLORS["dim"], font=("Consolas", 10))
+            self.root.after(2000, self.redraw_sensors)
+            return
+
+        # Layout: evenly divide width among sensor keys
+        keys = sorted(self.sensor_data.keys())
+        n = len(keys)
+        chart_w = max(60, (w - 20) // min(n, 6))  # max 6 per row
+        chart_h = 60
+        palette = ["#00E5FF", "#00E676", "#FF9100", "#448AFF", "#FF5252", "#FFE000"]
+
+        for idx, key in enumerate(keys[:12]):  # max 12 sensors
+            col = idx % 6
+            row = idx // 6
+            x0 = 10 + col * chart_w
+            y0 = 5 + row * (chart_h + 20)
+
+            readings = self.sensor_data[key]
+            values = [v for _, v in readings]
+
+            # Label
+            c.create_text(x0 + chart_w // 2, y0, text=key, fill=COLORS["text"],
+                           font=("Consolas", 8), anchor="n")
+
+            # Current value
+            c.create_text(x0 + chart_w - 5, y0, text=str(values[-1]),
+                           fill=palette[idx % len(palette)], font=("Consolas", 9, "bold"), anchor="ne")
+
+            # Sparkline
+            if len(values) >= 2:
+                max_v = max(values)
+                min_v = min(values)
+                vrange = max(max_v - min_v, 1)
+                step = (chart_w - 10) / (len(values) - 1)
+                sy = y0 + 12
+                points = []
+                for i, v in enumerate(values):
+                    px = x0 + 5 + i * step
+                    py = sy + chart_h - 12 - ((v - min_v) / vrange * (chart_h - 16))
+                    points.extend([px, py])
+                if len(points) >= 4:
+                    c.create_line(points, fill=palette[idx % len(palette)], width=2, smooth=True)
+
+        self.root.after(2000, self.redraw_sensors)
 
     # ─── Lifecycle ──────────────────────────────────────────
 

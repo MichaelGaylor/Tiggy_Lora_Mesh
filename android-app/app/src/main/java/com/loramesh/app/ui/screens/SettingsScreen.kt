@@ -26,6 +26,7 @@ fun SettingsScreen(viewModel: MeshViewModel) {
     val nodes by viewModel.nodes.collectAsState()
     val telegramConfig by viewModel.telegramConfig.collectAsState()
     val sfChange by viewModel.sfChange.collectAsState()
+    val soundEnabled by viewModel.soundEnabled.collectAsState()
 
     var editId by remember { mutableStateOf(config.nodeId) }
     var editKey by remember { mutableStateOf(config.aesKey) }
@@ -346,8 +347,6 @@ fun SettingsScreen(viewModel: MeshViewModel) {
 
         // ── Power Mode ───────────────────────────────────────
         if (config.boardName.isNotEmpty() && config.boardName != "T-Deck") {
-            var showSolarDialog by remember { mutableStateOf(false) }
-
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
@@ -372,7 +371,7 @@ fun SettingsScreen(viewModel: MeshViewModel) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text("Solar Mode", style = MaterialTheme.typography.bodyMedium)
                             Text(
-                                "Disables OLED + BLE, duty-cycle radio. Ideal for solar/battery repeaters.",
+                                "Turns off OLED to save power. BLE and radio stay fully active.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MeshGrey
                             )
@@ -380,37 +379,13 @@ fun SettingsScreen(viewModel: MeshViewModel) {
                         Switch(
                             checked = config.powerMode == "SOLAR",
                             onCheckedChange = {
-                                if (it) showSolarDialog = true
+                                if (it) viewModel.setPowerMode(true)
                                 else viewModel.setPowerMode(false)
                             },
                             colors = SwitchDefaults.colors(checkedThumbColor = MeshOrange)
                         )
                     }
                 }
-            }
-
-            if (showSolarDialog) {
-                AlertDialog(
-                    onDismissRequest = { showSolarDialog = false },
-                    title = { Text("Enable Solar Mode?") },
-                    text = {
-                        Text(
-                            "Solar mode will disable BLE immediately. " +
-                            "You will lose connection to this node.\n\n" +
-                            "To restore normal mode, use the serial console " +
-                            "or the PRG button on the device."
-                        )
-                    },
-                    confirmButton = {
-                        TextButton(onClick = {
-                            viewModel.setPowerMode(true)
-                            showSolarDialog = false
-                        }) { Text("Enable Solar", color = MeshOrange) }
-                    },
-                    dismissButton = {
-                        TextButton(onClick = { showSolarDialog = false }) { Text("Cancel") }
-                    }
-                )
             }
         }
 
@@ -736,47 +711,83 @@ fun SettingsScreen(viewModel: MeshViewModel) {
             }
         }
 
-        // ── Known Nodes ───────────────────────────────────────
-        if (nodes.isNotEmpty()) {
-            Spacer(Modifier.height(8.dp))
-            Text(
-                "Known Nodes (${nodes.size})",
-                style = MaterialTheme.typography.titleMedium,
-                color = MeshGreen
-            )
-            for (node in nodes) {
-                Card(
+        // ── Notifications ────────────────────────────────────────
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text("Notifications", style = MaterialTheme.typography.titleMedium, color = MeshCyan)
+                Spacer(Modifier.height(8.dp))
+                Row(
                     modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(Icons.Default.Router, contentDescription = null, tint = MeshCyan)
-                        Spacer(Modifier.width(8.dp))
-                        Text(node.id, modifier = Modifier.weight(1f))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Message Sound", style = MaterialTheme.typography.bodyMedium)
                         Text(
-                            "${node.rssi} dBm",
-                            color = when {
-                                node.rssi > -80 -> MeshGreen
-                                node.rssi > -100 -> MeshOrange
-                                else -> MeshRed
-                            },
-                            style = MaterialTheme.typography.bodySmall
+                            "Play notification sound on incoming messages",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MeshGrey
                         )
-                        if (node.hops > 0) {
-                            Spacer(Modifier.width(8.dp))
-                            Text(
-                                "${node.hops} hop${if (node.hops > 1) "s" else ""}",
-                                color = MeshGrey,
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                        }
+                    }
+                    Switch(
+                        checked = soundEnabled,
+                        onCheckedChange = { viewModel.toggleSound(it) },
+                        colors = SwitchDefaults.colors(checkedThumbColor = MeshCyan)
+                    )
+                }
+            }
+        }
+
+        // ── Connection ──────────────────────────────────────────
+        if (viewModel.hasSavedDevice()) {
+            var showForgetDialog by remember { mutableStateOf(false) }
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("Connection", style = MaterialTheme.typography.titleMedium, color = MeshCyan)
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Auto-reconnects to ${viewModel.savedDeviceName()} on launch",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MeshGrey
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = { showForgetDialog = true },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.BluetoothDisabled, contentDescription = null, tint = MeshRed)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Forget Device", color = MeshRed)
                     }
                 }
+            }
+
+            if (showForgetDialog) {
+                AlertDialog(
+                    onDismissRequest = { showForgetDialog = false },
+                    title = { Text("Forget Device?") },
+                    text = {
+                        Text(
+                            "The app will no longer auto-connect to ${viewModel.savedDeviceName()}. " +
+                            "You will need to scan and select a device next time."
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            viewModel.forgetDevice()
+                            showForgetDialog = false
+                        }) { Text("Forget", color = MeshRed) }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showForgetDialog = false }) { Text("Cancel") }
+                    }
+                )
             }
         }
     }

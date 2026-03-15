@@ -166,57 +166,40 @@ class HexPacketParser:
             return None
 
 
-# ─── AES Decryption (matches MeshCore::decryptMsg) ──────────
+# ─── AES-GCM Decryption (matches MeshCore::decryptMsg) ───────
 
-def build_iv(seed: str) -> bytes:
-    """Build 16-byte IV from seed string (matches MeshCore::buildIV)."""
-    iv = bytearray(16)
-    seed_bytes = seed.encode("ascii", errors="replace")
-    seed_len = len(seed_bytes)
-    if seed_len == 0:
-        return bytes(iv)
-    for i in range(16):
-        if i < seed_len:
-            iv[i] = seed_bytes[i]
-        else:
-            iv[i] = seed_bytes[i % seed_len] ^ i
-    return bytes(iv)
+GCM_NONCE_LEN = 12
+GCM_TAG_LEN = 16
 
 
 def decrypt_message(encrypted_hex: str, msg_id: str, aes_key: str) -> Optional[str]:
-    """Decrypt an AES-128-CTR encrypted message.
+    """Decrypt an AES-128-GCM authenticated message.
 
-    Returns plaintext string, or None if decryption/CRC fails.
+    Blob format: nonce(12) || ciphertext(N) || tag(16)
+    msg_id is kept in signature for API compat but not used in decryption.
+    Returns plaintext string, or None if decryption/authentication fails.
     """
     try:
         from Crypto.Cipher import AES
-        from Crypto.Util import Counter
     except ImportError:
         return None
 
     try:
-        enc = bytes.fromhex(encrypted_hex)
+        blob = bytes.fromhex(encrypted_hex)
     except ValueError:
         return None
 
-    if len(enc) < 3 or len(aes_key) != 16:
+    min_len = GCM_NONCE_LEN + GCM_TAG_LEN + 1
+    if len(blob) < min_len or len(aes_key) != 16:
         return None
 
-    iv = build_iv(msg_id)
-    # AES-128-CTR: initial counter value from IV
-    ctr_val = int.from_bytes(iv, "big")
-    ctr = Counter.new(128, initial_value=ctr_val)
-    cipher = AES.new(aes_key.encode("ascii"), AES.MODE_CTR, counter=ctr)
-    dec = cipher.decrypt(enc)
+    nonce = blob[:GCM_NONCE_LEN]
+    tag = blob[-GCM_TAG_LEN:]
+    ciphertext = blob[GCM_NONCE_LEN:-GCM_TAG_LEN]
 
-    payload_len = len(dec) - 2
-    if payload_len < 1:
+    try:
+        cipher = AES.new(aes_key.encode("ascii"), AES.MODE_GCM, nonce=nonce)
+        plaintext = cipher.decrypt_and_verify(ciphertext, tag)
+        return plaintext.decode("ascii", errors="replace")
+    except (ValueError, KeyError):
         return None
-
-    recv_crc = (dec[payload_len] << 8) | dec[payload_len + 1]
-    calc_crc = crc16_ccitt(dec[:payload_len])
-
-    if recv_crc != calc_crc:
-        return None
-
-    return dec[:payload_len].decode("ascii", errors="replace")

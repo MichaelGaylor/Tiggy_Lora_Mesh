@@ -47,59 +47,77 @@ void MeshCore::hexToBytes(const String& hex, byte* out, int& outLen) {
     outLen = l;
 }
 
-void MeshCore::buildIV(const String& seed, byte* iv) {
-    for (int i = 0; i < 16; i++)
-        iv[i] = (i < (int)seed.length()) ? seed[i] : (seed[i % seed.length()] ^ i);
+// Generate random nonce using ESP32 hardware RNG
+void MeshCore::generateNonce(byte* nonce) {
+    for (int i = 0; i < GCM_NONCE_LEN; i += 4) {
+        uint32_t r = esp_random();
+        int remaining = (GCM_NONCE_LEN - i < 4) ? GCM_NONCE_LEN - i : 4;
+        memcpy(nonce + i, &r, remaining);
+    }
 }
 
-String MeshCore::encryptMsg(const String& msg, const String& iv_seed) {
+// AES-128-GCM encrypt — output: hex(nonce || ciphertext || tag)
+String MeshCore::encryptMsg(const String& msg) {
     int mlen = msg.length();
-    if (mlen + 2 > MAX_MSG_LEN) return "";
+    if (mlen > MAX_MSG_LEN || mlen == 0) return "";
 
-    uint8_t buffer[MAX_MSG_LEN + 2];
-    memcpy(buffer, msg.c_str(), mlen);
-    uint16_t crc = crc16(buffer, mlen);
-    buffer[mlen]     = (crc >> 8) & 0xFF;
-    buffer[mlen + 1] =  crc       & 0xFF;
-    int totalLen = mlen + 2;
+    byte nonce[GCM_NONCE_LEN];
+    generateNonce(nonce);
 
-    byte iv[16];
-    buildIV(iv_seed, iv);
-    CTR<AES128> ctr;
-    ctr.setKey(getAESKey(), AES_KEY_LEN);
-    ctr.setIV(iv, sizeof(iv));
+    GCM<AES128> gcm;
+    gcm.setKey(getAESKey(), AES_KEY_LEN);
+    gcm.setIV(nonce, GCM_NONCE_LEN);
 
-    uint8_t outbuf[MAX_MSG_LEN + 2];
-    ctr.encrypt(outbuf, buffer, totalLen);
-    return toHex(outbuf, totalLen);
+    uint8_t ciphertext[MAX_MSG_LEN];
+    gcm.encrypt(ciphertext, (const uint8_t*)msg.c_str(), mlen);
+
+    byte tag[GCM_TAG_LEN];
+    gcm.computeTag(tag, GCM_TAG_LEN);
+    gcm.clear();
+
+    // Assemble: nonce(12) || ciphertext(N) || tag(16)
+    int blobLen = GCM_NONCE_LEN + mlen + GCM_TAG_LEN;
+    byte blob[GCM_NONCE_LEN + MAX_MSG_LEN + GCM_TAG_LEN];
+    memcpy(blob, nonce, GCM_NONCE_LEN);
+    memcpy(blob + GCM_NONCE_LEN, ciphertext, mlen);
+    memcpy(blob + GCM_NONCE_LEN + mlen, tag, GCM_TAG_LEN);
+
+    return toHex(blob, blobLen);
 }
 
-String MeshCore::decryptMsg(const String& hexstr, const String& iv_seed) {
-    uint8_t enc[MAX_MSG_LEN + 2];
-    int elen;
-    hexToBytes(hexstr, enc, elen);
-    if (elen < 3) return "";
+// AES-128-GCM decrypt — input: hex(nonce || ciphertext || tag)
+String MeshCore::decryptMsg(const String& hexstr) {
+    uint8_t blob[GCM_NONCE_LEN + MAX_MSG_LEN + GCM_TAG_LEN];
+    int blobLen;
+    hexToBytes(hexstr, blob, blobLen);
 
-    byte iv[16];
-    buildIV(iv_seed, iv);
-    CTR<AES128> ctr;
-    ctr.setKey(getAESKey(), AES_KEY_LEN);
-    ctr.setIV(iv, sizeof(iv));
+    // Minimum: nonce(12) + 1 byte ciphertext + tag(16) = 29
+    if (blobLen < GCM_NONCE_LEN + GCM_TAG_LEN + 1) return "";
 
-    uint8_t dec[MAX_MSG_LEN + 2];
-    ctr.decrypt(dec, enc, elen);
+    int cipherLen = blobLen - GCM_NONCE_LEN - GCM_TAG_LEN;
+    byte* nonce      = blob;
+    byte* ciphertext = blob + GCM_NONCE_LEN;
+    byte* tag        = blob + GCM_NONCE_LEN + cipherLen;
 
-    int payloadLen = elen - 2;
-    uint16_t recvCrc = (dec[payloadLen] << 8) | dec[payloadLen + 1];
-    uint16_t calcCrc = crc16(dec, payloadLen);
-    if (recvCrc != calcCrc) return "";
+    GCM<AES128> gcm;
+    gcm.setKey(getAESKey(), AES_KEY_LEN);
+    gcm.setIV(nonce, GCM_NONCE_LEN);
 
-    return String((char*)dec, payloadLen);
+    uint8_t plaintext[MAX_MSG_LEN];
+    gcm.decrypt(plaintext, ciphertext, cipherLen);
+
+    if (!gcm.checkTag(tag, GCM_TAG_LEN)) {
+        gcm.clear();
+        return "";  // Authentication failed — tampered or wrong key
+    }
+    gcm.clear();
+
+    return String((char*)plaintext, cipherLen);
 }
 
 String MeshCore::generateMsgID() {
     String s;
-    for (int i = 0; i < 4; i++) s += (char)random(65, 91);
+    for (int i = 0; i < MSG_ID_LEN; i++) s += (char)random(65, 91);
     return s;
 }
 
@@ -108,11 +126,21 @@ String MeshCore::generateMsgID() {
 // ═══════════════════════════════════════════════════════════════
 
 String MeshCore::cfgAuthTag(const String& changeId) {
-    // CRC16 over changeId + AES key → 4 hex chars
-    String material = changeId + String(aes_key_string);
-    uint16_t tag = crc16((const uint8_t*)material.c_str(), material.length());
-    byte tagBytes[2] = { (byte)(tag >> 8), (byte)(tag & 0xFF) };
-    return toHex(tagBytes, 2);
+    // GCM-based MAC: encrypt zero bytes with changeId as AAD
+    GCM<AES128> gcm;
+    gcm.setKey(getAESKey(), AES_KEY_LEN);
+    // Deterministic IV from changeId (reproducible for verification)
+    byte iv[GCM_NONCE_LEN];
+    memset(iv, 0, GCM_NONCE_LEN);
+    int copyLen = (int)changeId.length() < GCM_NONCE_LEN ? (int)changeId.length() : GCM_NONCE_LEN;
+    memcpy(iv, changeId.c_str(), copyLen);
+    gcm.setIV(iv, GCM_NONCE_LEN);
+    gcm.addAuthData(changeId.c_str(), changeId.length());
+    byte tag[GCM_TAG_LEN];
+    gcm.computeTag(tag, GCM_TAG_LEN);
+    gcm.clear();
+    // Return first 4 bytes = 8 hex chars (stronger than old 4 hex)
+    return toHex(tag, 4);
 }
 
 bool MeshCore::cfgAuthValid(const String& changeId, const String& tag) {
@@ -369,8 +397,13 @@ bool MeshCore::parsePayloadFields(const String& payload, MeshMessage& out) {
 }
 
 void MeshCore::processPacket(const MeshPacket& pkt) {
-    packetsReceived++;
     uint16_t myAddr = strtol(localID, nullptr, 16);
+
+    // Skip self-received packets — SX1262 DIO1 fires for TX_DONE too,
+    // which sets rxFlag and causes us to read back our own transmission
+    if (pkt.src == myAddr) return;
+
+    packetsReceived++;
 
     // ─── ACK packets ─────────────────────────────────────────
     if (pkt.payload.startsWith("ACK,")) {
@@ -509,7 +542,7 @@ void MeshCore::processPacket(const MeshPacket& pkt) {
 
     // For us? Decrypt and dispatch
     if (pkt.dest == myAddr || pkt.dest == 0xFFFF) {
-        String plain = decryptMsg(msg.encrypted, msg.mid);
+        String plain = decryptMsg(msg.encrypted);
         if (plain.length() > 0) {
             if (plain.startsWith("CMD,") && onCmd) {
                 onCmd(msg.from, plain.substring(4));

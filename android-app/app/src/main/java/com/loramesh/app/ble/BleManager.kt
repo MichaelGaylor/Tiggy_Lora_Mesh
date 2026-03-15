@@ -10,6 +10,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.util.UUID
 
+private const val PREFS_NAME = "mesh_ble_prefs"
+private const val KEY_LAST_MAC = "last_device_mac"
+private const val KEY_LAST_NAME = "last_device_name"
+
 // ═══════════════════════════════════════════════════════════════
 // BLE Manager - handles scanning, connecting, and data exchange
 // with LoRa mesh nodes running BLE serial service
@@ -31,6 +35,7 @@ class BleManager(private val context: Context) {
     private var scanner: BluetoothLeScanner? = null
     private var gatt: BluetoothGatt? = null
     private var txCharacteristic: BluetoothGattCharacteristic? = null
+    private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     // ─── Observable state ────────────────────────────────────
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
@@ -44,6 +49,11 @@ class BleManager(private val context: Context) {
 
     private val _connectedDeviceName = MutableStateFlow("")
     val connectedDeviceName: StateFlow<String> = _connectedDeviceName
+
+    // Auto-reconnect: track whether we're doing an auto-connect attempt
+    private var isAutoConnecting = false
+    private val _autoConnectFailed = MutableStateFlow(false)
+    val autoConnectFailed: StateFlow<Boolean> = _autoConnectFailed
 
     data class ScannedDevice(val name: String, val address: String, val rssi: Int)
 
@@ -87,12 +97,38 @@ class BleManager(private val context: Context) {
         }
     }
 
+    // ─── Saved device (auto-reconnect) ──────────────────────
+    fun getSavedDeviceMac(): String? = prefs.getString(KEY_LAST_MAC, null)
+    fun getSavedDeviceName(): String = prefs.getString(KEY_LAST_NAME, null) ?: ""
+
+    fun saveDevice(address: String, name: String) {
+        prefs.edit().putString(KEY_LAST_MAC, address).putString(KEY_LAST_NAME, name).apply()
+    }
+
+    fun forgetDevice() {
+        prefs.edit().remove(KEY_LAST_MAC).remove(KEY_LAST_NAME).apply()
+    }
+
     // ─── Connect ─────────────────────────────────────────────
     fun connect(address: String) {
         stopScan()
+        isAutoConnecting = false
+        _autoConnectFailed.value = false
         _connectionState.value = ConnectionState.CONNECTING
         val device = bluetoothAdapter?.getRemoteDevice(address) ?: return
         gatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+    }
+
+    fun autoConnect(): Boolean {
+        val mac = getSavedDeviceMac() ?: return false
+        if (bluetoothAdapter?.isEnabled != true) return false
+        isAutoConnecting = true
+        _autoConnectFailed.value = false
+        _connectionState.value = ConnectionState.CONNECTING
+        _connectedDeviceName.value = getSavedDeviceName()
+        val device = bluetoothAdapter.getRemoteDevice(mac) ?: return false
+        gatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+        return true
     }
 
     fun disconnect() {
@@ -100,6 +136,7 @@ class BleManager(private val context: Context) {
         gatt?.close()
         gatt = null
         txCharacteristic = null
+        isAutoConnecting = false
         _connectionState.value = ConnectionState.DISCONNECTED
         _connectedDeviceName.value = ""
     }
@@ -108,13 +145,21 @@ class BleManager(private val context: Context) {
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
-                    _connectedDeviceName.value = g.device.name ?: g.device.address
+                    val name = g.device.name ?: g.device.address
+                    _connectedDeviceName.value = name
+                    saveDevice(g.device.address, name)
                     g.discoverServices()
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
+                    if (isAutoConnecting) {
+                        _autoConnectFailed.value = true
+                        isAutoConnecting = false
+                    }
                     _connectionState.value = ConnectionState.DISCONNECTED
                     _connectedDeviceName.value = ""
                     txCharacteristic = null
+                    gatt?.close()
+                    gatt = null
                 }
             }
         }
@@ -214,4 +259,26 @@ class BleManager(private val context: Context) {
     fun requestStatus() = send("STATUS")
     fun setNodeId(id: String) = send("ID $id")
     fun setAesKey(key: String) = send("KEY $key")
+
+    // ─── Sensor polling ───────────────────────────────────────
+    fun pollSensors() = send("POLL")
+    fun pollRemote(targetId: String) = send("POLL,$targetId")
+
+    // ─── Timers ───────────────────────────────────────────────
+    fun timerSet(pin: Int, action: String, seconds: Int) = send("TIMER,$pin,$action,$seconds")
+    fun timerPulse(pin: Int, onSec: Int, offSec: Int, repeats: Int) =
+        send("TIMER,$pin,PULSE,$onSec,$offSec,$repeats")
+    fun timerClear() = send("TIMER,CLEAR")
+    fun timerList() = send("TIMER,LIST")
+
+    // ─── Setpoints ────────────────────────────────────────────
+    fun setpointSet(sensorPin: Int, op: String, threshold: Int,
+                    targetNode: String, relayPin: Int, action: Int) =
+        send("SETPOINT,$sensorPin,$op,$threshold,$targetNode,$relayPin,$action")
+    fun setpointClear() = send("SETPOINT,CLEAR")
+    fun setpointList() = send("SETPOINT,LIST")
+
+    // ─── Auto-poll ────────────────────────────────────────────
+    fun autoPollSet(target: String, interval: Int) = send("AUTOPOLL,$target,$interval")
+    fun autoPollOff() = send("AUTOPOLL,OFF")
 }

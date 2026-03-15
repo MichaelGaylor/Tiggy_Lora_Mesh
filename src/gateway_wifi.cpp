@@ -190,6 +190,7 @@ void radioTransmit(const uint8_t* pkt, size_t len) {
 #endif
     radio.standby();
     radio.transmit(pkt, len);
+    rxFlag = false;  // Clear false RX flag from TX_DONE DIO1 interrupt
     radioStartListening();
     txCount++;
 }
@@ -397,9 +398,48 @@ void setupWebSocket() {
 
     dbgf("WS: connecting to %s%s:%d%s\n", tls ? "wss://" : "ws://", host.c_str(), port, path.c_str());
     if (tls) {
-        // SSL — skip certificate verification (Tailscale Funnel uses valid certs but
-        // we avoid bundling a root CA by using insecure mode)
+#ifdef VERIFY_TLS_CERT
+        // ISRG Root X1 (Let's Encrypt) — used by Tailscale Funnel and most modern hosts
+        static const char caCert[] PROGMEM = R"EOF(
+-----BEGIN CERTIFICATE-----
+MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw
+TzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2Vh
+cmNoIEdyb3VwMRUwEwYDVQQDEwxJU1JHIFJvb3QgWDEwHhcNMTUwNjA0MTEwNDM4
+WhcNMzUwNjA0MTEwNDM4WjBPMQswCQYDVQQGEwJVUzEpMCcGA1UEChMgSW50ZXJu
+ZXQgU2VjdXJpdHkgUmVzZWFyY2ggR3JvdXAxFTATBgNVBAMTDElTUkcgUm9vdCBY
+MTCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBAK3oJHP0FDfzm54rVygc
+h77ct984kIxuPOZXoHj3dcKi/vVqbvYATyjb3miGbESTtrFj/RQSa78f0uoxmyF+
+0TM8ukj13Xnfs7j/EvEhmkvBioZxaUpmZmyPfjxwv60pIgbz5MDmgK7iS4+3mX6
+UA5/TR5d8mUgjU+g4rk8Kb4Mu0UlXjIB0ttov0DiNewNwIRt18jA8+o+u3dpjq+s
+WT8KOEUt+zwvo/7V3LvSye0rgTBIlDHCNAymg4VMk7BPZ7hm/ELNKjD+Jo2FR3qy
+HB5T0Y3HsLuJvW5iB4YlcNHlsdu87kGJ55tukmi8mxdAQ4Q7e2RCOFvu396j3x+U
+CvdGI8O7gO+k1Pee3CKdJrgEOiQ9E/aP4o2fXp7t/rassSnW2DsAtl4mJkiBAtBB
+piS5ua2Mz2ELgHUE/sS/eOCDfrhslGPGAjUEIorFRkHegeYb9OkB5YNQ8LMvjqWv
+IjSJphYOXhNnMKGpNOYtoJc9RRrkDAzMk7u9s5b+sp0wMPG12rNgGEIS8wJB2sFI
+NjNp5KVjlaFvKPmHquQE1AIGnkB/4VRafdYWQ0sv0esjg2Rdj4pC6j99J0vIQsv5
+g08IG0RcVa07kSC5IMrpBPH6GRdbfzuAebMw9R+7fPM75hbiCD1yM5HPHCO8EGAn
+UHjaNPDOBJmTDFBn6wxDAgMBAAGjQjBAMA4GA1UdDwEB/wQEAwIBBjAPBgNVHRMB
+Af8EBTADAQH/MB0GA1UdDgQWBBR5tFnme7bl5AFzgAiIyBpY9umbbjANBgkqhkiG
+9w0BAQsFAAOCAgEAVR9YqbyyqFDQDLHYGmkgJykIrGF1XIpu+ILlaS/V9lZLubhz
+EFnTIZd+50xx+7LSYK05qAvqFyFWhfFQDlnrzuBZ6brJFe+GnY+EgPbk6ZGQ3BEB
+YLQv2lW+nQh2o1aGmF4dOg2eCTGZwDOKRIK/HGFqvj2VEjI1wJON2GhN5vlEh/O
+4vGF5VIQPkIgvvwqBGDc6LKq/pyYOxME+beCOtMRNNB1dAeRiGpCcO1JMd6kHpeK
+qlb6EeiHDCeXhEzGN2KlGKCblO2RTkKlB5qw7YMq1hMfkKF/kmFDNE+gTs80WNQE
+YCyFjLIixpI6ta+KZlPlr1EhRxJ2FGlq0DbHqYjyFMbGQzCih03hX/95DmF1TRWQ
+nbM9FdJ9JCa0lvXw+bVMneDj3BX19BO6Fr3faOe1p9M+6Isq0/pgQYH4DrmIFBer
+m5YIbIqiihR8bX7JO/j3U39yolWex9bjJ87EE/NR8mH3XPXX3USsfl+u7n94BqH
+T5VaKYXE/UiTgkRcaGM4YxkG8OJnCppGmIujSKHT0tXK7Am4pt/MnMj2IQGKH7BQ
+kDnFt2M3yZDOQ7YXZV2CiKBHXEP+wgs31+2WBBDkxqGfnbbGfGnbgO0jPLqPofr
+F1j9IEbM3LEMGu5JBWOHiTCA2IK+GZYwzLNvk6sc2j9oKH2Y9Rcuts4=
+-----END CERTIFICATE-----
+)EOF";
+        ws.beginSslWithCA(host.c_str(), port, path.c_str(), caCert);
+        dbg("WS: TLS with ISRG Root X1 cert verification");
+#else
+        // Insecure mode — no certificate verification
         ws.beginSSL(host, port, path);
+        dbg("WS: WARNING - TLS without certificate verification");
+#endif
     } else {
         ws.begin(host, port, path);
     }
@@ -796,7 +836,8 @@ void setup() {
     }
 
     Serial.println("Ready. Connect via BLE to configure.");
-    Serial.println("BLE: AUTH,pass | WIFI,ssid,pass | HUBURL,wss://host | GWNAME,name | SAVE");
+    Serial.println("BLE: AUTH,pass | WIFI,ssid,pass | HUBURL,wss://host | GWNAME,name");
+    Serial.println("     GWLOC,lat,lon | GWANTENNA,0-2 | GWHEIGHT,metres | SAVE");
     if (strlen(cfg.ble_password) > 0) Serial.println("BLE password protection: ENABLED");
     else Serial.println("BLE password protection: DISABLED (use SETPASS,yourpassword to enable)");
     dbgf("Free heap: %u\n", ESP.getFreeHeap());
@@ -856,7 +897,8 @@ void loop() {
             processBleCommand(line);
             Serial.println("OK");
         } else {
-            Serial.println("Commands: STATUS | WIFI,ssid,pass | HUBURL,wss://host | HUBKEY,secret | GWNAME,name | SETPASS,password | SAVE");
+            Serial.println("Commands: STATUS | WIFI,ssid,pass | HUBURL,wss://host | HUBKEY,secret | GWNAME,name");
+            Serial.println("          GWLOC,lat,lon | GWANTENNA,0-2 | GWHEIGHT,metres | SETPASS,password | SAVE");
         }
     }
 

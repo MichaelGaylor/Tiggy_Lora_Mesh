@@ -17,13 +17,26 @@ import com.loramesh.app.ble.BleManager
 import com.loramesh.app.ble.ConnectionState
 import com.loramesh.app.ui.MeshViewModel
 import com.loramesh.app.ui.theme.MeshCyan
+import com.loramesh.app.ui.theme.MeshGrey
+import com.loramesh.app.ui.theme.MeshRed
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ScanScreen(viewModel: MeshViewModel) {
     val state by viewModel.connectionState.collectAsState()
     val devices by viewModel.discoveredDevices.collectAsState()
+    val autoConnectFailed by viewModel.autoConnectFailed.collectAsState()
     val isScanning = state == ConnectionState.SCANNING
+    val isConnecting = state == ConnectionState.CONNECTING
+
+    // Auto-connect on first composition if we have a saved device
+    var autoConnectAttempted by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        if (!autoConnectAttempted && viewModel.hasSavedDevice()) {
+            autoConnectAttempted = true
+            viewModel.autoConnect()
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -43,6 +56,63 @@ fun ScanScreen(viewModel: MeshViewModel) {
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
         )
         Spacer(Modifier.height(16.dp))
+
+        // Auto-connecting state
+        if (isConnecting && viewModel.hasSavedDevice() && !autoConnectFailed) {
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator(color = MeshCyan)
+                    Spacer(Modifier.height(16.dp))
+                    Text(
+                        "Connecting to ${viewModel.savedDeviceName()}...",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MeshCyan
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Auto-reconnecting to last device",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MeshGrey
+                    )
+                    Spacer(Modifier.height(24.dp))
+                    TextButton(onClick = {
+                        viewModel.disconnect()
+                    }) {
+                        Text("Cancel", color = MeshRed)
+                    }
+                }
+            }
+            return
+        }
+
+        // Auto-connect failed message
+        if (autoConnectFailed) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MeshRed.copy(alpha = 0.1f)
+                )
+            ) {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Could not reconnect to ${viewModel.savedDeviceName()}",
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MeshRed
+                    )
+                    TextButton(onClick = { viewModel.autoConnect() }) {
+                        Text("Retry", color = MeshCyan)
+                    }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+        }
 
         // Scan button
         Button(

@@ -1,6 +1,7 @@
 package com.loramesh.app.ui
 
 import android.app.Application
+import android.media.RingtoneManager
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.loramesh.app.ble.BleManager
@@ -13,6 +14,8 @@ import kotlinx.coroutines.launch
 // ═══════════════════════════════════════════════════════════════
 // ViewModel - bridges BLE manager with UI state
 // ═══════════════════════════════════════════════════════════════
+
+private const val MAX_SENSOR_HISTORY = 60 // readings per sensor key
 
 class MeshViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -46,9 +49,38 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
     private val _sfChange = MutableStateFlow(SfChangeState())
     val sfChange: StateFlow<SfChangeState> = _sfChange
 
+    // ─── NODES bulk response accumulator ────────────────
+    private var nodeListBuffer: MutableList<MeshNode>? = null
+
+    // ─── Message sound ──────────────────────────────────
+    private val _soundEnabled = MutableStateFlow(true)
+    val soundEnabled: StateFlow<Boolean> = _soundEnabled
+
+    // ─── Sensor history (sparklines) ─────────────────────
+    // Key: "nodeId:pin", Value: last N readings
+    private val _sensorHistory = MutableStateFlow<Map<String, List<SensorReading>>>(emptyMap())
+    val sensorHistory: StateFlow<Map<String, List<SensorReading>>> = _sensorHistory
+
+    // ─── Timers ──────────────────────────────────────────
+    private val _timers = MutableStateFlow<List<TimerInfo>>(emptyList())
+    val timers: StateFlow<List<TimerInfo>> = _timers
+
+    // ─── Setpoints ───────────────────────────────────────
+    private val _setpoints = MutableStateFlow<List<SetpointInfo>>(emptyList())
+    val setpoints: StateFlow<List<SetpointInfo>> = _setpoints
+
+    // ─── Auto-poll ───────────────────────────────────────
+    private val _autoPoll = MutableStateFlow(AutoPollConfig())
+    val autoPoll: StateFlow<AutoPollConfig> = _autoPoll
+
+    // ─── Status feedback line ────────────────────────────
+    private val _statusLine = MutableStateFlow("")
+    val statusLine: StateFlow<String> = _statusLine
+
     val connectionState = ble.connectionState
     val connectedDeviceName = ble.connectedDeviceName
     val discoveredDevices = ble.discoveredDevices
+    val autoConnectFailed = ble.autoConnectFailed
 
     init {
         // Parse incoming data lines from BLE
@@ -57,6 +89,17 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
                 parseLine(line)
             }
         }
+    }
+
+    // ─── Auto-reconnect ───────────────────────────────────
+    fun hasSavedDevice(): Boolean = ble.getSavedDeviceMac() != null
+    fun savedDeviceName(): String = ble.getSavedDeviceName()
+
+    fun autoConnect(): Boolean = ble.autoConnect()
+
+    fun forgetDevice() {
+        ble.forgetDevice()
+        ble.disconnect()
     }
 
     // ─── BLE Actions ─────────────────────────────────────────
@@ -96,6 +139,35 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
     fun pulseRelay(pin: Int, ms: Int = 1000) = ble.pulseRelay(pin, ms)
     fun refreshPins() = ble.listPins()
     fun readSensor(pin: Int) = ble.getPin(pin)
+
+    // ─── Sensor polling ──────────────────────────────────────
+    fun pollSensors() = ble.pollSensors()
+    fun pollRemote(targetId: String) = ble.pollRemote(targetId)
+
+    // ─── Timers ──────────────────────────────────────────────
+    fun setTimer(pin: Int, action: String, seconds: Int) = ble.timerSet(pin, action, seconds)
+    fun setTimerPulse(pin: Int, onSec: Int, offSec: Int, repeats: Int) =
+        ble.timerPulse(pin, onSec, offSec, repeats)
+    fun clearTimers() = ble.timerClear()
+    fun listTimers() = ble.timerList()
+
+    // ─── Setpoints ───────────────────────────────────────────
+    fun setSetpoint(sensorPin: Int, op: String, threshold: Int,
+                    targetNode: String, relayPin: Int, action: Int) =
+        ble.setpointSet(sensorPin, op, threshold, targetNode, relayPin, action)
+    fun clearSetpoints() = ble.setpointClear()
+    fun listSetpoints() = ble.setpointList()
+
+    // ─── Auto-poll ───────────────────────────────────────────
+    fun setAutoPoll(target: String, interval: Int) {
+        ble.autoPollSet(target, interval)
+    }
+    fun stopAutoPoll() = ble.autoPollOff()
+
+    // ─── Nodes request ─────────────────────────────────────
+    fun requestNodes() = ble.send("NODES")
+
+    fun toggleSound(enabled: Boolean) { _soundEnabled.value = enabled }
 
     // ─── Settings ────────────────────────────────────────────
     fun setNodeId(id: String) {
@@ -142,31 +214,55 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
     // ─── Parse incoming lines from node ──────────────────────
     private fun parseLine(line: String) {
         when {
-            // Incoming message: RX,<from>,<text>,<rssi>
+            // Incoming message: RX,<from>,<text...>,<rssi>
+            // Text may contain commas (e.g. SDATA payloads), RSSI is always last field
             line.startsWith("RX,") -> {
-                val parts = line.split(",", limit = 4)
+                val parts = line.split(",")
                 if (parts.size >= 3) {
                     val from = parts[1]
-                    val text = parts.getOrElse(2) { "" }
-                    val rssi = parts.getOrElse(3) { "0" }.toIntOrNull() ?: 0
+                    // RSSI is the last field (always negative int from firmware)
+                    val lastField = parts.last()
+                    val rssi = lastField.toIntOrNull()
+                    val text = if (rssi != null && parts.size > 3) {
+                        parts.subList(2, parts.size - 1).joinToString(",")
+                    } else {
+                        parts.subList(2, parts.size).joinToString(",")
+                    }
+                    val finalRssi = rssi ?: 0
+
+                    // Check if this is an SDATA response from a remote POLL
+                    if (text.startsWith("SDATA,")) {
+                        parseSensorData(text)
+                        return
+                    }
 
                     _messages.value = _messages.value + ChatMessage(
                         from = from,
                         text = text,
-                        rssi = rssi
+                        rssi = finalRssi
                     )
 
+                    // Play notification sound
+                    if (_soundEnabled.value) {
+                        try {
+                            val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                            RingtoneManager.getRingtone(getApplication(), uri)?.play()
+                        } catch (_: Exception) { }
+                    }
+
                     // Forward to Telegram (group broadcasts + SOS only)
-                    // Direct messages stay private
                     val isSos = text.startsWith("SOS,")
-                    val isGroupBroadcast = !text.startsWith("POS,") // exclude position-only pings
+                    val isGroupBroadcast = !text.startsWith("POS,")
                     if (isSos || isGroupBroadcast) {
                         viewModelScope.launch {
-                            telegram.forward(from, text, rssi)
+                            telegram.forward(from, text, finalRssi)
                         }
                     }
                 }
             }
+
+            // ─── Sensor data: SDATA,<nodeId>,<pin>:<val>,... ────
+            line.startsWith("SDATA,") -> parseSensorData(line)
 
             // Command response: CMD,RSP,<pin>,<value>
             line.startsWith("CMD,RSP,") -> {
@@ -188,19 +284,37 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
                 parseStatus(line.substring(7))
             }
 
-            // Node discovered: NODE,<id>,<rssi>,<hops>
+            // NODELIST bulk response start: NODELIST,<count>
+            line.startsWith("NODELIST,") -> {
+                nodeListBuffer = mutableListOf()
+            }
+
+            // NODEEND: bulk response complete — swap into state
+            line == "NODEEND" -> {
+                nodeListBuffer?.let { _nodes.value = it }
+                nodeListBuffer = null
+            }
+
+            // Node discovered: NODE,<id>,<rssi>,<hops>[,<age>,<active>]
             line.startsWith("NODE,") -> {
                 val parts = line.split(",")
                 if (parts.size >= 3) {
                     val id = parts[1]
                     val rssi = parts.getOrElse(2) { "0" }.toIntOrNull() ?: 0
                     val hops = parts.getOrElse(3) { "0" }.toIntOrNull() ?: 0
-                    addOrUpdateNode(id, rssi, hops)
+                    val age = parts.getOrElse(4) { "0" }.toIntOrNull() ?: 0
+                    val active = parts.getOrElse(5) { "1" } == "1"
+                    val node = MeshNode(id, rssi, System.currentTimeMillis(), hops, age, active)
+
+                    if (nodeListBuffer != null) {
+                        nodeListBuffer!!.add(node)
+                    } else {
+                        addOrUpdateNode(id, rssi, hops)
+                    }
                 }
             }
 
             // ─── Message delivery tracking ────────────────────
-            // Firmware confirmed LoRa transmit: SENT,<target>,<mid>
             line.startsWith("SENT,") -> {
                 val parts = line.split(",", limit = 3)
                 if (parts.size >= 3) {
@@ -245,8 +359,60 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
 
+            // ─── Timer responses ────────────────────────────────
+            // Timer list: TIMERS,<pin>:ON:123s,<pin>:PULSE:5/10x3,...  or  TIMERS,NONE
+            line.startsWith("TIMERS") -> parseTimerList(line)
+
+            // Timer confirmed: OK,TIMER,<pin>,ON,<seconds>  etc.
+            line.startsWith("OK,TIMER,") -> {
+                _statusLine.value = line
+                listTimers() // refresh list
+            }
+
+            // Timer fired: TIMER,FIRED,<pin>,ON|OFF
+            line.startsWith("TIMER,FIRED,") || line.startsWith("TIMER,DONE,") -> {
+                _statusLine.value = line
+                refreshPins()
+                listTimers()
+            }
+
+            // ─── Setpoint responses ─────────────────────────────
+            // SETPOINTS,<sensor>:GT:2000->0010:4:1,...  or  SETPOINTS,NONE
+            line.startsWith("SETPOINTS") -> parseSetpointList(line)
+
+            // Setpoint confirmed: OK,SETPOINT,...
+            line.startsWith("OK,SETPOINT,") -> {
+                _statusLine.value = line
+                listSetpoints()
+            }
+
+            // Setpoint fired: SETPOINT,FIRED,<sensorPin>,<value>,<target>
+            line.startsWith("SETPOINT,FIRED,") -> {
+                _statusLine.value = line
+            }
+
+            // ─── Auto-poll responses ────────────────────────────
+            line.startsWith("OK,AUTOPOLL,OFF") -> {
+                _autoPoll.value = AutoPollConfig(enabled = false)
+                _statusLine.value = "Auto-poll disabled"
+            }
+
+            line.startsWith("OK,AUTOPOLL,") -> {
+                val parts = line.split(",")
+                if (parts.size >= 4) {
+                    val target = parts[2]
+                    val interval = parts[3].toIntOrNull() ?: 300
+                    _autoPoll.value = AutoPollConfig(true, target, interval)
+                    _statusLine.value = "Auto-poll: $target every ${interval}s"
+                }
+            }
+
+            // ─── Error responses ────────────────────────────────
+            line.startsWith("ERR,") -> {
+                _statusLine.value = line
+            }
+
             // ─── ID Conflict alert ────────────────────────────
-            // Firmware detected another node with same ID: CONFLICT,<id>,<rssi>
             line.startsWith("CONFLICT,") -> {
                 val parts = line.split(",")
                 if (parts.size >= 2) {
@@ -259,7 +425,6 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
             }
 
             // ─── Spreading Factor change protocol ─────────────
-            // SF change initiated: CFGSTART,SF,<value>,<changeId>
             line.startsWith("CFGSTART,") -> {
                 val parts = line.split(",")
                 if (parts.size >= 4 && parts[1] == "SF") {
@@ -274,7 +439,6 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
 
-            // Node ACKed the SF change: CFGACK,SF,<value>,<changeId>,<nodeId>
             line.startsWith("CFGACK,") -> {
                 val parts = line.split(",")
                 if (parts.size >= 5 && parts[1] == "SF") {
@@ -289,12 +453,11 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
 
-            // CFGGO acknowledged by firmware: OK,SFGO,<value>
             line.startsWith("OK,SFGO,") -> {
                 val newSF = line.substringAfter("OK,SFGO,").toIntOrNull()
                 _sfChange.value = _sfChange.value.copy(phase = SfChangePhase.COMMITTED)
                 viewModelScope.launch {
-                    delay(3000) // wait for all nodes to switch
+                    delay(3000)
                     _sfChange.value = _sfChange.value.copy(phase = SfChangePhase.COMPLETE)
                     if (newSF != null) {
                         _config.value = _config.value.copy(spreadingFactor = newSF)
@@ -304,9 +467,105 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // ─── SDATA parser ─────────────────────────────────────────
+    // Format: SDATA,<nodeId>,<pin1>:<val1>,<pin2>:<val2>,...
+    private fun parseSensorData(line: String) {
+        val parts = line.split(",")
+        if (parts.size < 3) return
+        val nodeId = parts[1]
+
+        val history = _sensorHistory.value.toMutableMap()
+        for (i in 2 until parts.size) {
+            val pv = parts[i].split(":")
+            if (pv.size != 2) continue
+            val pin = pv[0].toIntOrNull() ?: continue
+            val value = pv[1].toIntOrNull() ?: continue
+
+            val key = "$nodeId:$pin"
+            val existing = history[key]?.toMutableList() ?: mutableListOf()
+            existing.add(SensorReading(value))
+            if (existing.size > MAX_SENSOR_HISTORY) {
+                existing.removeAt(0)
+            }
+            history[key] = existing
+
+            // Also update current sensor value if it's a local pin
+            val sensors = _sensors.value.toMutableList()
+            val sIdx = sensors.indexOfFirst { it.pin == pin }
+            if (sIdx >= 0 && nodeId == _config.value.nodeId) {
+                sensors[sIdx] = sensors[sIdx].copy(value = value)
+                _sensors.value = sensors
+            }
+        }
+        _sensorHistory.value = history
+    }
+
+    // ─── Timer list parser ────────────────────────────────────
+    // Format: TIMERS,<pin>:ON:123s,<pin>:PULSE:5/10x3,...  or  TIMERS,NONE
+    private fun parseTimerList(line: String) {
+        val parts = line.split(",")
+        if (parts.size < 2 || parts[1] == "NONE") {
+            _timers.value = emptyList()
+            return
+        }
+        val list = mutableListOf<TimerInfo>()
+        for (i in 1 until parts.size) {
+            val fields = parts[i].split(":", limit = 3)
+            if (fields.size < 2) continue
+            val pin = fields[0].toIntOrNull() ?: continue
+            val action = fields[1]
+            val detail = fields.getOrElse(2) { "" }
+            list.add(TimerInfo(pin, isPulse = action == "PULSE", action = action, detail = detail))
+        }
+        _timers.value = list
+    }
+
+    // ─── Setpoint list parser ─────────────────────────────────
+    // Format: SETPOINTS,<sensor>:GT:2000->0010:4:1,...  or  SETPOINTS,NONE
+    private fun parseSetpointList(line: String) {
+        val parts = line.split(",")
+        if (parts.size < 2 || parts[1] == "NONE") {
+            _setpoints.value = emptyList()
+            return
+        }
+        val list = mutableListOf<SetpointInfo>()
+        for (i in 1 until parts.size) {
+            // Format: <sensorPin>:<op>:<threshold>-><targetNode>:<relayPin>:<action>
+            val arrowIdx = parts[i].indexOf("->")
+            if (arrowIdx < 0) continue
+            val left = parts[i].substring(0, arrowIdx).split(":")
+            val right = parts[i].substring(arrowIdx + 2).split(":")
+            if (left.size < 3 || right.size < 3) continue
+            list.add(SetpointInfo(
+                sensorPin = left[0].toIntOrNull() ?: continue,
+                op = left[1],
+                threshold = left[2].toIntOrNull() ?: continue,
+                targetNode = right[0],
+                relayPin = right[1].toIntOrNull() ?: continue,
+                action = right[2].toIntOrNull() ?: continue
+            ))
+        }
+        _setpoints.value = list
+    }
+
+    // ─── Parse auto-poll from STATUS ─────────────────────────
+    private fun parseAutoPollFromStatus(field: String) {
+        // AUTOPOLL:OFF or AUTOPOLL:0010/300s
+        if (field == "OFF") {
+            _autoPoll.value = AutoPollConfig(enabled = false)
+        } else {
+            val slash = field.indexOf('/')
+            if (slash > 0) {
+                val target = field.substring(0, slash)
+                val interval = field.substring(slash + 1).removeSuffix("s").toIntOrNull() ?: 300
+                _autoPoll.value = AutoPollConfig(true, target, interval)
+            }
+        }
+    }
+
     private fun scheduleAckTimeout(mid: String) {
         viewModelScope.launch {
-            delay(3000) // ACK_TIMEOUT = 3s, matches firmware
+            delay(3000)
             if (pendingAcks.containsKey(mid)) {
                 pendingAcks.remove(mid)
                 val msgs = _messages.value.toMutableList()
@@ -336,7 +595,6 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun parsePinList(data: String) {
-        // Format: R:2,4,12,15|S:34,36,39
         val parts = data.split("|")
         for (part in parts) {
             if (part.startsWith("R:")) {
@@ -361,6 +619,7 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
                 "FREQ" -> cfg.frequency = kv[1].toFloatOrNull() ?: 868.0f
                 "SF" -> cfg.spreadingFactor = kv[1].toIntOrNull() ?: 9
                 "POWER" -> cfg.powerMode = kv[1]
+                "AUTOPOLL" -> parseAutoPollFromStatus(kv[1])
             }
         }
         _config.value = cfg

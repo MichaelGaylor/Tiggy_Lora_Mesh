@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>TiggyOpenMesh v3.1 - Complete Documentation</title>
+<title>TiggyOpenMesh v4.0 - Complete Documentation</title>
 <style>
   :root {
     --bg: #0a0e14;
@@ -464,7 +464,7 @@
 <div class="hero">
   <h1>TiggyOpenMesh</h1>
   <div class="subtitle">T-Deck Plus &bull; LoRa32 &bull; Heltec V3 &bull; Heltec V4 &bull; XIAO ESP32S3</div>
-  <span class="version">v3.1 &mdash; MeshCore Architecture</span>
+  <span class="version">v4.0 &mdash; MeshCore Architecture</span>
   <p style="color:var(--dim); margin-top:16px; font-size:0.95em;">
     Complete technical documentation &mdash; hardware, protocol, menus, code architecture &amp; API
   </p>
@@ -490,6 +490,11 @@
   <a href="#gateway">Gateway Bridge</a>
   <a href="#wifi-gateway">WiFi Gateway (ESP)</a>
   <a href="#solar">Solar Mode</a>
+  <a href="#delivery-tracking">Delivery Tracking</a>
+  <a href="#sf-change">SF Change Protocol</a>
+  <a href="#collision">ID Collision</a>
+  <a href="#display-sleep">Display Sleep</a>
+  <a href="#gateway-map">Gateway Map</a>
   <a href="#telegram">Telegram Alerts</a>
   <a href="#theme">Theme</a>
 </nav>
@@ -504,7 +509,7 @@
 
 <div class="info-box cyan">
   <p><strong>What makes this different from Meshtastic?</strong></p>
-  <p>Directed routing (not just blind flooding), jitter-based collision avoidance, listen-before-talk, hash-based O(1) dedup with 64 slots, duty-cycle enforcement, and a shared library (<code>MeshCore</code>) so all mesh logic lives in one place.</p>
+  <p>Directed routing (not just blind flooding), jitter-based collision avoidance, listen-before-talk, hash-based O(1) dedup with 64 slots, duty-cycle enforcement, <strong>message delivery receipts</strong>, <strong>two-phase spreading factor changes</strong>, <strong>auto ID collision detection</strong>, <strong>display auto-sleep</strong>, <strong>live gateway coverage map</strong>, and a shared library (<code>MeshCore</code>) so all mesh logic lives in one place.</p>
 </div>
 
 <h3>System Roles</h3>
@@ -523,10 +528,16 @@
     <td>Headless mesh repeater with 0.96" OLED stats display, BLE for phone control, GPIO relay/sensor control, serial config, gateway bridge mode</td>
   </tr>
   <tr>
+    <td><strong>WiFi Gateway</strong></td>
+    <td>Heltec V2/V3/V4 or XIAO</td>
+    <td><code>gateway_wifi.cpp</code></td>
+    <td>Standalone LoRa-to-WiFi bridge &mdash; no PC needed. Connects to hub, supports BLE config, location for map</td>
+  </tr>
+  <tr>
     <td><strong>Phone Controller</strong></td>
     <td>Android phone</td>
     <td>Android app (Kotlin)</td>
-    <td>BLE connection to any repeater node &mdash; chat, relay control, settings, node discovery</td>
+    <td>BLE connection to any repeater node &mdash; chat, relay control, settings, node discovery, delivery tracking</td>
   </tr>
 </table>
 
@@ -689,7 +700,11 @@ mesh.onChannelFree    = radioChannelFree;    <span class="comment">// Check RSSI
 mesh.onMessage        = handleMessage;       <span class="comment">// Decrypted message arrived for us</span>
 mesh.onCmd            = handleCmd;           <span class="comment">// CMD (GPIO control) arrived</span>
 mesh.onAck            = handleAck;           <span class="comment">// ACK received</span>
-mesh.onNodeDiscovered = handleNodeDiscovered;<span class="comment">// New node heard for first time</span></pre>
+mesh.onNodeDiscovered = handleNodeDiscovered;<span class="comment">// New node heard for first time</span>
+mesh.onIdConflict     = handleIdConflict;    <span class="comment">// Another node using our ID detected</span>
+mesh.onCfg            = handleCfg;           <span class="comment">// Config change request (SF change)</span>
+mesh.onCfgAck         = handleCfgAck;        <span class="comment">// Config change acknowledged by a node</span>
+mesh.onCfgGo          = handleCfgGo;         <span class="comment">// Config change committed — apply now</span></pre>
 
 <h3>Main Loop Flow (both firmwares)</h3>
 <pre>
@@ -712,13 +727,15 @@ loop() {
 <h3>File Map</h3>
 <table>
   <tr><th>File</th><th>Purpose</th><th>Lines</th></tr>
-  <tr><td><code>lib/MeshCore/MeshCore.h</code></td><td>Shared library header &mdash; constants, structs, class definition</td><td>~207</td></tr>
-  <tr><td><code>lib/MeshCore/MeshCore.cpp</code></td><td>All shared mesh logic &mdash; CRC, crypto, routing, dedup, forwarding</td><td>~440</td></tr>
-  <tr><td><code>src/main.cpp</code></td><td>T-Deck Plus full communicator &mdash; TFT UI, keyboard, GPS, menus</td><td>~1700</td></tr>
-  <tr><td><code>src/repeater.cpp</code></td><td>Headless repeater &mdash; OLED stats, BLE, GPIO, serial config</td><td>~500</td></tr>
-  <tr><td><code>include/Pins.h</code></td><td>Board-specific pin definitions (3 boards + custom template)</td><td>~180</td></tr>
+  <tr><td><code>lib/MeshCore/MeshCore.h</code></td><td>Shared library header &mdash; constants, structs, class definition, callbacks</td><td>~234</td></tr>
+  <tr><td><code>lib/MeshCore/MeshCore.cpp</code></td><td>All shared mesh logic &mdash; CRC, crypto, routing, dedup, forwarding, CFG auth</td><td>~500</td></tr>
+  <tr><td><code>src/main.cpp</code></td><td>T-Deck Plus full communicator &mdash; TFT UI, keyboard, GPS, menus, display sleep, delivery tracking</td><td>~1900</td></tr>
+  <tr><td><code>src/repeater.cpp</code></td><td>Headless repeater &mdash; OLED stats, BLE, GPIO, serial config, solar mode, collision detection</td><td>~600</td></tr>
+  <tr><td><code>src/gateway_wifi.cpp</code></td><td>WiFi ESP gateway &mdash; LoRa + WiFi bridge, BLE config, GWHEIGHT, hub WebSocket</td><td>~700</td></tr>
+  <tr><td><code>include/Pins.h</code></td><td>Board-specific pin definitions (5 boards + custom template)</td><td>~180</td></tr>
   <tr><td><code>include/phrases.h</code></td><td>Quick phrase library (40 phrases, 4 categories)</td><td>~70</td></tr>
-  <tr><td><code>android-app/</code></td><td>Kotlin + Jetpack Compose BLE controller app</td><td>~800</td></tr>
+  <tr><td><code>android-app/</code></td><td>Kotlin + Jetpack Compose BLE controller app</td><td>~900</td></tr>
+  <tr><td><code>gateway/</code></td><td>Python gateway client, hub server (headless + GUI), web map</td><td>~1200</td></tr>
 </table>
 </section>
 
@@ -778,6 +795,7 @@ Fields:
   <tr><td><code>POS,</code></td><td><code>POS,51.507222,-0.127500</code></td><td>GPS position broadcast</td></tr>
   <tr><td><code>SOS,</code></td><td><code>SOS,51.507222,-0.127500</code> or <code>SOS,NOFIX</code></td><td>Emergency distress signal</td></tr>
   <tr><td><code>CMD,</code></td><td><code>CMD,SET,2,1</code></td><td>Remote GPIO command</td></tr>
+  <tr><td><code>ACK_MSG,</code></td><td><code>ACK_MSG,XYZW</code></td><td>Delivery receipt &mdash; confirms message XYZW was received and decrypted</td></tr>
 </table>
 
 <h4>Special Packets (unencrypted)</h4>
@@ -785,7 +803,14 @@ Fields:
   <tr><th>Type</th><th>Format</th><th>Description</th></tr>
   <tr><td>Heartbeat</td><td><code>HB,0001</code></td><td>Periodic presence announcement (every ~30s)</td></tr>
   <tr><td>ACK</td><td><code>ACK,0001,XYZW</code></td><td>Delivery acknowledgement (to node 0001, for message XYZW)</td></tr>
+  <tr><td>CFG</td><td><code>CFG,SF,7,A1B2,C3D4</code></td><td>Config change proposal (type, value, changeId, authTag)</td></tr>
+  <tr><td>CFGACK</td><td><code>CFGACK,SF,7,A1B2,0010</code></td><td>Config change accepted by node 0010</td></tr>
+  <tr><td>CFGGO</td><td><code>CFGGO,SF,7,A1B2,C3D4</code></td><td>Config change committed &mdash; all nodes apply now</td></tr>
 </table>
+
+<div class="info-box cyan">
+  <p><strong>CFG Auth Tags:</strong> The 4-hex-char auth tag in CFG and CFGGO packets is <code>CRC16(changeId + AES_key)</code>. This proves the sender holds the same AES key as the mesh, preventing unauthorized config changes. Nodes verify the tag before accepting any CFG or CFGGO command.</p>
+</div>
 </section>
 
 <!-- ═══════════════ ENCRYPTION ═══════════════ -->
@@ -805,22 +830,21 @@ Fields:
 <h3>AES Key</h3>
 <ul style="color:var(--dim); padding-left:20px;">
   <li>Exactly <strong>16 ASCII characters</strong> (128 bits)</li>
-  <li>Default: <code>"DONTSHARETHEKEY!"</code></li>
+  <li>Default: <strong>randomly generated on first boot</strong> (displayed on serial/OLED)</li>
   <li><strong>All nodes must share the same key</strong> to communicate</li>
   <li>Stored in EEPROM at address <code>450</code></li>
 </ul>
 
-<h3>IV (Initialization Vector) Generation</h3>
-<pre><span class="comment">// IV is derived from the 4-char Message ID</span>
-<span class="keyword">for</span> (i = <span class="number">0</span>; i < <span class="number">16</span>; i++) {
-    <span class="keyword">if</span> (i < seed.length())
-        iv[i] = seed[i];           <span class="comment">// Direct copy</span>
-    <span class="keyword">else</span>
-        iv[i] = seed[i % len] ^ i; <span class="comment">// XOR expansion</span>
-}</pre>
+<h3>AES-128-GCM (Authenticated Encryption)</h3>
+<p>Each message uses a <strong>12-byte random nonce</strong> generated via <code>esp_random()</code>. GCM provides both confidentiality and authentication &mdash; no separate CRC needed.</p>
+<pre><span class="comment">// Encrypted blob format (hex-encoded):</span>
+nonce(<span class="number">12</span> bytes) || ciphertext(N bytes) || tag(<span class="number">16</span> bytes)
 
-<h3>CRC-16-CCITT</h3>
-<p>Polynomial <code>0x1021</code>, seed <code>0xFFFF</code>. Appended to plaintext <em>before</em> encryption so the receiver can verify decryption integrity.</p>
+<span class="comment">// Decryption: extract nonce, decrypt, verify GCM tag</span>
+<span class="comment">// If tag check fails → message rejected (tampered or wrong key)</span></pre>
+
+<h3>Message ID</h3>
+<p><strong>6-character random</strong> (a-z), used only for deduplication and ACK matching. Not used in encryption.</p>
 </section>
 
 <!-- ═══════════════ ROUTING ═══════════════ -->
@@ -890,7 +914,7 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
 
 <div class="screen">
   <div class="screen-header">
-    <span class="title">TiggyOpenMesh v3.1</span>
+    <span class="title">TiggyOpenMesh v4.0</span>
     <span class="badge">ONLINE</span>
   </div>
   <div class="screen-content">
@@ -945,7 +969,7 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
       <div style="font-size:10px; color:var(--dim); align-self:center;">You</div>
       <div class="bubble out">
         Yes, arrived 10 mins ago
-        <div class="meta">14:33</div>
+        <div class="meta"><span style="color:var(--green);">&check;&check;</span> 14:33</div>
       </div>
     </div>
     <div style="display:flex; align-items:flex-start; gap:6px;">
@@ -995,12 +1019,13 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
 
 <h3>Settings Submenu</h3>
 <div class="screen">
-  <div class="screen-header"><span class="title">TiggyOpenMesh v3.1</span></div>
+  <div class="screen-header"><span class="title">TiggyOpenMesh v4.0</span></div>
   <div class="screen-content">
     <div class="menu-item selected"><div class="bar" style="background:var(--cyan);"></div> Set Local ID <span class="arrow">&gt;</span></div>
     <div class="menu-item"><div class="bar" style="background:var(--faint);"></div> Set Target ID</div>
     <div class="menu-item"><div class="bar" style="background:var(--faint);"></div> Edit AES Key</div>
     <div class="menu-item"><div class="bar" style="background:var(--faint);"></div> Brightness</div>
+    <div class="menu-item"><div class="bar" style="background:var(--faint);"></div> Display Timeout</div>
     <div class="menu-item"><div class="bar" style="background:var(--faint);"></div> Clear Nodes</div>
     <div class="menu-item"><div class="bar" style="background:var(--faint);"></div> Back</div>
   </div>
@@ -1017,6 +1042,7 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
   <tr><td>Set Target ID</td><td>4 hex characters</td><td>Default recipient. <code>FFFF</code> = broadcast to all</td></tr>
   <tr><td>Edit AES Key</td><td>Exactly 16 ASCII characters</td><td>All nodes must share the same key!</td></tr>
   <tr><td>Brightness</td><td>Cycles: 100% &rarr; 50% &rarr; 25%</td><td>Display backlight PWM</td></tr>
+  <tr><td>Display Timeout</td><td>Cycles: Off &rarr; 30s &rarr; 60s &rarr; 120s &rarr; 300s</td><td>Auto-sleep after idle. See <a href="#display-sleep" style="color:var(--cyan);">Display Sleep</a>.</td></tr>
   <tr><td>Clear Nodes</td><td>Immediate</td><td>Wipes all known node IDs from memory &amp; EEPROM</td></tr>
 </table>
 
@@ -1058,10 +1084,14 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
 <h3>First-Boot Wizard</h3>
 <p>On first power-up (EEPROM magic byte <code>0xA5</code> not found), a 3-step wizard guides setup:</p>
 <ol style="color:var(--dim); padding-left:20px;">
-  <li><strong>Step 1:</strong> Enter your Node ID (4 hex chars, e.g. <code>0001</code>)</li>
+  <li><strong>Step 1:</strong> A random 4-hex-char Node ID is auto-generated (e.g. <code>3FA7</code>) and a <strong>10-second conflict scan</strong> runs in the background. A progress bar and countdown are shown on screen. If no conflict is detected, the suggested ID is accepted. If a collision is found, the ID auto-regenerates and re-scans. You can override the ID at any time by typing a custom one.</li>
   <li><strong>Step 2:</strong> Set or accept the AES encryption key (16 chars, pre-filled with default)</li>
   <li><strong>Step 3:</strong> Confirmation screen showing all settings, press Enter to start</li>
 </ol>
+
+<div class="info-box green">
+  <p><strong>Repeater first-boot:</strong> Repeater nodes also auto-generate a random ID on first boot and run a 10-second conflict scan with an OLED countdown. If a collision is found, the ID is regenerated and the scan restarts automatically. Config is only saved to EEPROM after a clear scan completes.</p>
+</div>
 
 <h3>Keyboard Controls</h3>
 <table>
@@ -1090,7 +1120,7 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
     </div>
     <div style="font-size:22px; color:var(--cyan); margin-top:14px; font-weight:700;">TiggyOpenMesh</div>
     <div style="color:var(--green); margin-top:4px;">T-Deck Plus Edition</div>
-    <div style="display:inline-block; background:var(--cyan); color:#000; padding:2px 12px; border-radius:8px; font-size:11px; font-weight:700; margin-top:6px;">v3.1</div>
+    <div style="display:inline-block; background:var(--cyan); color:#000; padding:2px 12px; border-radius:8px; font-size:11px; font-weight:700; margin-top:6px;">v4.0</div>
     <div style="background:var(--panel); border-radius:8px; padding:10px; margin:12px 20px 0; text-align:left; font-size:10px; color:var(--dim); line-height:1.8;">
       Freq: 868.0 MHz &nbsp;&nbsp; SF: 9<br>
       BW: 125 kHz &nbsp;&nbsp; Power: 20dBm<br>
@@ -1255,7 +1285,7 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
   <tr><td>Scan Screen</td><td><code>ScanScreen.kt</code></td><td>BLE device discovery with RSSI colour coding</td></tr>
   <tr><td>Chat Screen</td><td><code>ChatScreen.kt</code></td><td>Send/receive messages, broadcast/direct toggle</td></tr>
   <tr><td>Control Screen</td><td><code>ControlScreen.kt</code></td><td>Relay toggles, pulse buttons, sensor readings</td></tr>
-  <tr><td>Settings Screen</td><td><code>SettingsScreen.kt</code></td><td>Node ID, AES key, save to EEPROM, known nodes list</td></tr>
+  <tr><td>Settings Screen</td><td><code>SettingsScreen.kt</code></td><td>Node ID, AES key, power mode toggle, save to EEPROM, known nodes list</td></tr>
   <tr><td>Theme</td><td><code>Theme.kt</code></td><td>Dark theme matching firmware cyan/green palette</td></tr>
 </table>
 </section>
@@ -1283,16 +1313,30 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
   <tr><td>Set AES Key</td><td><code>KEY &lt;16chars&gt;</code></td><td><code>KEY MySecretKey123</code></td><td><code>OK,KEY</code></td></tr>
   <tr><td>Get Status</td><td><code>STATUS</code></td><td></td><td><code>STATUS,ID:0010,BOARD:...</code></td></tr>
   <tr><td>Save Config</td><td><code>SAVE</code></td><td></td><td><code>OK,SAVED</code></td></tr>
+  <tr><td>Set SF</td><td><code>SF,&lt;7-12&gt;</code></td><td><code>SF,7</code></td><td><code>OK,SF,7</code></td></tr>
+  <tr><td>Commit SF</td><td><code>SFGO,&lt;7-12&gt;</code></td><td><code>SFGO,7</code></td><td><code>OK,SFGO,7</code></td></tr>
+  <tr><td>Solar Mode On</td><td><code>POWER,SOLAR</code></td><td></td><td><code>OK,POWER,SOLAR</code> (BLE disconnects)</td></tr>
+  <tr><td>Solar Mode Off</td><td><code>POWER,NORMAL</code></td><td></td><td><code>OK,POWER,NORMAL</code></td></tr>
 </table>
+
+<div class="info-box orange">
+  <p><strong>POWER,SOLAR warning:</strong> Enabling solar mode via BLE immediately deinitialises BLE &mdash; the connection drops. The app must warn the user before sending this command. To restore normal mode, use serial (<code>SOLAR OFF</code>) or the PRG button.</p>
+</div>
 
 <h3>Notifications: Node &rarr; Phone</h3>
 <table>
   <tr><th>Event</th><th>Format</th><th>Example</th></tr>
   <tr><td>Incoming Message</td><td><code>RX,&lt;from&gt;,&lt;text&gt;,&lt;rssi&gt;</code></td><td><code>RX,0001,Hello,-85</code></td></tr>
+  <tr><td>Message Sent</td><td><code>SENT,&lt;mid&gt;</code></td><td><code>SENT,XYZW</code></td></tr>
+  <tr><td>Delivery ACK</td><td><code>ACK,&lt;from&gt;,&lt;mid&gt;</code></td><td><code>ACK,0002,XYZW</code></td></tr>
   <tr><td>Command Response</td><td><code>CMD,RSP,&lt;pin&gt;,&lt;value&gt;</code></td><td><code>CMD,RSP,2,1</code></td></tr>
   <tr><td>Pin List</td><td><code>PINS,R:&lt;pins&gt;|S:&lt;pins&gt;</code></td><td><code>PINS,R:2,4,12|S:34,36</code></td></tr>
-  <tr><td>Status</td><td><code>STATUS,&lt;key:val,...&gt;</code></td><td><code>STATUS,ID:0010,BOARD:LoRa32...</code></td></tr>
+  <tr><td>Status</td><td><code>STATUS,&lt;key:val,...&gt;</code></td><td><code>STATUS,ID:0010,BOARD:LoRa32...,POWER:NORMAL</code></td></tr>
   <tr><td>Node Found</td><td><code>NODE,&lt;id&gt;,&lt;rssi&gt;,&lt;hops&gt;</code></td><td><code>NODE,0002,-95,1</code></td></tr>
+  <tr><td>ID Conflict</td><td><code>CONFLICT,&lt;id&gt;,&lt;rssi&gt;</code></td><td><code>CONFLICT,0010,-65</code></td></tr>
+  <tr><td>CFG Proposed</td><td><code>CFGSTART,&lt;type&gt;,&lt;value&gt;,&lt;changeId&gt;</code></td><td><code>CFGSTART,SF,7,A1B2</code></td></tr>
+  <tr><td>CFG Node ACK</td><td><code>CFGACK,&lt;nodeId&gt;,&lt;type&gt;,&lt;value&gt;,&lt;changeId&gt;</code></td><td><code>CFGACK,0010,SF,7,A1B2</code></td></tr>
+  <tr><td>CFG Applied</td><td><code>CFGGO,&lt;type&gt;,&lt;value&gt;,&lt;changeId&gt;</code></td><td><code>CFGGO,SF,7,A1B2</code></td></tr>
 </table>
 </section>
 
@@ -1304,7 +1348,7 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
 
 <pre>
 <span class="keyword">ID</span> &lt;4hex&gt;              <span class="comment">Set node ID          e.g. ID 0002</span>
-<span class="keyword">KEY</span> &lt;16chars&gt;          <span class="comment">Set AES key          e.g. KEY DONTSHARETHEKEY!</span>
+<span class="keyword">KEY</span> &lt;16chars&gt;          <span class="comment">Set AES key          e.g. KEY MySecretKey12345</span>
 <span class="keyword">RELAY</span> &lt;pins&gt;           <span class="comment">Set relay GPIO pins  e.g. RELAY 2,4,12,15</span>
 <span class="keyword">SENSOR</span> &lt;pins&gt;          <span class="comment">Set sensor GPIO pins e.g. SENSOR 34,36</span>
 <span class="keyword">STATUS</span>                 <span class="comment">Show device info</span>
@@ -1315,6 +1359,10 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
 <span class="keyword">PKT,</span>&lt;hex&gt;              <span class="comment">Inject raw packet into mesh (gateway mode only)</span>
 <span class="keyword">SOLAR ON</span>               <span class="comment">Enable solar/low-power mode (SX1262 boards only)</span>
 <span class="keyword">SOLAR OFF</span>              <span class="comment">Disable solar mode, restore normal operation</span>
+
+<span class="comment"># STATUS response now includes:</span>
+<span class="comment">#   POWER:NORMAL or POWER:SOLAR</span>
+<span class="comment">#   SF:9 (current spreading factor)</span>
 </pre>
 
 <div class="info-box orange">
@@ -1379,8 +1427,10 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
   <tr><td><code>10</code></td><td>5 bytes</td><td>Target Node ID (4 chars + null)</td><td><code>"FFFF"</code></td></tr>
   <tr><td><code>20</code></td><td>~100 bytes</td><td>Known nodes array (up to 20 &times; 5 bytes)</td><td>Empty</td></tr>
   <tr><td><code>400</code></td><td>1 byte</td><td>Known node count</td><td><code>0</code></td></tr>
-  <tr><td><code>430</code></td><td>1 byte</td><td>Solar mode flag (0=off, 1=on)</td><td><code>0</code></td></tr>
-  <tr><td><code>450</code></td><td>17 bytes</td><td>AES-128 key (16 chars + null)</td><td><code>"DONTSHARETHEKEY!"</code></td></tr>
+  <tr><td><code>430</code></td><td>1 byte</td><td>Solar mode flag (0=off, 1=on) &mdash; repeater only</td><td><code>0</code></td></tr>
+  <tr><td><code>431</code></td><td>1 byte</td><td>Runtime spreading factor (7-12) &mdash; repeater only</td><td><code>9</code> (LORA_SF)</td></tr>
+  <tr><td><code>432</code></td><td>1 byte</td><td>Display sleep timeout in seconds (0=off) &mdash; T-Deck only</td><td><code>60</code></td></tr>
+  <tr><td><code>450</code></td><td>17 bytes</td><td>AES-128 key (16 chars + null)</td><td>Randomly generated on first boot</td></tr>
   <tr><td><code>508</code></td><td>1 byte</td><td>First-boot magic byte</td><td><code>0xA5</code> after first setup</td></tr>
 </table>
 
@@ -1548,11 +1598,24 @@ android-app/
 <p>All WebSocket messages are JSON. The hub understands three message types:</p>
 
 <h4>Authentication (Gateway &rarr; Hub)</h4>
-<pre>{
+<pre><span class="comment">// Python gateway (PC-based)</span>
+{
   <span class="string">"type"</span>:       <span class="string">"auth"</span>,
   <span class="string">"gateway_id"</span>: <span class="string">"3f8a1b2c"</span>,       <span class="comment">// Unique ID (auto-generated)</span>
   <span class="string">"name"</span>:       <span class="string">"Base Camp"</span>,      <span class="comment">// Friendly name (--name flag)</span>
   <span class="string">"key"</span>:        <span class="string">"MySecretKey"</span>     <span class="comment">// Hub auth key (--hub-key flag)</span>
+}
+
+<span class="comment">// ESP WiFi gateway (includes location for map)</span>
+{
+  <span class="string">"type"</span>:    <span class="string">"auth"</span>,
+  <span class="string">"key"</span>:     <span class="string">"MySecretKey"</span>,
+  <span class="string">"id"</span>:      <span class="string">"AA:BB:CC:DD:EE:FF"</span>,  <span class="comment">// WiFi MAC</span>
+  <span class="string">"name"</span>:    <span class="string">"Ridge Top"</span>,
+  <span class="string">"lat"</span>:     <span class="number">51.5074</span>,              <span class="comment">// GPS latitude</span>
+  <span class="string">"lon"</span>:     <span class="number">-3.1791</span>,              <span class="comment">// GPS longitude</span>
+  <span class="string">"antenna"</span>: <span class="number">2</span>,                    <span class="comment">// 0=indoor 1=external 2=rooftop</span>
+  <span class="string">"height"</span>:  <span class="number">10.0</span>                  <span class="comment">// Antenna height in metres</span>
 }</pre>
 
 <h4>Auth Response (Hub &rarr; Gateway)</h4>
@@ -1598,7 +1661,7 @@ pio run -e lora32 --target upload
 
 <span class="comment"># Configure via serial (115200 baud):</span>
 ID 0003                      <span class="comment"># Unique node ID for this repeater</span>
-KEY DONTSHARETHEKEY!         <span class="comment"># Must match ALL nodes in the mesh</span>
+KEY MySecretKey12345         <span class="comment"># Must match ALL nodes in the mesh</span>
 SAVE</pre>
 
 <div class="info-box cyan">
@@ -1700,10 +1763,19 @@ python gateway.py --port COM5 --listen <span class="number">9001</span> --peers 
 <h3>Gateway File Structure</h3>
 <pre>
 gateway/
-  <span style="color:var(--cyan);">gateway.py</span>          <span class="comment"># Gateway client (runs at each site with a repeater)</span>
-  <span style="color:var(--green);">gateway_hub.py</span>      <span class="comment"># Central hub server (runs once on a server)</span>
-  <span style="color:var(--dim);">requirements.txt</span>    <span class="comment"># Python dependencies: pyserial, websockets</span>
+  <span style="color:var(--cyan);">gateway.py</span>              <span class="comment"># Gateway client — headless (Linux/Windows CLI)</span>
+  <span style="color:var(--cyan);">gateway_gui.py</span>          <span class="comment"># Gateway client — Windows GUI (topology view + packet waterfall)</span>
+  <span style="color:var(--green);">gateway_hub.py</span>          <span class="comment"># Central hub server — headless (Linux/Windows CLI)</span>
+  <span style="color:var(--green);">gateway_hub_gui.py</span>      <span class="comment"># Central hub server — Windows GUI (live dashboard)</span>
+  <span style="color:var(--dim);">requirements.txt</span>        <span class="comment"># Python dependencies: pyserial, websockets, aiohttp, customtkinter</span>
+  <span style="color:var(--dim);">gateways.json</span>           <span class="comment"># Auto-generated gateway registry (location persistence)</span>
+  <span style="color:var(--orange);">web/</span>
+    <span style="color:var(--orange);">map.html</span>              <span class="comment"># Live gateway coverage map (Leaflet.js, served by hub)</span>
 </pre>
+
+<div class="info-box cyan">
+  <p><strong>Hub serves the map:</strong> The hub serves both WebSocket and HTTP on the <strong>same port</strong>. Open <code>http://hub-address:9000/</code> in a browser to see the <a href="#gateway-map" style="color:var(--cyan);">Live Gateway Map</a>. Gateways connect via <code>ws://hub:9000/</code> (same port).</p>
+</div>
 
 </section>
 
@@ -1751,13 +1823,18 @@ New method:  LoRa nodes → ESP gateway → WiFi → WebSocket → Hub
 <span class="keyword">GWNAME</span>,Ridge Top Gateway         <span class="comment">Friendly name shown on hub</span>
 <span class="keyword">GWLOC</span>,51.5074,-3.1791            <span class="comment">Lat/lon (optional, for map)</span>
 <span class="keyword">GWANTENNA</span>,1                      <span class="comment">0=indoor  1=external  2=rooftop</span>
+<span class="keyword">GWHEIGHT</span>,10                       <span class="comment">Antenna height in metres (0-500)</span>
 <span class="keyword">SAVE</span>                              <span class="comment">Write to flash and reboot</span></pre>
 </div>
 
 <p>The gateway reboots, connects to WiFi, and begins bridging. The OLED shows the WiFi IP and hub connection status.</p>
 
 <h3>GWSTATUS — Check Connection</h3>
-<div class="code-block"><pre><span class="keyword">GWSTATUS</span>   <span class="comment">Returns: name, WiFi IP, hub connected/disconnected, RX/TX counts</span></pre></div>
+<div class="code-block"><pre><span class="keyword">GWSTATUS</span>   <span class="comment">Returns: name, WiFi IP, hub connected/disconnected, RX/TX counts, HEIGHT</span></pre></div>
+
+<div class="info-box cyan">
+  <p><strong>Gateway auth includes location:</strong> When the gateway connects to the hub, the auth message includes <code>lat</code>, <code>lon</code>, <code>antenna</code> type, and <code>height</code>. This enables the <a href="#gateway-map" style="color:var(--cyan);">Live Gateway Map</a> on the hub.</p>
+</div>
 
 <h3>Solar Deployment Guide</h3>
 <p>Total BOM for a self-powered tree-mounted gateway:</p>
@@ -1774,18 +1851,59 @@ New method:  LoRa nodes → ESP gateway → WiFi → WebSocket → Hub
 <p><strong>Power draw:</strong> ESP32S3 active ~160mA @ 3.3V = 0.53W. A 2W panel fully charges a 2000mAh cell in ~4 hours of sun. Runs 15+ hours overnight on the cell alone.</p>
 
 <h3>Hub Setup (Linux / Tailscale)</h3>
-<p>The hub runs on any always-on Linux machine. The automated setup script handles everything — Python, systemd service, and Tailscale Funnel:</p>
+<p>The hub runs on any always-on Linux machine (Debian, Ubuntu, Raspberry Pi, etc). The automated setup script handles everything — Python, systemd service, and Tailscale Funnel:</p>
 <div class="code-block"><pre><span class="comment"># Download and run the setup script (Debian/Ubuntu)</span>
 curl -fsSL https://raw.githubusercontent.com/MichaelGaylor/Tiggy_Lora_Mesh/main/gateway/setup-hub-linux.sh -o setup.sh
 bash setup.sh</pre></div>
 
 <p>The script will:</p>
 <ol>
-  <li>Install Python <code>python3-websockets</code> via apt</li>
+  <li>Install Python and <code>aiohttp</code> (the hub's HTTP/WebSocket server library)</li>
   <li>Optionally install Tailscale and connect to your account</li>
   <li>Create a systemd service that auto-starts on boot (<code>tiggyopenmesh-hub.service</code>)</li>
   <li>Optionally enable Tailscale Funnel for a public <code>wss://</code> URL</li>
 </ol>
+
+<h4>Manual Setup (without the script)</h4>
+<p>If you prefer to set things up manually or the script doesn't suit your distro:</p>
+<div class="code-block"><pre><span class="comment"># 1. Install dependencies</span>
+sudo apt-get install -y python3 python3-pip
+pip3 install --break-system-packages aiohttp
+
+<span class="comment"># 2. Copy gateway files to your home directory</span>
+<span class="comment">#    You need: gateway_hub.py, gateway_hub_gui.py, gui_common.py</span>
+<span class="comment">#    And: web/map.html (create a web/ folder next to gateway_hub.py)</span>
+cp gateway_hub.py gateway_hub_gui.py gui_common.py ~/
+mkdir -p ~/web && cp web/map.html ~/web/
+
+<span class="comment"># 3. Test it works</span>
+python3 ~/gateway_hub.py --listen 8443
+<span class="comment"># Open http://localhost:8443/ in a browser — you should see the map</span>
+
+<span class="comment"># 4. Create systemd service for auto-start on boot</span>
+sudo tee /etc/systemd/system/tiggyopenmesh-hub.service > /dev/null &lt;&lt;EOF
+[Unit]
+Description=TiggyOpenMesh Gateway Hub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=$USER
+WorkingDirectory=$HOME
+ExecStart=/usr/bin/python3 $HOME/gateway_hub.py --listen 8443
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable tiggyopenmesh-hub
+sudo systemctl start tiggyopenmesh-hub</pre></div>
 
 <div class="info-box orange">
   <p><strong>Tailscale Funnel port:</strong> Funnel only supports ports 443, 8443, and 10000. The hub runs on <strong>port 8443</strong> by default. Do not change this to 9000 or Funnel will not work.</p>
@@ -1805,15 +1923,82 @@ SAVE</pre></div>
 
 <p>No port forwarding, no dynamic DNS, free SSL certificate. The hub service and Funnel both survive reboots automatically.</p>
 
+<h3>Accessing the Map and GUI</h3>
+
+<p>The headless hub serves the <a href="#gateway-map" style="color:var(--cyan);">Live Gateway Map</a> as a web page on the <strong>same port</strong> as the WebSocket relay. Multiple users can open it simultaneously — it's a read-only page that refreshes every 10 seconds:</p>
+
+<table>
+  <tr><th>From where</th><th>URL</th></tr>
+  <tr><td>On the hub machine</td><td><code>http://localhost:8443/</code></td></tr>
+  <tr><td>Same LAN / Tailscale network</td><td><code>http://&lt;hub-ip&gt;:8443/</code></td></tr>
+  <tr><td>Anywhere (via Tailscale Funnel)</td><td><code>https://your-machine.tail1234.ts.net/</code></td></tr>
+</table>
+
+<p>If your Linux box has a desktop environment (XFCE, GNOME, KDE, etc), you can create desktop shortcuts for quick access:</p>
+
+<h4>Desktop shortcut: Open Map in browser</h4>
+<div class="code-block"><pre>cat > ~/Desktop/TiggyOpenMesh-Map.desktop &lt;&lt;'EOF'
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=TiggyOpenMesh Map
+Comment=Open the live gateway coverage map in your browser
+Exec=xdg-open http://localhost:8443/
+Icon=applications-internet
+Terminal=false
+Categories=Network;
+EOF
+chmod +x ~/Desktop/TiggyOpenMesh-Map.desktop</pre></div>
+
+<h4>Desktop shortcut: GUI Dashboard</h4>
+<p>The GUI version (<code>gateway_hub_gui.py</code>) shows a full desktop dashboard with live packet flow visualisation, connected gateway table, and statistics. It requires <code>customtkinter</code>:</p>
+<div class="code-block"><pre>pip3 install --break-system-packages customtkinter</pre></div>
+
+<p>Since the GUI and headless hub both use the same port, the launcher script stops the headless service before starting the GUI, then restarts it when the GUI window is closed:</p>
+<div class="code-block"><pre><span class="comment"># Create launcher script</span>
+cat > ~/start_hub_gui.sh &lt;&lt;'EOF'
+#!/bin/bash
+sudo systemctl stop tiggyopenmesh-hub 2>/dev/null
+sleep 1
+cd ~/
+python3 ~/gateway_hub_gui.py
+sudo systemctl start tiggyopenmesh-hub 2>/dev/null
+EOF
+chmod +x ~/start_hub_gui.sh
+
+<span class="comment"># Create desktop shortcut</span>
+cat > ~/Desktop/TiggyOpenMesh-Hub.desktop &lt;&lt;'EOF'
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=TiggyOpenMesh Hub
+Comment=Gateway Hub Dashboard - stops headless service, opens GUI
+Exec=bash ~/start_hub_gui.sh
+Icon=network-workgroup
+Terminal=false
+Categories=Network;
+EOF
+chmod +x ~/Desktop/TiggyOpenMesh-Hub.desktop</pre></div>
+
+<div class="info-box green">
+  <p><strong>Headless vs GUI:</strong> The headless service (<code>gateway_hub.py</code>) runs 24/7 via systemd, relaying packets and serving the browser map. The GUI (<code>gateway_hub_gui.py</code>) is optional — use it when you want a desktop dashboard. Both serve the same map and relay the same packets. You don't need a display to run the hub.</p>
+</div>
+
 <h3>Hub Management</h3>
 <div class="code-block"><pre><span class="comment"># View live logs</span>
 sudo journalctl -u tiggyopenmesh-hub -f
 
-<span class="comment"># Restart hub</span>
+<span class="comment"># Restart hub (e.g. after updating gateway_hub.py)</span>
 sudo systemctl restart tiggyopenmesh-hub
 
 <span class="comment"># Check status</span>
-sudo systemctl status tiggyopenmesh-hub</pre></div>
+sudo systemctl status tiggyopenmesh-hub
+
+<span class="comment"># Update hub files from the repo</span>
+cd ~/
+curl -fsSL https://raw.githubusercontent.com/MichaelGaylor/Tiggy_Lora_Mesh/main/gateway/gateway_hub.py -o gateway_hub.py
+curl -fsSL https://raw.githubusercontent.com/MichaelGaylor/Tiggy_Lora_Mesh/main/gateway/web/map.html -o web/map.html
+sudo systemctl restart tiggyopenmesh-hub</pre></div>
 </section>
 
 <!-- ═══════════════ SOLAR MODE ═══════════════ -->
@@ -1850,6 +2035,8 @@ sudo systemctl status tiggyopenmesh-hub</pre></div>
 </ul>
 
 <h3>Activation</h3>
+
+<h4>Via Serial (USB)</h4>
 <pre>
 <span class="comment"># Enable solar mode (persists across reboots)</span>
 <span class="keyword">SOLAR ON</span>
@@ -1860,6 +2047,22 @@ sudo systemctl status tiggyopenmesh-hub</pre></div>
 <span class="comment"># Check status (works in solar mode)</span>
 <span class="keyword">STATUS</span>
 </pre>
+
+<h4>Via BLE (Android App)</h4>
+<pre>
+<span class="comment"># Enable solar mode (SX1262 boards only)</span>
+<span class="keyword">POWER,SOLAR</span>     <span class="comment">→ OK,POWER,SOLAR (BLE then disconnects!)</span>
+
+<span class="comment"># Disable solar mode</span>
+<span class="keyword">POWER,NORMAL</span>    <span class="comment">→ OK,POWER,NORMAL</span>
+</pre>
+
+<div class="info-box red">
+  <p><strong>BLE disconnect warning:</strong> Sending <code>POWER,SOLAR</code> via BLE immediately deinitialises BLE on the repeater &mdash; the connection drops. The Android app shows a warning dialog before sending. To restore normal mode, connect via USB serial and send <code>SOLAR OFF</code>, or press the PRG button.</p>
+</div>
+
+<h4>Via Android App Settings Screen</h4>
+<p>The app's <strong>Settings</strong> tab shows a <strong>Power Mode</strong> card for SX1262-based repeater boards. It displays the current mode from the STATUS response and provides a toggle with a confirmation dialog.</p>
 
 <p>Solar mode is <strong>persisted to EEPROM</strong> &mdash; the node will boot directly into solar mode after a power cycle. No need to re-send the command.</p>
 
@@ -1890,9 +2093,341 @@ sudo systemctl status tiggyopenmesh-hub</pre></div>
 
 </section>
 
+<!-- ═══════════════ DELIVERY TRACKING ═══════════════ -->
+<section id="delivery-tracking">
+<h2>19. Message Delivery Tracking</h2>
+
+<p>Every message sent through the mesh now has <strong>end-to-end delivery confirmation</strong>. The sender knows exactly whether the message was transmitted, delivered, or failed &mdash; with visual status indicators on both the T-Deck and the Android app.</p>
+
+<h3>Delivery States</h3>
+<div class="flow">
+  <div class="flow-box" style="border-color:var(--orange);">SENDING<br><span style="color:var(--dim);font-size:0.8em;">Queued for TX</span></div>
+  <span class="flow-arrow">&rarr;</span>
+  <div class="flow-box" style="border-color:var(--cyan);">SENT<br><span style="color:var(--dim);font-size:0.8em;">Radio transmitted</span></div>
+  <span class="flow-arrow">&rarr;</span>
+  <div class="flow-box" style="border-color:var(--green);">DELIVERED<br><span style="color:var(--dim);font-size:0.8em;">ACK received</span></div>
+</div>
+<div class="flow" style="margin-left:200px; margin-top:8px;">
+  <span class="flow-arrow" style="transform:rotate(90deg);">&darr;</span>
+  <span style="color:var(--red); font-size:0.85em;">3s timeout, no ACK</span>
+  <span class="flow-arrow">&rarr;</span>
+  <div class="flow-box" style="border-color:var(--red);">FAILED<br><span style="color:var(--dim);font-size:0.8em;">No delivery receipt</span></div>
+</div>
+
+<h3>How It Works</h3>
+<ol style="color:var(--dim); padding-left:20px;">
+  <li>Sender transmits message &mdash; state set to <strong>SENDING</strong></li>
+  <li>Radio confirms transmission complete &mdash; firmware sends <code>SENT,&lt;mid&gt;</code> to BLE, state becomes <strong>SENT</strong></li>
+  <li>Recipient decrypts the message successfully and sends back an encrypted <code>ACK_MSG,&lt;mid&gt;</code> inside the mesh payload</li>
+  <li>Sender receives the ACK &mdash; state becomes <strong>DELIVERED</strong></li>
+  <li>If no ACK arrives within <strong>3 seconds</strong>, state becomes <strong>FAILED</strong> (the message may still have been received &mdash; the ACK could have been lost)</li>
+</ol>
+
+<h3>Visual Indicators</h3>
+<table>
+  <tr><th>State</th><th>T-Deck Chat Bubble</th><th>Android App</th></tr>
+  <tr><td style="color:var(--orange);">SENDING</td><td>Orange clock icon / "..." next to bubble</td><td>Orange "Sending..." text</td></tr>
+  <tr><td style="color:var(--cyan);">SENT</td><td>Single checkmark (<span style="color:var(--cyan);">&check;</span>)</td><td>Single grey checkmark</td></tr>
+  <tr><td style="color:var(--green);">DELIVERED</td><td>Double checkmark (<span style="color:var(--green);">&check;&check;</span>)</td><td>Double green checkmarks</td></tr>
+  <tr><td style="color:var(--red);">FAILED</td><td>Red cross (<span style="color:var(--red);">&cross;</span>)</td><td>Red "Failed" with retry option</td></tr>
+</table>
+
+<h3>BLE Protocol</h3>
+<table>
+  <tr><th>Direction</th><th>Format</th><th>Meaning</th></tr>
+  <tr><td>Node &rarr; App</td><td><code>SENT,XYZW</code></td><td>Message XYZW has been transmitted over LoRa</td></tr>
+  <tr><td>Node &rarr; App</td><td><code>ACK,0002,XYZW</code></td><td>Node 0002 confirmed receipt of message XYZW</td></tr>
+</table>
+
+<div class="info-box green">
+  <p><strong>Broadcast messages:</strong> Messages sent to <code>FFFF</code> (broadcast) skip delivery tracking &mdash; there's no single recipient to send an ACK. The state goes directly from SENDING &rarr; SENT.</p>
+</div>
+
+<div class="info-box orange">
+  <p><strong>FAILED does not mean undelivered:</strong> A FAILED state means the sender didn't receive an ACK within 3 seconds. The message may have been delivered but the ACK packet was lost in transit. In lossy environments, consider re-sending important messages.</p>
+</div>
+</section>
+
+<!-- ═══════════════ SF CHANGE PROTOCOL ═══════════════ -->
+<section id="sf-change">
+<h2>20. Spreading Factor Change Protocol</h2>
+
+<p>LoRa Spreading Factor (SF) controls the trade-off between <strong>range</strong> and <strong>speed</strong>. Changing SF requires <em>all nodes</em> to switch simultaneously &mdash; a node on SF7 cannot hear one on SF12. The two-phase CFG protocol ensures safe, coordinated changes across the entire mesh.</p>
+
+<h3>SF Values</h3>
+<table>
+  <tr><th>SF</th><th>Range</th><th>Speed</th><th>Airtime (50 bytes)</th><th>Use Case</th></tr>
+  <tr><td><code>SF7</code></td><td>Shortest</td><td>Fastest</td><td>~56 ms</td><td>Dense urban, many nodes close together</td></tr>
+  <tr><td><code>SF9</code></td><td>Medium</td><td>Medium</td><td>~205 ms</td><td><strong>Default</strong> &mdash; balanced for most deployments</td></tr>
+  <tr><td><code>SF12</code></td><td>Longest</td><td>Slowest</td><td>~1.3 s</td><td>Max range, sparse rural, mountain-to-valley</td></tr>
+</table>
+
+<h3>Two-Phase Change Protocol</h3>
+
+<h4>Phase 1: Propose &amp; Collect ACKs</h4>
+<div class="flow">
+  <div class="flow-box" style="border-color:var(--cyan);">Initiator sends<br><code>SF,7</code> via BLE</div>
+  <span class="flow-arrow">&rarr;</span>
+  <div class="flow-box" style="border-color:var(--green);">Node broadcasts<br><code>CFG,SF,7,A1B2,C3D4</code></div>
+  <span class="flow-arrow">&rarr;</span>
+  <div class="flow-box" style="border-color:var(--orange);">Peers respond<br><code>CFGACK,SF,7,A1B2,0010</code></div>
+  <span class="flow-arrow">&rarr;</span>
+  <div class="flow-box">Initiator collects<br>ACKs from mesh</div>
+</div>
+
+<h4>Phase 2: Commit</h4>
+<div class="flow">
+  <div class="flow-box" style="border-color:var(--cyan);">Initiator sends<br><code>SFGO,7</code> via BLE</div>
+  <span class="flow-arrow">&rarr;</span>
+  <div class="flow-box" style="border-color:var(--green);">Node broadcasts<br><code>CFGGO,SF,7,A1B2,C3D4</code></div>
+  <span class="flow-arrow">&rarr;</span>
+  <div class="flow-box" style="border-color:var(--orange);">All nodes wait<br>2s delay</div>
+  <span class="flow-arrow">&rarr;</span>
+  <div class="flow-box" style="border-color:var(--green);">All switch to SF7<br>simultaneously</div>
+</div>
+
+<h3>Auth Tags</h3>
+<p>CFG and CFGGO packets include an <strong>8-hex-char auth tag</strong> computed using AES-128-GCM:</p>
+<pre>authTag = truncate(GCM_tag(key, IV=SHA(changeId), AAD=changeId), <span class="number">4</span> bytes)
+<span class="comment">// Deterministic IV derived from changeId for reproducible verification</span></pre>
+<p>Receiving nodes verify the tag before accepting any CFG or CFGGO packet. This prevents:</p>
+<ul style="color:var(--dim); padding-left:20px;">
+  <li><strong>Unauthorized changes</strong> &mdash; an attacker without the AES key cannot forge a valid tag</li>
+  <li><strong>Cross-mesh interference</strong> &mdash; adjacent meshes with different keys ignore each other's CFG packets</li>
+</ul>
+
+<h3>Packet Formats</h3>
+<table>
+  <tr><th>Packet</th><th>Format</th><th>Fields</th></tr>
+  <tr><td>CFG (propose)</td><td><code>CFG,SF,7,A1B2,C3D4</code></td><td>type, value, changeId (random 4-hex), authTag</td></tr>
+  <tr><td>CFGACK (accept)</td><td><code>CFGACK,SF,7,A1B2,0010</code></td><td>type, value, changeId, respondingNodeId</td></tr>
+  <tr><td>CFGGO (commit)</td><td><code>CFGGO,SF,7,A1B2,C3D4</code></td><td>type, value, changeId, authTag</td></tr>
+</table>
+
+<h3>BLE Commands</h3>
+<table>
+  <tr><th>Command</th><th>Description</th><th>Response</th></tr>
+  <tr><td><code>SF,7</code></td><td>Start Phase 1 &mdash; broadcast CFG proposal for SF7</td><td><code>OK,SF,7</code> + <code>CFGSTART,SF,7,A1B2</code> + <code>CFGACK</code> notifications</td></tr>
+  <tr><td><code>SFGO,7</code></td><td>Start Phase 2 &mdash; broadcast CFGGO commit for SF7</td><td><code>OK,SFGO,7</code> then radio reconfigures after 2s delay</td></tr>
+</table>
+
+<h3>Timing &amp; Safety</h3>
+<ul style="color:var(--dim); padding-left:20px;">
+  <li><strong>2-second delay</strong> after CFGGO before applying &mdash; ensures packet propagates across multi-hop mesh</li>
+  <li><strong>SF persisted to EEPROM</strong> (address 431) &mdash; survives reboot</li>
+  <li><strong>Runtime SF</strong> stored in <code>mesh.currentSF</code> &mdash; may differ from compile-time <code>LORA_SF</code></li>
+  <li><strong>Reversible:</strong> send another <code>SF,9</code> + <code>SFGO,9</code> to change back</li>
+</ul>
+
+<div class="info-box red">
+  <p><strong>Critical:</strong> If only some nodes receive the CFGGO, the mesh splits &mdash; nodes on different SFs cannot hear each other. Always check that CFGACK responses come back from all expected nodes before sending CFGGO.</p>
+</div>
+</section>
+
+<!-- ═══════════════ COLLISION DETECTION ═══════════════ -->
+<section id="collision">
+<h2>21. Node ID Collision Detection</h2>
+
+<p>Node IDs are 4-hex-char values (0001&ndash;FFFE) &mdash; 65534 possible addresses. As networks grow, or when default IDs are used, collisions become likely. Two nodes with the same ID cause <strong>routing chaos</strong> &mdash; messages get misdelivered, heartbeats overwrite routes, and the mesh becomes unreliable.</p>
+
+<h3>Detection Mechanism</h3>
+<p>Collision detection piggybacks on the existing <strong>heartbeat system</strong> (no new packets, no extra airtime):</p>
+<ol style="color:var(--dim); padding-left:20px;">
+  <li>Every node broadcasts <code>HB,&lt;nodeID&gt;</code> every ~30 seconds</li>
+  <li>In <code>processPacket()</code>, if the heartbeat's node ID matches our own <code>localID</code>, a collision is detected</li>
+  <li>The <code>onIdConflict</code> callback fires with the conflicting ID and RSSI</li>
+  <li>The heartbeat is <strong>not</strong> processed as a normal peer (not added to routing table)</li>
+</ol>
+
+<pre><span class="comment">// In MeshCore::processPacket() — heartbeat handler</span>
+<span class="keyword">if</span> (hbFrom == String(localID)) {
+    idConflictDetected = <span class="keyword">true</span>;
+    <span class="keyword">if</span> (onIdConflict) onIdConflict(hbFrom, lastRSSI);
+    <span class="keyword">return</span>;  <span class="comment">// Don't add ourselves as a peer</span>
+}</pre>
+
+<h3>Alert Behaviour</h3>
+<table>
+  <tr><th>Device</th><th>Alert</th></tr>
+  <tr><td><strong>Repeater (OLED)</strong></td><td>Full-screen warning: <code>!! ID CONFLICT !!</code> with conflicting ID and RSSI. Stays on screen until resolved.</td></tr>
+  <tr><td><strong>Repeater (BLE)</strong></td><td>Sends <code>CONFLICT,&lt;id&gt;,&lt;rssi&gt;</code> to connected phone</td></tr>
+  <tr><td><strong>T-Deck</strong></td><td>10-second notification banner: <code>"ID CONFLICT! XXXX in use!"</code></td></tr>
+  <tr><td><strong>Android App</strong></td><td>System chat message: <code>"WARNING: ID collision! Node XXXX is used by another device."</code></td></tr>
+</table>
+
+<div class="oled-screen">
+  <div class="line" style="font-size:16px; font-weight:700; color:var(--red);">!! ID</div>
+  <div class="line" style="font-size:16px; font-weight:700; color:var(--red);">CONFLICT !!</div>
+  <div class="line">&nbsp;</div>
+  <div class="line">ID <span style="color:var(--cyan);">0010</span> RSSI:<span style="color:var(--yellow);">-65</span></div>
+  <div class="line" style="color:var(--dim);">Change via app/serial</div>
+</div>
+
+<h3>First-Boot Conflict Scan</h3>
+<p>Both repeaters and T-Deck devices perform an automatic conflict scan on first boot:</p>
+<table>
+  <tr><th>Step</th><th>Repeater</th><th>T-Deck</th></tr>
+  <tr><td>1. Generate ID</td><td>Random 4-hex ID (0001-FFFE)</td><td>Random 4-hex ID, pre-filled in wizard</td></tr>
+  <tr><td>2. Scan</td><td>10s blocking scan with OLED countdown</td><td>10s background scan with progress bar</td></tr>
+  <tr><td>3. Conflict?</td><td>Regenerate random ID, restart scan</td><td>Regenerate, restart scan</td></tr>
+  <tr><td>4. Clear</td><td>Save to EEPROM, continue boot</td><td>Show "No conflicts!", user can accept or override</td></tr>
+</table>
+
+<div class="info-box green">
+  <p><strong>No auto-fix for running nodes:</strong> If a collision is detected on a node that's already deployed in the field, the firmware <strong>does not auto-change the ID</strong>. It alerts the user so they can manually choose a new ID via the app, serial, or keyboard. This avoids surprise routing changes on unmanned repeaters.</p>
+</div>
+</section>
+
+<!-- ═══════════════ DISPLAY SLEEP ═══════════════ -->
+<section id="display-sleep">
+<h2>22. Display Auto-Sleep (T-Deck Plus)</h2>
+
+<p>The T-Deck's 2.8" TFT backlight draws significant power. Display auto-sleep turns off the backlight after a configurable idle period, extending battery life for portable use.</p>
+
+<h3>Behaviour</h3>
+<table>
+  <tr><th>Idle Time</th><th>Action</th></tr>
+  <tr><td>&lt; 50% of timeout</td><td>Screen at full brightness</td></tr>
+  <tr><td>50% &ndash; 100% of timeout</td><td>Screen dims to 25% brightness (warning)</td></tr>
+  <tr><td>100% of timeout</td><td>Backlight turns off completely</td></tr>
+  <tr><td>Any key / trackball input</td><td>Instant wake to full brightness</td></tr>
+</table>
+
+<h3>Configuration</h3>
+<p>Set via the T-Deck <strong>Settings</strong> menu &rarr; <strong>Display Timeout</strong>. Cycles through:</p>
+<div class="flow">
+  <div class="flow-box" style="border-color:var(--red);">Off (0)</div>
+  <span class="flow-arrow">&rarr;</span>
+  <div class="flow-box">30s</div>
+  <span class="flow-arrow">&rarr;</span>
+  <div class="flow-box" style="border-color:var(--green);">60s (default)</div>
+  <span class="flow-arrow">&rarr;</span>
+  <div class="flow-box">120s</div>
+  <span class="flow-arrow">&rarr;</span>
+  <div class="flow-box">300s</div>
+</div>
+
+<h3>Special Cases</h3>
+<ul style="color:var(--dim); padding-left:20px;">
+  <li><strong>SOS Mode:</strong> Screen <em>never</em> sleeps during an active SOS &mdash; the emergency display stays on at full brightness regardless of the timeout setting.</li>
+  <li><strong>First press wakes only:</strong> When the screen is asleep, the first key press or trackball movement wakes the display but <em>does not</em> trigger any menu action. This prevents accidental sends or button presses.</li>
+  <li><strong>Persisted:</strong> Saved to EEPROM address <code>432</code>. Survives reboot.</li>
+  <li><strong>Validation:</strong> Values 0 (off) or 10&ndash;255 seconds accepted. Invalid values default to 60s.</li>
+</ul>
+
+<h3>Power Impact</h3>
+<table>
+  <tr><th>State</th><th>Backlight Current</th></tr>
+  <tr><td>Full brightness (100%)</td><td>~40 mA</td></tr>
+  <tr><td>Dimmed (25%)</td><td>~10 mA</td></tr>
+  <tr><td>Off (sleeping)</td><td>0 mA</td></tr>
+</table>
+<p style="color:var(--dim);">With a 60-second timeout and typical usage patterns, display sleep can reduce average power consumption by <strong>30&ndash;50%</strong>, significantly extending battery life.</p>
+
+<div class="info-box cyan">
+  <p><strong>Repeater nodes</strong> do not have display sleep &mdash; their OLED draws only ~15 mA and auto-refreshes every 5s. For repeater power savings, use <a href="#solar" style="color:var(--cyan);">Solar Mode</a> which disables the OLED entirely.</p>
+</div>
+</section>
+
+<!-- ═══════════════ GATEWAY MAP ═══════════════ -->
+<section id="gateway-map">
+<h2>23. Live Gateway Coverage Map</h2>
+
+<p>The hub server hosts a live web map showing all registered gateways, their online/offline status, and estimated coverage areas. This is a <strong>peacetime management tool</strong> for network planning &mdash; the mesh itself operates without it.</p>
+
+<div class="info-box green">
+  <p><strong>Zero internet dependency for the mesh:</strong> The LoRa mesh is fully standalone peer-to-peer radio. Nodes talk directly via LoRa &mdash; no internet, no hub, no server needed. The map is an <em>optional add-on</em> that provides visibility when internet is available. In a disaster or war zone with no internet, the mesh works exactly the same.</p>
+</div>
+
+<h3>Accessing the Map</h3>
+<p>The hub serves both WebSocket and HTTP on the <strong>same port</strong> — no extra port needed:</p>
+<pre><span class="comment"># If hub runs on port 9000:</span>
+Map:       http://your-hub-address:<span class="number">9000</span>/
+API:       http://your-hub-address:<span class="number">9000</span>/api/gateways
+WebSocket: ws://your-hub-address:<span class="number">9000</span>/       <span class="comment">(gateways connect here)</span>
+
+<span class="comment"># Tailscale Funnel exposes ONE port — everything works through it:</span>
+https://your-machine.tail1234.ts.net/</pre>
+
+<h3>Map Features</h3>
+<table>
+  <tr><th>Feature</th><th>Description</th></tr>
+  <tr><td style="color:var(--green);">Online markers</td><td>Green pulsing dots for connected gateways</td></tr>
+  <tr><td style="color:var(--red);">Offline markers</td><td>Red static dots for disconnected gateways (remembered from registry)</td></tr>
+  <tr><td style="color:var(--cyan);">Coverage rings</td><td>Semi-transparent circles showing estimated LoRa coverage per gateway</td></tr>
+  <tr><td>Click popups</td><td>Gateway name, antenna type, height, uptime, packet count</td></tr>
+  <tr><td>Auto-fit</td><td>Map auto-centers to show all gateways on first load</td></tr>
+  <tr><td>Auto-refresh</td><td>Updates every 10 seconds via <code>/api/gateways</code></td></tr>
+</table>
+
+<h3>Coverage Ring Calculations</h3>
+<p>Approximate coverage radius based on antenna type and height (tuned for SF9 / 868 MHz):</p>
+<table>
+  <tr><th>Antenna Type</th><th>Code</th><th>Base Radius</th><th>Formula</th><th>Example (10m height)</th></tr>
+  <tr><td>Indoor</td><td>0</td><td>800 m</td><td>800 &times; &radic;height</td><td>~2.5 km</td></tr>
+  <tr><td>External</td><td>1</td><td>2,000 m</td><td>2000 &times; &radic;height</td><td>~6.3 km</td></tr>
+  <tr><td>Rooftop</td><td>2</td><td>4,000 m</td><td>4000 &times; &radic;height</td><td>~12.6 km</td></tr>
+</table>
+<p style="color:var(--dim);">These are rough estimates. Real-world coverage depends on terrain, buildings, and antenna quality.</p>
+
+<h3>Gateway Configuration for the Map</h3>
+<p>Each ESP gateway must have location configured via BLE before it appears on the map:</p>
+<pre><span class="keyword">GWLOC</span>,51.5074,-3.1791     <span class="comment">Latitude and longitude</span>
+<span class="keyword">GWANTENNA</span>,2                <span class="comment">0=indoor  1=external  2=rooftop</span>
+<span class="keyword">GWHEIGHT</span>,10                <span class="comment">Antenna height in metres</span>
+<span class="keyword">SAVE</span></pre>
+
+<p>Gateways with <code>lat=0, lon=0</code> (not configured) are hidden from the map.</p>
+
+<h3>HTTP API</h3>
+<table>
+  <tr><th>Endpoint</th><th>Method</th><th>Description</th></tr>
+  <tr><td><code>/</code></td><td>GET</td><td>Serves <code>map.html</code></td></tr>
+  <tr><td><code>/api/gateways</code></td><td>GET</td><td>JSON array of all gateways with status</td></tr>
+</table>
+
+<h4>API Response Format</h4>
+<pre>[{
+  <span class="string">"id"</span>:            <span class="string">"AA:BB:CC:DD:EE:FF"</span>,
+  <span class="string">"name"</span>:          <span class="string">"Base Camp"</span>,
+  <span class="string">"lat"</span>:           <span class="number">51.5074</span>,
+  <span class="string">"lon"</span>:           <span class="number">-3.1791</span>,
+  <span class="string">"antenna_type"</span>:  <span class="number">2</span>,
+  <span class="string">"antenna_height"</span>:<span class="number">10.0</span>,
+  <span class="string">"online"</span>:        <span class="keyword">true</span>,
+  <span class="string">"uptime"</span>:        <span class="number">3600</span>,
+  <span class="string">"packets"</span>:       <span class="number">150</span>
+}]</pre>
+
+<h3>Gateway Registry Persistence</h3>
+<p>The hub stores gateway locations in <code>gateway/gateways.json</code>. This means:</p>
+<ul style="color:var(--dim); padding-left:20px;">
+  <li><strong>Offline gateways still appear on the map</strong> (with a red marker) &mdash; useful for seeing full network topology</li>
+  <li><strong>Hub restart preserves locations</strong> &mdash; no need to reconfigure gateways</li>
+  <li><strong>Registry updates on each auth</strong> &mdash; gateway location changes take effect immediately</li>
+</ul>
+
+<h3>Hub Auth Message (Updated)</h3>
+<p>The gateway firmware now includes location data in the WebSocket auth message:</p>
+<pre>{
+  <span class="string">"type"</span>:    <span class="string">"auth"</span>,
+  <span class="string">"key"</span>:     <span class="string">"MySecretKey"</span>,
+  <span class="string">"id"</span>:      <span class="string">"AA:BB:CC:DD:EE:FF"</span>,  <span class="comment">// WiFi MAC address</span>
+  <span class="string">"name"</span>:    <span class="string">"Base Camp"</span>,
+  <span class="string">"lat"</span>:     <span class="number">51.5074</span>,
+  <span class="string">"lon"</span>:     <span class="number">-3.1791</span>,
+  <span class="string">"antenna"</span>: <span class="number">2</span>,                  <span class="comment">// 0=indoor, 1=external, 2=rooftop</span>
+  <span class="string">"height"</span>:  <span class="number">10.0</span>                 <span class="comment">// metres</span>
+}</pre>
+
+<div class="info-box orange">
+  <p><strong>Backward compatible:</strong> Old gateways without location fields still connect and relay packets normally. They just don't appear on the map. Old hubs ignore the new fields (Python <code>dict.get()</code> defaults).</p>
+</div>
+</section>
+
 <!-- ═══════════════ TELEGRAM ═══════════════ -->
 <section id="telegram">
-<h2>19. Telegram Alerts (Android App)</h2>
+<h2>24. Telegram Alerts (Android App)</h2>
 
 <p>The Android app can forward <strong>group mesh messages</strong> and <strong>SOS emergencies</strong> to a Telegram chat via a bot. This lets family members, a base-camp coordinator, or anyone with Telegram receive real-time alerts — even if they are miles away with no LoRa hardware.</p>
 
@@ -1958,7 +2493,7 @@ sudo systemctl status tiggyopenmesh-hub</pre></div>
 
 <!-- ═══════════════ THEME ═══════════════ -->
 <section id="theme">
-<h2>20. Colour Theme Reference</h2>
+<h2>25. Colour Theme Reference</h2>
 
 <p>Consistent colour palette used across the TFT display, OLED, and Android app.</p>
 
@@ -2006,8 +2541,9 @@ sudo systemctl status tiggyopenmesh-hub</pre></div>
 
 <!-- Footer -->
 <div style="background:var(--panel); border-top:1px solid var(--faint); padding:30px 40px; text-align:center; color:var(--faint); font-size:0.85em;">
-  <p>TiggyOpenMesh v3.1 &mdash; MeshCore Architecture</p>
+  <p>TiggyOpenMesh v4.0 &mdash; MeshCore Architecture</p>
   <p>T-Deck Plus &bull; LoRa32 T3 V1.6.1 &bull; Heltec WiFi LoRa 32 V3 &bull; Heltec WiFi LoRa 32 V4</p>
+  <p>25 sections &mdash; Hardware, Protocol, UI, BLE, Gateway, Map, Solar, Delivery Tracking, SF Change, Collision Detection, Display Sleep</p>
   <p style="margin-top:8px;">Documentation generated March 2026</p>
 </div>
 

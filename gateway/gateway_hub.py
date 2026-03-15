@@ -8,7 +8,7 @@ Each gateway connects to this hub via WebSocket. The hub relays
 packets between all connected gateways. No serial port needed —
 the hub is a pure network relay.
 
-Packets remain AES-128-CTR encrypted end-to-end.
+Packets remain AES-128-GCM encrypted end-to-end.
 The hub never decrypts — it is an opaque relay.
 
 Architecture:
@@ -34,8 +34,7 @@ import signal
 import sys
 import time
 
-import websockets
-from websockets.asyncio.server import serve
+import aiohttp
 from aiohttp import web
 
 logging.basicConfig(
@@ -91,7 +90,7 @@ class GatewayHub:
         self.listen_port = listen_port
         self.auth_key = auth_key
         self.dedup = PacketDedup()
-        self.gateways: dict[websockets.WebSocketProtocol, ConnectedGateway] = {}
+        self.gateways: dict[web.WebSocketResponse, ConnectedGateway] = {}
         self.running = True
 
         # Stats
@@ -134,24 +133,30 @@ class GatewayHub:
         }
         self._save_registry()
 
-    async def ws_handler(self, websocket):
-        """Handle an inbound WebSocket connection from a gateway."""
-        remote = websocket.remote_address
+    async def ws_handler(self, request):
+        """Handle an inbound WebSocket connection from a gateway (aiohttp)."""
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+
+        remote = request.remote
         log.info(f"Connection from {remote}")
         self.total_connections += 1
 
-        gw = ConnectedGateway(websocket, gateway_id="pending")
-        self.gateways[websocket] = gw
+        gw = ConnectedGateway(ws, gateway_id="pending")
+        self.gateways[ws] = gw
 
         try:
-            async for message in websocket:
-                await self.handle_message(message, websocket)
-        except websockets.ConnectionClosed:
-            pass
+            async for msg in ws:
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    await self.handle_message(msg.data, ws)
+                elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
+                    break
         finally:
-            if websocket in self.gateways:
-                gw = self.gateways.pop(websocket)
+            if ws in self.gateways:
+                gw = self.gateways.pop(ws)
                 log.info(f"Gateway disconnected: {gw.name} ({remote}) — relayed {gw.packets_relayed} packets")
+
+        return ws
 
     async def handle_message(self, raw: str, source_ws):
         """Process a message from a gateway."""
@@ -177,8 +182,8 @@ class GatewayHub:
             key = msg.get("key", "")
 
             if self.auth_key and key != self.auth_key:
-                log.warning(f"Auth FAILED from {gw.name} ({source_ws.remote_address})")
-                await source_ws.send(json.dumps({
+                log.warning(f"Auth FAILED from {gw.name}")
+                await source_ws.send_str(json.dumps({
                     "type": "auth_result",
                     "success": False,
                     "error": "Invalid key",
@@ -190,7 +195,7 @@ class GatewayHub:
             self._update_registry(gw)
             peer_count = sum(1 for g in self.gateways.values() if g.authenticated and g.ws is not source_ws)
             log.info(f"Gateway authenticated: {gw.name} (peers online: {peer_count})")
-            await source_ws.send(json.dumps({
+            await source_ws.send_str(json.dumps({
                 "type": "auth_result",
                 "success": True,
                 "peers": peer_count,
@@ -209,7 +214,7 @@ class GatewayHub:
         if msg_type == "pkt":
             # Must be authenticated (or no auth required)
             if self.auth_key and not gw.authenticated:
-                await source_ws.send(json.dumps({
+                await source_ws.send_str(json.dumps({
                     "type": "error",
                     "error": "Not authenticated. Send auth message first.",
                 }))
@@ -241,9 +246,9 @@ class GatewayHub:
                 if self.auth_key and not other_gw.authenticated:
                     continue
                 try:
-                    await ws.send(relay_msg)
+                    await ws.send_str(relay_msg)
                     relay_count += 1
-                except websockets.ConnectionClosed:
+                except (ConnectionError, ConnectionResetError):
                     pass
 
             log.info(f"Relay: {gw.name} → {relay_count} peers ({len(hex_data)//2}B)")
@@ -251,7 +256,7 @@ class GatewayHub:
         # ─── Status Request ──────────────────────────────────
         elif msg_type == "status":
             authenticated = [g for g in self.gateways.values() if g.authenticated]
-            await source_ws.send(json.dumps({
+            await source_ws.send_str(json.dumps({
                 "type": "hub_status",
                 "gateways": [
                     {
@@ -275,8 +280,8 @@ class GatewayHub:
             if not gw.authenticated:
                 continue
             try:
-                await ws.send(raw)
-            except websockets.ConnectionClosed:
+                await ws.send_str(raw)
+            except (ConnectionError, ConnectionResetError):
                 pass
 
     # ─── HTTP API (serves map + gateway data) ────────────────
@@ -325,31 +330,17 @@ class GatewayHub:
         """GET /api/gateways — JSON array of gateway info."""
         return web.json_response(self._get_gateways_json())
 
-    async def handle_map_page(self, request):
-        """GET / — serve map.html."""
+    async def handle_root(self, request):
+        """GET / — WebSocket upgrade → gateway handler; normal GET → map.html."""
+        # If this is a WebSocket upgrade request, handle as gateway connection
+        if request.headers.get("Upgrade", "").lower() == "websocket":
+            return await self.ws_handler(request)
+        # Otherwise serve the map page
         web_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
         map_file = os.path.join(web_dir, "map.html")
         if os.path.exists(map_file):
             return web.FileResponse(map_file)
         return web.Response(text="map.html not found — place it in gateway/web/", status=404)
-
-    async def start_http_server(self):
-        """Start aiohttp server on listen_port + 1."""
-        app = web.Application()
-        app.router.add_get("/", self.handle_map_page)
-        app.router.add_get("/api/gateways", self.handle_api_gateways)
-        # Serve static files from gateway/web/
-        web_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
-        if os.path.isdir(web_dir):
-            app.router.add_static("/static/", web_dir)
-
-        http_port = self.listen_port + 1
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, "0.0.0.0", http_port)
-        await site.start()
-        log.info(f"Map server: http://0.0.0.0:{http_port}")
-        return runner
 
     # ─── Status Printer ──────────────────────────────────────
 
@@ -367,26 +358,43 @@ class GatewayHub:
     # ─── Main ────────────────────────────────────────────────
 
     async def run(self):
-        """Start the hub server."""
-        log.info(f"TiggyOpenMesh Gateway Hub starting on ws://0.0.0.0:{self.listen_port}")
+        """Start the hub — single port serves WebSocket + HTTP + map."""
+        log.info(f"TiggyOpenMesh Gateway Hub starting on port {self.listen_port}")
+        log.info(f"  WebSocket: ws://0.0.0.0:{self.listen_port}/ws")
+        log.info(f"  Map:       http://0.0.0.0:{self.listen_port}/")
+        log.info(f"  API:       http://0.0.0.0:{self.listen_port}/api/gateways")
         if self.auth_key:
-            log.info(f"Authentication: ENABLED (key required)")
+            log.info(f"  Authentication: ENABLED (key required)")
         else:
-            log.info(f"Authentication: DISABLED (open relay)")
+            log.info(f"  Authentication: DISABLED (open relay)")
 
-        server = await serve(self.ws_handler, "0.0.0.0", self.listen_port)
+        app = web.Application()
+        # Explicit /ws path for gateways
+        app.router.add_get("/ws", self.ws_handler)
+        # HTTP endpoints for map API
+        app.router.add_get("/api/gateways", self.handle_api_gateways)
+        # Static files from gateway/web/
+        web_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+        if os.path.isdir(web_dir):
+            app.router.add_static("/static/", web_dir)
+        # Root: WebSocket upgrade → gateway; normal GET → map.html
+        # This allows old gateways connecting to ws://hub:9000/ to still work
+        app.router.add_get("/", self.handle_root)
 
-        # Start HTTP map server
-        http_runner = await self.start_http_server()
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", self.listen_port)
+        await site.start()
 
         status_task = asyncio.create_task(self.status_printer())
 
         try:
-            await server.wait_closed()
+            while self.running:
+                await asyncio.sleep(0.5)
         except asyncio.CancelledError:
             pass
         finally:
-            await http_runner.cleanup()
+            await runner.cleanup()
 
     def shutdown(self):
         """Graceful shutdown."""
@@ -410,6 +418,11 @@ Examples:
 
   # Use a custom port
   python gateway_hub.py --listen 8765 --key TopSecret!
+
+  # All on one port:
+  #   WebSocket: ws://host:9000/  or  ws://host:9000/ws
+  #   Map:       http://host:9000/
+  #   API:       http://host:9000/api/gateways
 """,
     )
     parser.add_argument("--listen", "-l", type=int, default=9000,
