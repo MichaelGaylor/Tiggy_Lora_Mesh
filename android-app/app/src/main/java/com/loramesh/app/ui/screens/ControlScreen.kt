@@ -382,7 +382,7 @@ private fun TimerCard(timer: TimerInfo) {
             modifier = Modifier.fillMaxWidth().padding(12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(Icons.Default.Timer, tint = MeshOrange, modifier = Modifier.size(24.dp))
+            Icon(Icons.Default.Timer, contentDescription = null, tint = MeshOrange, modifier = Modifier.size(24.dp))
             Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text("GPIO ${timer.pin}", style = MaterialTheme.typography.titleSmall)
@@ -518,8 +518,8 @@ private fun AutoPollCard(autoPoll: AutoPollConfig, nodes: List<MeshNode>, viewMo
     ) {
         Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.Autorenew, tint = if (autoPoll.enabled) MeshGreen else MeshGrey,
-                    modifier = Modifier.size(24.dp))
+                Icon(Icons.Default.Autorenew, contentDescription = null,
+                    tint = if (autoPoll.enabled) MeshGreen else MeshGrey, modifier = Modifier.size(24.dp))
                 Spacer(Modifier.width(8.dp))
                 Text("Auto-Poll", style = MaterialTheme.typography.titleMedium,
                     modifier = Modifier.weight(1f))
@@ -587,7 +587,7 @@ private fun SetpointCard(sp: SetpointInfo) {
             modifier = Modifier.fillMaxWidth().padding(12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(Icons.Default.TrendingUp, tint = MeshBlue, modifier = Modifier.size(24.dp))
+            Icon(Icons.Default.TrendingUp, contentDescription = null, tint = MeshBlue, modifier = Modifier.size(24.dp))
             Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
