@@ -69,6 +69,18 @@ SX1262 radio = new Module(RADIO_CS, RADIO_DIO1, RADIO_RST, RADIO_BUSY, loraSPI);
 SX1276 radio = new Module(RADIO_CS, RADIO_DIO0, RADIO_RST, -1, loraSPI);
 #endif
 
+// ─── Sensor read helper ─────────────────────────────────
+// ESP32-S3 has ADC on GPIOs 1-20; classic ESP32 has ADC1 on 32-39.
+// Sensor pins are user-configured, so always use analogRead for them
+// on S3 boards regardless of pin number.
+static inline int readSensorPin(int pin) {
+#ifdef CONFIG_IDF_TARGET_ESP32S3
+    return analogRead(pin);      // S3: ADC available on all sensor-capable GPIOs
+#else
+    return (pin >= 32) ? analogRead(pin) : digitalRead(pin);  // Classic ESP32
+#endif
+}
+
 // ─── GPIO State ──────────────────────────────────────────────
 uint8_t relayPins[MAX_RELAY_PINS_CFG];
 uint8_t relayCount = 0;
@@ -665,7 +677,7 @@ void executeAutoPoll() {
     String sdata = "SDATA," + String(mesh.localID);
     for (int i = 0; i < sensorCount; i++) {
         int pin = sensorPins[i];
-        int value = (pin >= 34) ? analogRead(pin) : digitalRead(pin);
+        int value = readSensorPin(pin);
         sdata += "," + String(pin) + ":" + String(value);
     }
 
@@ -708,7 +720,7 @@ void handleCmd(const String& from, const String& cmdBody) {
     else if (action == "GET") {
         int pin = rest.toInt();
         if (!isPinSafe(pin)) return;
-        int value = (pin >= 34) ? analogRead(pin) : digitalRead(pin);
+        int value = readSensorPin(pin);
         mesh.cmdsExecuted++;
         String mid = mesh.generateMsgID();
         String rsp = "CMD,RSP," + String(pin) + "," + String(value);
@@ -747,7 +759,7 @@ void handleCmd(const String& from, const String& cmdBody) {
         String sdata = "SDATA," + String(mesh.localID);
         for (int i = 0; i < sensorCount; i++) {
             int pin = sensorPins[i];
-            int value = (pin >= 34) ? analogRead(pin) : digitalRead(pin);
+            int value = readSensorPin(pin);
             sdata += "," + String(pin) + ":" + String(value);
         }
         mesh.cmdsExecuted++;
@@ -1035,7 +1047,7 @@ void processBleCommand(const String& line) {
         String sdata = "SDATA," + String(mesh.localID);
         for (int i = 0; i < sensorCount; i++) {
             int pin = sensorPins[i];
-            int value = (pin >= 34) ? analogRead(pin) : digitalRead(pin);
+            int value = readSensorPin(pin);
             sdata += "," + String(pin) + ":" + String(value);
         }
         bleSend(sdata);
