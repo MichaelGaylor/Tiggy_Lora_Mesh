@@ -29,12 +29,14 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import signal
 import sys
 import time
 
 import websockets
 from websockets.asyncio.server import serve
+from aiohttp import web
 
 logging.basicConfig(
     level=logging.INFO,
@@ -76,6 +78,10 @@ class ConnectedGateway:
         self.connected_at = time.time()
         self.packets_relayed = 0
         self.authenticated = False
+        self.lat = 0.0
+        self.lon = 0.0
+        self.antenna_type = 0
+        self.antenna_height = 2.0
 
 
 # ─── Hub Server ──────────────────────────────────────────────
@@ -91,6 +97,42 @@ class GatewayHub:
         # Stats
         self.total_packets_relayed = 0
         self.total_connections = 0
+
+        # Gateway registry (persisted to disk so offline gateways appear on map)
+        self.registry_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gateways.json")
+        self.registry: dict[str, dict] = {}  # id -> {name, lat, lon, ...}
+        self._load_registry()
+
+    def _load_registry(self):
+        """Load gateway registry from disk."""
+        try:
+            if os.path.exists(self.registry_path):
+                with open(self.registry_path, "r") as f:
+                    self.registry = json.load(f)
+                log.info(f"Loaded {len(self.registry)} gateways from registry")
+        except Exception as e:
+            log.warning(f"Failed to load registry: {e}")
+            self.registry = {}
+
+    def _save_registry(self):
+        """Save gateway registry to disk."""
+        try:
+            with open(self.registry_path, "w") as f:
+                json.dump(self.registry, f, indent=2)
+        except Exception as e:
+            log.warning(f"Failed to save registry: {e}")
+
+    def _update_registry(self, gw: ConnectedGateway):
+        """Update registry entry for a gateway."""
+        self.registry[gw.gateway_id] = {
+            "name": gw.name,
+            "lat": gw.lat,
+            "lon": gw.lon,
+            "antenna_type": gw.antenna_type,
+            "antenna_height": gw.antenna_height,
+            "last_seen": time.time(),
+        }
+        self._save_registry()
 
     async def ws_handler(self, websocket):
         """Handle an inbound WebSocket connection from a gateway."""
@@ -126,8 +168,12 @@ class GatewayHub:
 
         # ─── Authentication ──────────────────────────────────
         if msg_type == "auth":
-            gw.gateway_id = msg.get("gateway_id", "unknown")
+            gw.gateway_id = msg.get("id", msg.get("gateway_id", "unknown"))
             gw.name = msg.get("name", gw.gateway_id)
+            gw.lat = float(msg.get("lat", 0.0))
+            gw.lon = float(msg.get("lon", 0.0))
+            gw.antenna_type = int(msg.get("antenna", 0))
+            gw.antenna_height = float(msg.get("height", 2.0))
             key = msg.get("key", "")
 
             if self.auth_key and key != self.auth_key:
@@ -141,6 +187,7 @@ class GatewayHub:
                 return
 
             gw.authenticated = True
+            self._update_registry(gw)
             peer_count = sum(1 for g in self.gateways.values() if g.authenticated and g.ws is not source_ws)
             log.info(f"Gateway authenticated: {gw.name} (peers online: {peer_count})")
             await source_ws.send(json.dumps({
@@ -232,6 +279,78 @@ class GatewayHub:
             except websockets.ConnectionClosed:
                 pass
 
+    # ─── HTTP API (serves map + gateway data) ────────────────
+
+    def _get_gateways_json(self):
+        """Build JSON array of all gateways (live + registry)."""
+        # Start with registry (offline gateways)
+        result = {}
+        for gw_id, info in self.registry.items():
+            # Skip gateways with no location configured
+            if info.get("lat", 0) == 0 and info.get("lon", 0) == 0:
+                continue
+            result[gw_id] = {
+                "id": gw_id,
+                "name": info.get("name", gw_id),
+                "lat": info.get("lat", 0),
+                "lon": info.get("lon", 0),
+                "antenna_type": info.get("antenna_type", 0),
+                "antenna_height": info.get("antenna_height", 2.0),
+                "online": False,
+                "uptime": 0,
+                "packets": 0,
+            }
+
+        # Overlay live gateway data
+        for gw in self.gateways.values():
+            if not gw.authenticated:
+                continue
+            if gw.lat == 0 and gw.lon == 0:
+                continue
+            result[gw.gateway_id] = {
+                "id": gw.gateway_id,
+                "name": gw.name,
+                "lat": gw.lat,
+                "lon": gw.lon,
+                "antenna_type": gw.antenna_type,
+                "antenna_height": gw.antenna_height,
+                "online": True,
+                "uptime": int(time.time() - gw.connected_at),
+                "packets": gw.packets_relayed,
+            }
+
+        return list(result.values())
+
+    async def handle_api_gateways(self, request):
+        """GET /api/gateways — JSON array of gateway info."""
+        return web.json_response(self._get_gateways_json())
+
+    async def handle_map_page(self, request):
+        """GET / — serve map.html."""
+        web_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+        map_file = os.path.join(web_dir, "map.html")
+        if os.path.exists(map_file):
+            return web.FileResponse(map_file)
+        return web.Response(text="map.html not found — place it in gateway/web/", status=404)
+
+    async def start_http_server(self):
+        """Start aiohttp server on listen_port + 1."""
+        app = web.Application()
+        app.router.add_get("/", self.handle_map_page)
+        app.router.add_get("/api/gateways", self.handle_api_gateways)
+        # Serve static files from gateway/web/
+        web_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+        if os.path.isdir(web_dir):
+            app.router.add_static("/static/", web_dir)
+
+        http_port = self.listen_port + 1
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", http_port)
+        await site.start()
+        log.info(f"Map server: http://0.0.0.0:{http_port}")
+        return runner
+
     # ─── Status Printer ──────────────────────────────────────
 
     async def status_printer(self):
@@ -257,12 +376,17 @@ class GatewayHub:
 
         server = await serve(self.ws_handler, "0.0.0.0", self.listen_port)
 
+        # Start HTTP map server
+        http_runner = await self.start_http_server()
+
         status_task = asyncio.create_task(self.status_printer())
 
         try:
             await server.wait_closed()
         except asyncio.CancelledError:
             pass
+        finally:
+            await http_runner.cleanup()
 
     def shutdown(self):
         """Graceful shutdown."""

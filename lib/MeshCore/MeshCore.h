@@ -140,6 +140,11 @@ public:
     typedef void (*CfgGoFunc)(const String& cfgType, const String& value, const String& changeId);
     CfgGoFunc onCfgGo = nullptr;
 
+    // Called when a heartbeat is received from a node using our own ID
+    typedef void (*IdConflictFunc)(const String& conflictingId, int rssi);
+    IdConflictFunc onIdConflict = nullptr;
+    bool idConflictDetected = false;
+
     // Runtime spreading factor (may differ from compile-time LORA_SF after a CFG change)
     uint8_t currentSF = LORA_SF;
 
@@ -154,6 +159,11 @@ public:
     String encryptMsg(const String& msg, const String& iv_seed);
     String decryptMsg(const String& hexstr, const String& iv_seed);
     String generateMsgID();
+
+    // ─── CFG Auth ─────────────────────────────────────────────
+    // 4-hex-char tag = CRC16(changeId + AES key) — proves same key group
+    String cfgAuthTag(const String& changeId);
+    bool   cfgAuthValid(const String& changeId, const String& tag);
 
     // ─── Validation ──────────────────────────────────────────
     bool isValidNodeID(const String& s);

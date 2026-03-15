@@ -104,6 +104,22 @@ String MeshCore::generateMsgID() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// CFG Auth — key-group verification for config change packets
+// ═══════════════════════════════════════════════════════════════
+
+String MeshCore::cfgAuthTag(const String& changeId) {
+    // CRC16 over changeId + AES key → 4 hex chars
+    String material = changeId + String(aes_key_string);
+    uint16_t tag = crc16((const uint8_t*)material.c_str(), material.length());
+    byte tagBytes[2] = { (byte)(tag >> 8), (byte)(tag & 0xFF) };
+    return toHex(tagBytes, 2);
+}
+
+bool MeshCore::cfgAuthValid(const String& changeId, const String& tag) {
+    return tag == cfgAuthTag(changeId);
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Validation
 // ═══════════════════════════════════════════════════════════════
 
@@ -376,16 +392,22 @@ void MeshCore::processPacket(const MeshPacket& pkt) {
     }
 
     // ─── CFG packets (two-phase config change protocol) ──────
+    // Auth tag appended: only nodes with matching AES key will accept
     if (pkt.payload.startsWith("CFG,")) {
-        // Format: CFG,<type>,<value>,<changeId>,<initiatorID>
+        // Format: CFG,<type>,<value>,<changeId>,<initiatorID>,<authTag>
         int c1 = pkt.payload.indexOf(',', 4);
         int c2 = (c1 > 0) ? pkt.payload.indexOf(',', c1 + 1) : -1;
         int c3 = (c2 > 0) ? pkt.payload.indexOf(',', c2 + 1) : -1;
-        if (c1 > 0 && c2 > 0 && c3 > 0) {
+        int c4 = (c3 > 0) ? pkt.payload.indexOf(',', c3 + 1) : -1;
+        if (c1 > 0 && c2 > 0 && c3 > 0 && c4 > 0) {
             String cfgType  = pkt.payload.substring(4, c1);
             String value    = pkt.payload.substring(c1 + 1, c2);
             String changeId = pkt.payload.substring(c2 + 1, c3);
-            String from     = pkt.payload.substring(c3 + 1);
+            String from     = pkt.payload.substring(c3 + 1, c4);
+            String authTag  = pkt.payload.substring(c4 + 1);
+
+            // Verify auth — reject if wrong key group
+            if (!cfgAuthValid(changeId, authTag)) return;
 
             if (!isDuplicate(changeId)) {
                 markSeen(changeId);
@@ -428,13 +450,18 @@ void MeshCore::processPacket(const MeshPacket& pkt) {
     }
 
     if (pkt.payload.startsWith("CFGGO,")) {
-        // Format: CFGGO,<type>,<value>,<changeId>
+        // Format: CFGGO,<type>,<value>,<changeId>,<authTag>
         int c1 = pkt.payload.indexOf(',', 6);
         int c2 = (c1 > 0) ? pkt.payload.indexOf(',', c1 + 1) : -1;
-        if (c1 > 0 && c2 > 0) {
+        int c3 = (c2 > 0) ? pkt.payload.indexOf(',', c2 + 1) : -1;
+        if (c1 > 0 && c2 > 0 && c3 > 0) {
             String cfgType  = pkt.payload.substring(6, c1);
             String value    = pkt.payload.substring(c1 + 1, c2);
-            String changeId = pkt.payload.substring(c2 + 1);
+            String changeId = pkt.payload.substring(c2 + 1, c3);
+            String authTag  = pkt.payload.substring(c3 + 1);
+
+            // Verify auth — reject if wrong key group
+            if (!cfgAuthValid(changeId, authTag)) return;
 
             String dedupKey = "GO" + changeId;
             if (!isDuplicate(dedupKey)) {
@@ -456,6 +483,12 @@ void MeshCore::processPacket(const MeshPacket& pkt) {
         String hbFrom = pkt.payload.substring(3);
         hbFrom.trim();
         if (isValidNodeID(hbFrom)) {
+            // Collision: another node is using our ID
+            if (hbFrom == String(localID)) {
+                idConflictDetected = true;
+                if (onIdConflict) onIdConflict(hbFrom, lastRSSI);
+                return;  // Don't add ourselves as a peer
+            }
             addNode(hbFrom);
             updateRouting(hbFrom, hbFrom, lastRSSI);
         }

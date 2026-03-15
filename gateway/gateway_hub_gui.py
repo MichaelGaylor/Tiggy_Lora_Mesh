@@ -11,6 +11,7 @@ Double-click to run or:  python gateway_hub_gui.py
 import asyncio
 import json
 import math
+import os
 import queue
 import random
 import threading
@@ -19,6 +20,7 @@ import time
 import customtkinter as ctk
 import websockets
 from websockets.asyncio.server import serve
+from aiohttp import web
 
 from gui_common import COLORS, HexPacketParser, format_uptime
 
@@ -52,6 +54,10 @@ class ConnectedGateway:
         self.connected_at = time.time()
         self.packets_relayed = 0
         self.authenticated = False
+        self.lat = 0.0
+        self.lon = 0.0
+        self.antenna_type = 0
+        self.antenna_height = 2.0
 
 
 class GUIGatewayHub:
@@ -66,6 +72,88 @@ class GUIGatewayHub:
         self.running = True
         self.total_packets_relayed = 0
         self.total_connections = 0
+
+        # Gateway registry (persisted)
+        self.registry_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gateways.json")
+        self.registry: dict[str, dict] = {}
+        self._load_registry()
+
+    def _load_registry(self):
+        try:
+            if os.path.exists(self.registry_path):
+                with open(self.registry_path, "r") as f:
+                    self.registry = json.load(f)
+        except Exception:
+            self.registry = {}
+
+    def _save_registry(self):
+        try:
+            with open(self.registry_path, "w") as f:
+                json.dump(self.registry, f, indent=2)
+        except Exception:
+            pass
+
+    def _update_registry(self, gw: ConnectedGateway):
+        self.registry[gw.gateway_id] = {
+            "name": gw.name,
+            "lat": gw.lat,
+            "lon": gw.lon,
+            "antenna_type": gw.antenna_type,
+            "antenna_height": gw.antenna_height,
+            "last_seen": time.time(),
+        }
+        self._save_registry()
+
+    def _get_gateways_json(self):
+        result = {}
+        for gw_id, info in self.registry.items():
+            if info.get("lat", 0) == 0 and info.get("lon", 0) == 0:
+                continue
+            result[gw_id] = {
+                "id": gw_id, "name": info.get("name", gw_id),
+                "lat": info.get("lat", 0), "lon": info.get("lon", 0),
+                "antenna_type": info.get("antenna_type", 0),
+                "antenna_height": info.get("antenna_height", 2.0),
+                "online": False, "uptime": 0, "packets": 0,
+            }
+        for gw in self.gateways.values():
+            if not gw.authenticated or (gw.lat == 0 and gw.lon == 0):
+                continue
+            result[gw.gateway_id] = {
+                "id": gw.gateway_id, "name": gw.name,
+                "lat": gw.lat, "lon": gw.lon,
+                "antenna_type": gw.antenna_type,
+                "antenna_height": gw.antenna_height,
+                "online": True,
+                "uptime": int(time.time() - gw.connected_at),
+                "packets": gw.packets_relayed,
+            }
+        return list(result.values())
+
+    async def handle_api_gateways(self, request):
+        return web.json_response(self._get_gateways_json())
+
+    async def handle_map_page(self, request):
+        web_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+        map_file = os.path.join(web_dir, "map.html")
+        if os.path.exists(map_file):
+            return web.FileResponse(map_file)
+        return web.Response(text="map.html not found", status=404)
+
+    async def start_http_server(self):
+        app = web.Application()
+        app.router.add_get("/", self.handle_map_page)
+        app.router.add_get("/api/gateways", self.handle_api_gateways)
+        web_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+        if os.path.isdir(web_dir):
+            app.router.add_static("/static/", web_dir)
+        http_port = self.listen_port + 1
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", http_port)
+        await site.start()
+        self._emit("hub_started_http", port=http_port)
+        return runner
 
     def _emit(self, event_type: str, **kwargs):
         self.eq.put({"type": event_type, "time": time.time(), **kwargs})
@@ -103,14 +191,19 @@ class GUIGatewayHub:
         msg_type = msg.get("type", "")
 
         if msg_type == "auth":
-            gw.gateway_id = msg.get("gateway_id", "?")
+            gw.gateway_id = msg.get("id", msg.get("gateway_id", "?"))
             gw.name = msg.get("name", gw.gateway_id)
+            gw.lat = float(msg.get("lat", 0.0))
+            gw.lon = float(msg.get("lon", 0.0))
+            gw.antenna_type = int(msg.get("antenna", 0))
+            gw.antenna_height = float(msg.get("height", 2.0))
             key = msg.get("key", "")
             if self.auth_key and key != self.auth_key:
                 await source_ws.send(json.dumps({"type": "auth_result", "success": False, "error": "Invalid key"}))
                 await source_ws.close()
                 return
             gw.authenticated = True
+            self._update_registry(gw)
             peer_count = sum(1 for g in self.gateways.values() if g.authenticated and g.ws is not source_ws)
             await source_ws.send(json.dumps({"type": "auth_result", "success": True, "peers": peer_count}))
             await self.broadcast_event({"type": "peer_joined", "gateway_id": gw.gateway_id, "name": gw.name, "peers": peer_count + 1}, exclude=source_ws)
@@ -181,6 +274,7 @@ class GUIGatewayHub:
 
     async def run(self):
         server = await serve(self.ws_handler, "0.0.0.0", self.listen_port)
+        http_runner = await self.start_http_server()
         self._emit("hub_started", port=self.listen_port)
         try:
             while self.running:
@@ -189,6 +283,7 @@ class GUIGatewayHub:
             pass
         finally:
             server.close()
+            await http_runner.cleanup()
 
     def shutdown(self):
         self.running = False

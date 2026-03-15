@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TiggyOpenMesh - Gateway Map</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0a0e14; color: #c5cdd9; }
+  #map { width: 100vw; height: 100vh; }
+  .header-bar {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
+    background: rgba(10, 14, 20, 0.9); backdrop-filter: blur(10px);
+    padding: 8px 16px; display: flex; align-items: center; gap: 16px;
+    border-bottom: 1px solid #1a2030;
+  }
+  .header-bar h1 { font-size: 14px; color: #00d4ff; font-weight: 600; }
+  .header-bar .stat { font-size: 12px; color: #8899aa; }
+  .header-bar .stat b { color: #00d4ff; }
+  .legend {
+    position: fixed; bottom: 20px; left: 20px; z-index: 1000;
+    background: rgba(10, 14, 20, 0.9); backdrop-filter: blur(10px);
+    border: 1px solid #1a2030; border-radius: 8px; padding: 12px;
+    font-size: 11px;
+  }
+  .legend-item { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+  .legend-dot { width: 12px; height: 12px; border-radius: 50%; }
+  .popup-content { font-family: 'Segoe UI', sans-serif; font-size: 13px; }
+  .popup-content .name { font-weight: 600; font-size: 14px; color: #333; }
+  .popup-content .detail { color: #666; margin: 2px 0; }
+  .popup-content .online { color: #00b300; font-weight: 600; }
+  .popup-content .offline { color: #cc0000; font-weight: 600; }
+
+  /* Pulsing animation for online markers */
+  @keyframes pulse {
+    0% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(1.3); opacity: 0.7; }
+    100% { transform: scale(1); opacity: 1; }
+  }
+  .marker-online { animation: pulse 2s infinite; }
+</style>
+</head>
+<body>
+
+<div class="header-bar">
+  <h1>TiggyOpenMesh Gateway Map</h1>
+  <span class="stat">Gateways: <b id="gw-total">0</b></span>
+  <span class="stat">Online: <b id="gw-online" style="color:#00cc00">0</b></span>
+  <span class="stat">Offline: <b id="gw-offline" style="color:#cc4444">0</b></span>
+  <span class="stat" style="margin-left:auto">Auto-refresh 10s</span>
+</div>
+
+<div id="map"></div>
+
+<div class="legend">
+  <div class="legend-item"><div class="legend-dot" style="background:#00cc00;box-shadow:0 0 6px #00cc00"></div> Online Gateway</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#cc4444"></div> Offline Gateway</div>
+  <div class="legend-item"><div class="legend-dot" style="background:rgba(0,180,255,0.15);border:1px solid rgba(0,180,255,0.4)"></div> Coverage Ring</div>
+</div>
+
+<script>
+// Initialize map (dark tiles)
+const map = L.map('map', { zoomControl: true }).setView([51.5, -3.0], 8);
+
+// Try online tiles first, fallback to blank
+L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+  attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
+  maxZoom: 19,
+  subdomains: 'abcd'
+}).addTo(map);
+
+// Antenna type names and base coverage radius (meters) at ground level
+const ANTENNA_TYPES = ['Indoor', 'External', 'Rooftop'];
+const BASE_RADIUS = [800, 2000, 4000];  // meters per antenna type
+
+function coverageRadius(antennaType, height) {
+  // Approximate coverage: base radius * sqrt(height)
+  const base = BASE_RADIUS[antennaType] || 800;
+  return base * Math.sqrt(Math.max(height, 1));
+}
+
+// Create custom icon for gateways
+function createIcon(online) {
+  const color = online ? '#00cc00' : '#cc4444';
+  const glow = online ? 'drop-shadow(0 0 6px #00cc00)' : '';
+  const cls = online ? 'marker-online' : '';
+  return L.divIcon({
+    className: '',
+    html: `<div class="${cls}" style="
+      width: 20px; height: 20px; border-radius: 50%;
+      background: ${color}; border: 2px solid #fff;
+      filter: ${glow};
+    "></div>`,
+    iconSize: [20, 20],
+    iconAnchor: [10, 10],
+    popupAnchor: [0, -14],
+  });
+}
+
+// State
+let markers = {};
+let circles = {};
+
+function formatUptime(seconds) {
+  if (seconds < 60) return seconds + 's';
+  if (seconds < 3600) return Math.floor(seconds / 60) + 'm';
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  return h + 'h ' + m + 'm';
+}
+
+function updateMap(gateways) {
+  const seen = new Set();
+
+  let total = 0, online = 0, offline = 0;
+
+  gateways.forEach(gw => {
+    const id = gw.id;
+    seen.add(id);
+    total++;
+    if (gw.online) online++; else offline++;
+
+    const antName = ANTENNA_TYPES[gw.antenna_type] || 'Unknown';
+    const radius = coverageRadius(gw.antenna_type, gw.antenna_height);
+
+    const popupHtml = `
+      <div class="popup-content">
+        <div class="name">${gw.name}</div>
+        <div class="detail ${gw.online ? 'online' : 'offline'}">${gw.online ? 'ONLINE' : 'OFFLINE'}</div>
+        <div class="detail">Antenna: ${antName} (${gw.antenna_height}m)</div>
+        <div class="detail">Coverage: ~${(radius/1000).toFixed(1)}km</div>
+        ${gw.online ? `<div class="detail">Uptime: ${formatUptime(gw.uptime)}</div>` : ''}
+        ${gw.online ? `<div class="detail">Packets: ${gw.packets}</div>` : ''}
+        <div class="detail" style="font-size:11px;color:#999">ID: ${gw.id}</div>
+      </div>
+    `;
+
+    if (markers[id]) {
+      // Update existing
+      markers[id].setLatLng([gw.lat, gw.lon]);
+      markers[id].setIcon(createIcon(gw.online));
+      markers[id].setPopupContent(popupHtml);
+      circles[id].setLatLng([gw.lat, gw.lon]);
+      circles[id].setRadius(radius);
+      circles[id].setStyle({
+        color: gw.online ? 'rgba(0,180,255,0.5)' : 'rgba(200,100,100,0.3)',
+        fillColor: gw.online ? 'rgba(0,180,255,0.08)' : 'rgba(200,100,100,0.05)',
+      });
+    } else {
+      // Create new
+      circles[id] = L.circle([gw.lat, gw.lon], {
+        radius: radius,
+        color: gw.online ? 'rgba(0,180,255,0.5)' : 'rgba(200,100,100,0.3)',
+        fillColor: gw.online ? 'rgba(0,180,255,0.08)' : 'rgba(200,100,100,0.05)',
+        fillOpacity: 1,
+        weight: 1,
+      }).addTo(map);
+
+      markers[id] = L.marker([gw.lat, gw.lon], { icon: createIcon(gw.online) })
+        .bindPopup(popupHtml)
+        .addTo(map);
+    }
+  });
+
+  // Remove stale markers
+  Object.keys(markers).forEach(id => {
+    if (!seen.has(id)) {
+      map.removeLayer(markers[id]);
+      map.removeLayer(circles[id]);
+      delete markers[id];
+      delete circles[id];
+    }
+  });
+
+  // Update header stats
+  document.getElementById('gw-total').textContent = total;
+  document.getElementById('gw-online').textContent = online;
+  document.getElementById('gw-offline').textContent = offline;
+}
+
+// Auto-fit map to show all gateways on first load
+let firstLoad = true;
+
+async function fetchGateways() {
+  try {
+    const resp = await fetch('/api/gateways');
+    const data = await resp.json();
+    updateMap(data);
+
+    if (firstLoad && data.length > 0) {
+      firstLoad = false;
+      const bounds = L.latLngBounds(data.map(g => [g.lat, g.lon]));
+      map.fitBounds(bounds, { padding: [60, 60], maxZoom: 13 });
+    }
+  } catch (e) {
+    console.warn('Failed to fetch gateways:', e);
+  }
+}
+
+// Initial fetch + 10s refresh
+fetchGateways();
+setInterval(fetchGateways, 10000);
+</script>
+</body>
+</html>

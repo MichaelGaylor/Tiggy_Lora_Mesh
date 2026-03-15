@@ -117,6 +117,7 @@ struct GwConfig {
     float gw_lat;
     float gw_lon;
     uint8_t antenna_type; // 0=indoor 1=external 2=rooftop
+    float gw_height;      // antenna height in meters
 };
 
 static GwConfig cfg;
@@ -133,6 +134,7 @@ void loadConfig() {
     cfg.gw_lat      = prefs.getFloat("gw_lat",      0.0f);
     cfg.gw_lon      = prefs.getFloat("gw_lon",      0.0f);
     cfg.antenna_type = prefs.getUChar("antenna",    0);
+    cfg.gw_height    = prefs.getFloat("gw_height",  2.0f);
     prefs.end();
 
     // Defaults
@@ -151,6 +153,7 @@ void saveConfig() {
     prefs.putFloat("gw_lat",     cfg.gw_lat);
     prefs.putFloat("gw_lon",     cfg.gw_lon);
     prefs.putUChar("antenna",    cfg.antenna_type);
+    prefs.putFloat("gw_height",  cfg.gw_height);
     prefs.end();
     dbg("Config saved to NVS");
 }
@@ -280,11 +283,13 @@ void onWsEvent(WStype_t type, uint8_t* payload, size_t length) {
         case WStype_CONNECTED: {
             wsConnected = true;
             dbg("WS: connected");
-            // Auth message
-            char authBuf[256];
+            // Auth message (includes location for hub map)
+            char authBuf[384];
             snprintf(authBuf, sizeof(authBuf),
-                "{\"type\":\"auth\",\"key\":\"%s\",\"id\":\"%s\",\"name\":\"%s\"}",
-                cfg.hub_key, WiFi.macAddress().c_str(), cfg.gw_name);
+                "{\"type\":\"auth\",\"key\":\"%s\",\"id\":\"%s\",\"name\":\"%s\","
+                "\"lat\":%.6f,\"lon\":%.6f,\"antenna\":%d,\"height\":%.1f}",
+                cfg.hub_key, WiFi.macAddress().c_str(), cfg.gw_name,
+                cfg.gw_lat, cfg.gw_lon, cfg.antenna_type, cfg.gw_height);
             ws.sendTXT(authBuf);
             break;
         }
@@ -531,6 +536,7 @@ void processBleCommand(const String& line) {
         s += ",ANT:"  + String(antNames[cfg.antenna_type]);
         s += ",LAT:"  + String(cfg.gw_lat, 5);
         s += ",LON:"  + String(cfg.gw_lon, 5);
+        s += ",HEIGHT:" + String(cfg.gw_height, 1);
         s += ",RX:"   + String(rxCount);
         s += ",TX:"   + String(txCount);
         s += ",HEAP:" + String(ESP.getFreeHeap());
@@ -587,6 +593,10 @@ void processBleCommand(const String& line) {
         cfg.antenna_type = ant;
         const char* antNames[] = { "indoor", "external", "rooftop" };
         bleSend("OK,GWANTENNA," + String(antNames[ant]));
+    }
+    else if (line.startsWith("GWHEIGHT,")) {
+        cfg.gw_height = constrain(line.substring(9).toFloat(), 0.0f, 500.0f);
+        bleSend("OK,GWHEIGHT," + String(cfg.gw_height, 1));
     }
     else if (line == "SAVE") {
         saveConfig();
@@ -839,6 +849,7 @@ void loop() {
         } else if (line.startsWith("WIFI,")     || line.startsWith("HUBURL,") ||
                    line.startsWith("HUBKEY,")   || line.startsWith("GWNAME,") ||
                    line.startsWith("GWLOC,")    || line.startsWith("GWANTENNA,") ||
+                   line.startsWith("GWHEIGHT,") ||
                    line == "SAVE"               || line == "GWSTATUS") {
             // Serial is trusted (physical access) — bypass BLE auth
             bleAuthenticated = true;
