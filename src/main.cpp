@@ -150,6 +150,20 @@ int menuScroll = 0;
 int chatScroll = 0;
 uint8_t brightness = 255;
 
+// Display sleep
+unsigned long lastInputTime = 0;
+uint8_t displaySleepTimeout = 60;  // seconds, 0=disabled
+bool displayAsleep = false;
+#define EEPROM_SLEEP_ADDR 432
+
+void wakeDisplay() {
+    if (displayAsleep) {
+        analogWrite(BOARD_TFT_BL, brightness);
+        displayAsleep = false;
+    }
+    lastInputTime = millis();
+}
+
 // Text input
 String inputBuffer;
 String inputPrompt;
@@ -166,6 +180,9 @@ volatile int tbDeltaLeft = 0, tbDeltaRight = 0;
 
 // First boot wizard
 int wizardStep = 0;
+bool wizardScanActive = false;
+bool wizardScanDone = false;
+unsigned long wizardScanEnd = 0;
 
 // Menu definitions
 const char* mainMenu[] = {
@@ -187,6 +204,7 @@ const char* settingsMenu[] = {
   "Set Target ID",
   "Edit AES Key",
   "Brightness",
+  "Display Timeout",
   "Clear Nodes",
   "Back"
 };
@@ -570,6 +588,11 @@ void handleNodeDiscovered(const String& id, int rssi) {
   updateMeshMap(id, String(mesh.localID), rssi);
 }
 
+// Called by MeshCore when a heartbeat with our own ID is detected
+void handleIdConflict(const String& id, int rssi) {
+  showNotification("ID CONFLICT! " + id + " in use!", 10000);
+}
+
 // ═══════════════════════════════════════════════════════════════
 // SECTION: Receive
 // ═══════════════════════════════════════════════════════════════
@@ -878,7 +901,11 @@ char readKeyboard() {
   Wire.requestFrom((uint8_t)KB_I2C_ADDR, (uint8_t)1);
   if (Wire.available()) {
     char c = Wire.read();
-    if (c != 0) return c;
+    if (c != 0) {
+      if (displayAsleep) { wakeDisplay(); return 0; }  // first press wakes only
+      wakeDisplay();
+      return c;
+    }
   }
   return 0;
 }
@@ -902,27 +929,30 @@ void setupTrackball() {
 
 char readTrackball() {
   const int threshold = 2;
+  char result = 0;
   if (tbDeltaUp >= threshold) {
     tbDeltaUp = tbDeltaDown = tbDeltaLeft = tbDeltaRight = 0;
-    return 'U';
-  }
-  if (tbDeltaDown >= threshold) {
+    result = 'U';
+  } else if (tbDeltaDown >= threshold) {
     tbDeltaUp = tbDeltaDown = tbDeltaLeft = tbDeltaRight = 0;
-    return 'D';
-  }
-  if (tbDeltaLeft >= threshold) {
+    result = 'D';
+  } else if (tbDeltaLeft >= threshold) {
     tbDeltaUp = tbDeltaDown = tbDeltaLeft = tbDeltaRight = 0;
-    return 'L';
-  }
-  if (tbDeltaRight >= threshold) {
+    result = 'L';
+  } else if (tbDeltaRight >= threshold) {
     tbDeltaUp = tbDeltaDown = tbDeltaLeft = tbDeltaRight = 0;
-    return 'R';
+    result = 'R';
+  } else {
+    static bool lastClick = false;
+    bool click = (digitalRead(BOARD_TBALL_CLICK) == LOW);
+    if (click && !lastClick) { lastClick = true; result = 'C'; }
+    lastClick = click;
   }
-  static bool lastClick = false;
-  bool click = (digitalRead(BOARD_TBALL_CLICK) == LOW);
-  if (click && !lastClick) { lastClick = true; return 'C'; }
-  lastClick = click;
-  return 0;
+  if (result) {
+    if (displayAsleep) { wakeDisplay(); return 0; }  // first input wakes only
+    wakeDisplay();
+  }
+  return result;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1233,14 +1263,27 @@ void handleMenu() {
           analogWrite(BOARD_TFT_BL, brightness);
           showNotification("Brightness: " + String(brightness * 100 / 255) + "%");
           break;
-        case 4:
+        case 4: {
+          // Cycle: 0 (off) → 30 → 60 → 120 → 300 → 0
+          if (displaySleepTimeout == 0) displaySleepTimeout = 30;
+          else if (displaySleepTimeout <= 30) displaySleepTimeout = 60;
+          else if (displaySleepTimeout <= 60) displaySleepTimeout = 120;
+          else if (displaySleepTimeout <= 120) displaySleepTimeout = 255; // ~5 min
+          else displaySleepTimeout = 0;
+          EEPROM.write(EEPROM_SLEEP_ADDR, displaySleepTimeout);
+          EEPROM.commit();
+          String label = (displaySleepTimeout == 0) ? "Off" : String(displaySleepTimeout) + "s";
+          showNotification("Display Timeout: " + label);
+          break;
+        }
+        case 5:
           mesh.knownCount = 0;
           memset(mesh.knownNodes, 0, sizeof(mesh.knownNodes));
           saveIDsToEEPROM();
           showNotification("All nodes cleared");
           needRedraw = true;
           break;
-        case 5: menuState = M_MAIN; menuIndex = 0; needRedraw = true; break;
+        case 6: menuState = M_MAIN; menuIndex = 0; needRedraw = true; break;
       }
     }
   }
@@ -1616,17 +1659,39 @@ void drawWizardStep() {
       display.print("Welcome!");
       display.setFont(&FreeSans9pt7b);
       display.setTextColor(COL_TEXT, COL_BG);
-      display.setCursor(20, 85);
-      display.print("TiggyOpenMesh");
-      display.setCursor(20, 110);
-      display.print("T-Deck Plus Edition");
+      display.setCursor(20, 80);
+      display.print("Suggested ID: ");
+      display.setTextColor(COL_ACCENT, COL_BG);
+      display.print(inputBuffer);
+
       display.setTextColor(COL_DIM, COL_BG);
-      display.setCursor(20, 145);
-      display.print("Let's set up your device.");
-      display.setCursor(20, 170);
-      display.print("Type your 4-character");
-      display.setCursor(20, 192);
-      display.print("Node ID (e.g. 0001):");
+      if (wizardScanActive) {
+        int remaining = max(0, (int)(wizardScanEnd - millis()) / 1000);
+        display.setCursor(20, 105);
+        display.print("Scanning for conflicts... ");
+        display.print(remaining);
+        display.print("s");
+        // Progress bar
+        int barW = SCREEN_W - 40;
+        int elapsed = 10000 - (wizardScanEnd - millis());
+        int fillW = constrain(elapsed * barW / 10000, 0, barW);
+        display.drawRect(20, 115, barW, 8, COL_FAINT);
+        display.fillRect(20, 115, fillW, 8, COL_ACCENT);
+      } else if (wizardScanDone) {
+        display.setTextColor(COL_GOOD, COL_BG);
+        display.setCursor(20, 105);
+        display.print("No conflicts found!");
+        display.setTextColor(COL_DIM, COL_BG);
+        display.setCursor(20, 130);
+        display.print("Press Enter to accept or");
+        display.setCursor(20, 150);
+        display.print("type a new ID:");
+      } else {
+        display.setCursor(20, 105);
+        display.print("Type your 4-character");
+        display.setCursor(20, 125);
+        display.print("Node ID (e.g. 0001):");
+      }
 
       display.setFont(&FreeSans12pt7b);
       display.setTextColor(COL_ACCENT, COL_BG);
@@ -1682,12 +1747,49 @@ void drawWizardStep() {
 }
 
 void handleFirstBoot() {
+  // Process scan during wizard step 0
+  if (wizardStep == 0 && wizardScanActive) {
+    // Temporarily set localID to scan for conflicts against suggested ID
+    char savedID[NODE_ID_LEN + 1];
+    strncpy(savedID, mesh.localID, NODE_ID_LEN + 1);
+    strncpy(mesh.localID, inputBuffer.c_str(), NODE_ID_LEN);
+    mesh.localID[NODE_ID_LEN] = '\0';
+
+    if (mesh.idConflictDetected) {
+      // Conflict found — regenerate random ID and restart scan
+      uint16_t randId = random(1, 0xFFFE);
+      char idBuf[5];
+      snprintf(idBuf, sizeof(idBuf), "%04X", randId);
+      inputBuffer = String(idBuf);
+      strncpy(mesh.localID, idBuf, NODE_ID_LEN + 1);
+      mesh.idConflictDetected = false;
+      wizardScanEnd = millis() + 10000;
+      showNotification("ID conflict! Trying " + inputBuffer);
+    } else if (millis() >= wizardScanEnd) {
+      // Scan complete — no conflicts
+      wizardScanActive = false;
+      wizardScanDone = true;
+    }
+
+    // Restore localID (will be set properly when user confirms)
+    strncpy(mesh.localID, savedID, NODE_ID_LEN + 1);
+
+    // Refresh display periodically during scan
+    static unsigned long lastWizardRefresh = 0;
+    if (millis() - lastWizardRefresh > 500) {
+      lastWizardRefresh = millis();
+      drawWizardStep();
+    }
+  }
+
   char kb = readKeyboard();
   if (kb == 0) return;
 
   switch (wizardStep) {
     case 0:
       if ((kb == '\r' || kb == '\n') && (int)inputBuffer.length() == NODE_ID_LEN) {
+        // If scan still active, wait for it to finish
+        if (wizardScanActive) return;
         strncpy(mesh.localID, inputBuffer.c_str(), NODE_ID_LEN);
         mesh.localID[NODE_ID_LEN] = '\0';
         saveIDsToEEPROM();
@@ -1696,9 +1798,15 @@ void handleFirstBoot() {
         drawWizardStep();
       } else if (kb == 0x08 && inputBuffer.length() > 0) {
         inputBuffer.remove(inputBuffer.length() - 1);
+        // User is typing — stop auto-scan, they're choosing their own ID
+        wizardScanActive = false;
+        wizardScanDone = false;
         drawWizardStep();
       } else if ((int)inputBuffer.length() < NODE_ID_LEN && kb >= 0x20) {
         inputBuffer += (char)toupper(kb);
+        // User is typing — stop auto-scan
+        wizardScanActive = false;
+        wizardScanDone = false;
         drawWizardStep();
       }
       break;
@@ -1960,6 +2068,8 @@ void loadIDsFromEEPROM() {
   if (!mesh.isValidNodeID(String(mesh.localID))) strncpy(mesh.localID, "0001", NODE_ID_LEN + 1);
   if (strlen(targetID) != NODE_ID_LEN) strncpy(targetID, "FFFF", NODE_ID_LEN + 1);
   if (mesh.knownCount > MAX_NODES) { mesh.knownCount = 0; memset(mesh.knownNodes, 0, sizeof(mesh.knownNodes)); }
+  uint8_t storedSleep = EEPROM.read(EEPROM_SLEEP_ADDR);
+  displaySleepTimeout = (storedSleep == 0xFF) ? 60 : storedSleep;  // 0xFF = unset, default 60s
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -2066,11 +2176,13 @@ void setup() {
   mesh.onCmd = handleCmd;
   mesh.onAck = handleAck;
   mesh.onNodeDiscovered = handleNodeDiscovered;
+  mesh.onIdConflict = handleIdConflict;
 
   analogReadResolution(12);
   pinMode(BOARD_BAT_ADC, INPUT);
 
   nextHeartbeatTime = millis() + random(1000, 5000);
+  lastInputTime = millis();
 
   debugPrint("Heap: " + String(ESP.getFreeHeap()));
 
@@ -2078,7 +2190,16 @@ void setup() {
   if (EEPROM.read(EEPROM_MAGIC_ADDR) != EEPROM_MAGIC_VAL) {
     currentMode = FIRST_BOOT;
     wizardStep = 0;
-    inputBuffer = "";
+    // Generate random suggested ID
+    uint16_t randId = random(1, 0xFFFE);
+    char idBuf[5];
+    snprintf(idBuf, sizeof(idBuf), "%04X", randId);
+    inputBuffer = String(idBuf);
+    // Start conflict scan
+    wizardScanActive = true;
+    wizardScanDone = false;
+    mesh.idConflictDetected = false;
+    wizardScanEnd = millis() + 10000;
     drawWizardStep();
   } else {
     delay(400);
@@ -2133,6 +2254,20 @@ void loop() {
   for (int i = 0; i < MAX_CHUNKS; i++) {
     if (chunkBuffers[i].active && millis() - chunkBuffers[i].lastUpdate > 30000)
       chunkBuffers[i].active = false;
+  }
+
+  // SOS keeps display on
+  if (currentMode == SOS_MODE) lastInputTime = millis();
+
+  // Display auto-sleep
+  if (displaySleepTimeout > 0 && !displayAsleep) {
+      unsigned long idle = millis() - lastInputTime;
+      if (idle > (unsigned long)displaySleepTimeout * 1000UL) {
+          analogWrite(BOARD_TFT_BL, 0);
+          displayAsleep = true;
+      } else if (idle > (unsigned long)displaySleepTimeout * 500UL) {
+          analogWrite(BOARD_TFT_BL, brightness / 4);
+      }
   }
 
   // Notification overlay

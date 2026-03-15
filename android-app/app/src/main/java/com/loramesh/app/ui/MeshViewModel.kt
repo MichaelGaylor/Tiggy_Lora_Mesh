@@ -245,6 +245,19 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
 
+            // ─── ID Conflict alert ────────────────────────────
+            // Firmware detected another node with same ID: CONFLICT,<id>,<rssi>
+            line.startsWith("CONFLICT,") -> {
+                val parts = line.split(",")
+                if (parts.size >= 2) {
+                    _messages.value = _messages.value + ChatMessage(
+                        from = "SYSTEM",
+                        text = "WARNING: ID collision! Node ${parts[1]} is used by another device.",
+                        rssi = parts.getOrElse(2) { "0" }.toIntOrNull() ?: 0
+                    )
+                }
+            }
+
             // ─── Spreading Factor change protocol ─────────────
             // SF change initiated: CFGSTART,SF,<value>,<changeId>
             line.startsWith("CFGSTART,") -> {
@@ -347,9 +360,14 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
                 "BOARD" -> cfg.boardName = kv[1]
                 "FREQ" -> cfg.frequency = kv[1].toFloatOrNull() ?: 868.0f
                 "SF" -> cfg.spreadingFactor = kv[1].toIntOrNull() ?: 9
+                "POWER" -> cfg.powerMode = kv[1]
             }
         }
         _config.value = cfg
+    }
+
+    fun setPowerMode(solar: Boolean) {
+        ble.send(if (solar) "POWER,SOLAR" else "POWER,NORMAL")
     }
 
     private fun addOrUpdateNode(id: String, rssi: Int, hops: Int) {

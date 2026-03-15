@@ -47,7 +47,8 @@ data class NodeConfig(
     val sensorPins: MutableList<SensorPin> = mutableListOf(),
     var frequency: Float = 868.0f,
     var boardName: String = "",
-    var spreadingFactor: Int = 9
+    var spreadingFactor: Int = 9,
+    var powerMode: String = "NORMAL"
 )
 
 // Spreading factor change — two-phase commit protocol

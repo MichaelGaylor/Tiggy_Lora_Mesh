@@ -344,6 +344,76 @@ fun SettingsScreen(viewModel: MeshViewModel) {
             }
         }
 
+        // ── Power Mode ───────────────────────────────────────
+        if (config.boardName.isNotEmpty() && config.boardName != "T-Deck") {
+            var showSolarDialog by remember { mutableStateOf(false) }
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        "Power Mode",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MeshCyan
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Current: ${config.powerMode}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MeshGrey
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Solar Mode", style = MaterialTheme.typography.bodyMedium)
+                            Text(
+                                "Disables OLED + BLE, duty-cycle radio. Ideal for solar/battery repeaters.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MeshGrey
+                            )
+                        }
+                        Switch(
+                            checked = config.powerMode == "SOLAR",
+                            onCheckedChange = {
+                                if (it) showSolarDialog = true
+                                else viewModel.setPowerMode(false)
+                            },
+                            colors = SwitchDefaults.colors(checkedThumbColor = MeshOrange)
+                        )
+                    }
+                }
+            }
+
+            if (showSolarDialog) {
+                AlertDialog(
+                    onDismissRequest = { showSolarDialog = false },
+                    title = { Text("Enable Solar Mode?") },
+                    text = {
+                        Text(
+                            "Solar mode will disable BLE immediately. " +
+                            "You will lose connection to this node.\n\n" +
+                            "To restore normal mode, use the serial console " +
+                            "or the PRG button on the device."
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            viewModel.setPowerMode(true)
+                            showSolarDialog = false
+                        }) { Text("Enable Solar", color = MeshOrange) }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showSolarDialog = false }) { Text("Cancel") }
+                    }
+                )
+            }
+        }
+
         // ── Node ID ───────────────────────────────────────────
         Card(
             modifier = Modifier.fillMaxWidth(),

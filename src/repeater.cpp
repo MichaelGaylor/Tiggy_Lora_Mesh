@@ -495,6 +495,23 @@ void handleNodeDiscovered(const String& id, int rssi) {
     bleSend("NODE," + id + "," + String(rssi) + ",1");
 }
 
+// ID conflict handler — another node is using our ID
+void handleIdConflict(const String& id, int rssi) {
+    debugPrint("!! ID CONFLICT: " + id + " RSSI=" + String(rssi));
+    if (oledAvailable) {
+        oled.clearDisplay();
+        oled.setTextSize(2); oled.setTextColor(SSD1306_WHITE);
+        oled.setCursor(0, 0);  oled.println("!! ID");
+        oled.println("CONFLICT !!");
+        oled.setTextSize(1);
+        oled.print("ID "); oled.print(id);
+        oled.print(" RSSI:"); oled.println(rssi);
+        oled.println("Change via app/serial");
+        oled.display();
+    }
+    bleSend("CONFLICT," + id + "," + String(rssi));
+}
+
 // ═══════════════════════════════════════════════════════════════
 // SECTION: BLE Serial (Nordic UART Service)
 // ═══════════════════════════════════════════════════════════════
@@ -624,6 +641,7 @@ void processBleCommand(const String& line) {
                 ",RX:" + String(mesh.packetsReceived) + ",FWD:" + String(mesh.packetsForwarded) +
                 ",GW:" + String(gatewayMode ? "ON" : "OFF") +
                 ",SF:" + String(mesh.currentSF) +
+                ",POWER:" + String(solarMode ? "SOLAR" : "NORMAL") +
                 ",HEAP:" + String(ESP.getFreeHeap()));
     }
     else if (line == "SAVE") { saveConfig(); bleSend("OK,SAVED"); }
@@ -632,7 +650,8 @@ void processBleCommand(const String& line) {
         int newSF = line.substring(3).toInt();
         if (newSF < 7 || newSF > 12) { bleSend("ERR,SF,RANGE"); return; }
         String changeId = mesh.generateMsgID();
-        String cfgPayload = "CFG,SF," + String(newSF) + "," + changeId + "," + String(mesh.localID);
+        String authTag = mesh.cfgAuthTag(changeId);
+        String cfgPayload = "CFG,SF," + String(newSF) + "," + changeId + "," + String(mesh.localID) + "," + authTag;
         mesh.transmitPacket(0xFFFF, cfgPayload);
         bleSend("CFGSTART,SF," + String(newSF) + "," + changeId);
     }
@@ -644,7 +663,8 @@ void processBleCommand(const String& line) {
         String changeId = line.substring(c1 + 1);
         int newSF = value.toInt();
         if (newSF < 7 || newSF > 12) { bleSend("ERR,SF,RANGE"); return; }
-        String goPayload = "CFGGO,SF," + String(newSF) + "," + changeId;
+        String authTag = mesh.cfgAuthTag(changeId);
+        String goPayload = "CFGGO,SF," + String(newSF) + "," + changeId + "," + authTag;
         mesh.transmitPacket(0xFFFF, goPayload);
         // Initiator switches LAST (extra 500ms so CFGGO propagates first)
         sfChangePending = true;
@@ -652,6 +672,19 @@ void processBleCommand(const String& line) {
         sfChangeAt = millis() + CFG_SWITCH_DELAY + 500;
         bleSend("OK,SFGO," + String(newSF));
     }
+#if defined(RADIO_SX1262)
+    else if (line == "POWER,SOLAR") {
+        solarMode = true;
+        saveConfig();
+        bleSend("OK,POWER,SOLAR");
+        delay(100);
+        startSolarMode();  // Disables BLE — connection will drop
+    }
+    else if (line == "POWER,NORMAL") {
+        if (solarMode) { stopSolarMode(); saveConfig(); }
+        bleSend("OK,POWER,NORMAL");
+    }
+#endif
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -786,12 +819,20 @@ void saveConfig() {
     EEPROM.commit();
 }
 
+bool firstBoot = false;  // set by loadConfig, checked in setup() for conflict scan
+
 void loadConfig() {
     if (EEPROM.read(EEPROM_MAGIC_ADDR) != EEPROM_MAGIC_VAL) {
-        debugPrint("First boot - using defaults");
+        debugPrint("First boot - generating random ID");
+        firstBoot = true;
+        // Generate random 4-hex-char node ID (0001-FFFE, avoids 0000 and FFFF)
+        uint16_t randId = random(1, 0xFFFE);
+        char idBuf[5];
+        snprintf(idBuf, sizeof(idBuf), "%04X", randId);
+        strncpy(mesh.localID, idBuf, NODE_ID_LEN + 1);
         uint8_t d[] = DEFAULT_RELAY_PINS; relayCount = sizeof(d)/sizeof(d[0]); memcpy(relayPins, d, relayCount);
         uint8_t s[] = DEFAULT_SENSOR_PINS; sensorCount = sizeof(s)/sizeof(s[0]); memcpy(sensorPins, s, sensorCount);
-        saveConfig();
+        // Don't saveConfig() yet — defer until after conflict scan in setup()
         return;
     }
     EEPROM.get(0, mesh.localID);
@@ -903,10 +944,93 @@ void setup() {
     mesh.onCfg = handleCfg;
     mesh.onCfgAck = handleCfgAck;
     mesh.onCfgGo = handleCfgGo;
+    mesh.onIdConflict = handleIdConflict;
 
     // SPI + Radio (retry up to 3 times — SX1262 TCXO can be slow to stabilize)
     loraSPI.begin(BOARD_SPI_SCK, BOARD_SPI_MISO, BOARD_SPI_MOSI, RADIO_CS);
     setupRadio();
+
+    // ─── First boot: scan for ID conflicts before saving ─────────
+    if (firstBoot) {
+        // Show scan status on OLED
+        Wire.begin(BOARD_I2C_SDA, BOARD_I2C_SCL);
+        bool oledOk = oled.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+
+        bool idClear = false;
+        while (!idClear) {
+            mesh.idConflictDetected = false;
+
+            if (oledOk) {
+                oled.clearDisplay();
+                oled.setTextSize(1); oled.setTextColor(SSD1306_WHITE);
+                oled.setCursor(0, 0);
+                oled.println("First Boot Setup");
+                oled.println("");
+                oled.print("ID: "); oled.println(mesh.localID);
+                oled.println("");
+                oled.println("Scanning for");
+                oled.println("conflicts...");
+                oled.display();
+            }
+            debugPrint("First boot: scanning for ID " + String(mesh.localID));
+
+            // Listen for 10 seconds, checking for conflicts
+            unsigned long scanEnd = millis() + 10000;
+            while (millis() < scanEnd) {
+                receiveCheck();
+                mesh.processPendingForwards();
+
+                // Show countdown on OLED
+                if (oledOk && (millis() % 1000) < 50) {
+                    int remaining = (scanEnd - millis()) / 1000;
+                    oled.fillRect(0, 54, OLED_W, 10, SSD1306_BLACK);
+                    oled.setCursor(0, 54);
+                    oled.print("Time left: "); oled.print(remaining); oled.print("s");
+                    oled.display();
+                }
+
+                if (mesh.idConflictDetected) break;
+                yield();
+            }
+
+            if (mesh.idConflictDetected) {
+                // Conflict found — regenerate random ID and rescan
+                uint16_t randId = random(1, 0xFFFE);
+                char idBuf[5];
+                snprintf(idBuf, sizeof(idBuf), "%04X", randId);
+                strncpy(mesh.localID, idBuf, NODE_ID_LEN + 1);
+                debugPrint("ID conflict! Regenerated to " + String(mesh.localID));
+                if (oledOk) {
+                    oled.clearDisplay();
+                    oled.setTextSize(1); oled.setTextColor(SSD1306_WHITE);
+                    oled.setCursor(0, 0);
+                    oled.println("ID Conflict!");
+                    oled.println("Trying new ID...");
+                    oled.print("New: "); oled.println(mesh.localID);
+                    oled.display();
+                    delay(1500);
+                }
+            } else {
+                idClear = true;
+            }
+        }
+
+        // ID confirmed — save config (writes magic byte)
+        saveConfig();
+        debugPrint("First boot: ID confirmed as " + String(mesh.localID));
+        if (oledOk) {
+            oled.clearDisplay();
+            oled.setTextSize(1); oled.setTextColor(SSD1306_WHITE);
+            oled.setCursor(0, 0);
+            oled.println("ID confirmed:");
+            oled.setTextSize(2);
+            oled.setCursor(0, 20);
+            oled.println(mesh.localID);
+            oled.display();
+            delay(2000);
+            oledAvailable = false;  // Will be re-init'd below in normal boot
+        }
+    }
 
     setupGPIO();
 
