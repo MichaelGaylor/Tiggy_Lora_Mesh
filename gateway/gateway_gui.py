@@ -709,7 +709,7 @@ class GatewayGUIApp:
         if plain:
             self.decrypt_result.configure(text=f'Plain: "{plain}"', text_color=COLORS["good"])
         else:
-            self.decrypt_result.configure(text="Decrypt failed (wrong key or CRC mismatch)", text_color=COLORS["bad"])
+            self.decrypt_result.configure(text="Decrypt failed (wrong key or auth failed)", text_color=COLORS["bad"])
 
     # ─── Lifecycle ──────────────────────────────────────────
 

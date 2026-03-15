@@ -25,7 +25,9 @@ data class MeshNode(
     val id: String,
     val rssi: Int = 0,
     val lastSeen: Long = System.currentTimeMillis(),
-    val hops: Int = 0
+    val hops: Int = 0,
+    val age: Int = 0,       // seconds since last heard (from firmware)
+    val active: Boolean = true
 )
 
 data class RelayPin(
@@ -42,13 +44,44 @@ data class SensorPin(
 
 data class NodeConfig(
     var nodeId: String = "0010",
-    var aesKey: String = "DONTSHARETHEKEY!",
+    var aesKey: String = "",
     val relayPins: MutableList<RelayPin> = mutableListOf(),
     val sensorPins: MutableList<SensorPin> = mutableListOf(),
     var frequency: Float = 868.0f,
     var boardName: String = "",
     var spreadingFactor: Int = 9,
     var powerMode: String = "NORMAL"
+)
+
+// Sensor reading history (for sparkline charts)
+data class SensorReading(
+    val value: Int,
+    val timestamp: Long = System.currentTimeMillis()
+)
+
+// Timer info (from TIMER,LIST response)
+data class TimerInfo(
+    val pin: Int,
+    val isPulse: Boolean = false,
+    val action: String = "",       // ON, OFF, or PULSE
+    val detail: String = ""        // "123s" remaining, or "3/5x ON" for pulse
+)
+
+// Setpoint rule (from SETPOINT,LIST response)
+data class SetpointInfo(
+    val sensorPin: Int,
+    val op: String,                // GT, LT, EQ
+    val threshold: Int,
+    val targetNode: String,
+    val relayPin: Int,
+    val action: Int                // 0=OFF, 1=ON
+)
+
+// Auto-poll configuration
+data class AutoPollConfig(
+    val enabled: Boolean = false,
+    val target: String = "",
+    val interval: Int = 300        // seconds
 )
 
 // Spreading factor change — two-phase commit protocol

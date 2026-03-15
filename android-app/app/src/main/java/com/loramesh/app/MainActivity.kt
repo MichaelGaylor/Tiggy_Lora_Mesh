@@ -65,6 +65,7 @@ class MainActivity : ComponentActivity() {
 
 enum class Screen(val label: String, val icon: ImageVector) {
     CHAT("Chat", Icons.Default.Chat),
+    NODES("Nodes", Icons.Default.CellTower),
     CONTROL("Control", Icons.Default.SettingsRemote),
     SETTINGS("Settings", Icons.Default.Settings)
 }
@@ -82,10 +83,11 @@ fun MainApp(viewModel: MeshViewModel = viewModel()) {
         return
     }
 
-    // Request status on first connect
+    // Request status and nodes on first connect
     LaunchedEffect(Unit) {
         viewModel.requestStatus()
         viewModel.refreshPins()
+        viewModel.requestNodes()
     }
 
     Scaffold(
@@ -145,6 +147,7 @@ fun MainApp(viewModel: MeshViewModel = viewModel()) {
         Box(modifier = Modifier.padding(padding)) {
             when (currentScreen) {
                 Screen.CHAT -> ChatScreen(viewModel)
+                Screen.NODES -> NodesScreen(viewModel)
                 Screen.CONTROL -> ControlScreen(viewModel)
                 Screen.SETTINGS -> SettingsScreen(viewModel)
             }

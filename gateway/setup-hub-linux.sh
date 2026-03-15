@@ -44,7 +44,8 @@ echo ""
 # ─── 1. Python dependencies ──────────────────────────────────
 echo -e "${CYAN}[1/4] Installing Python dependencies...${NC}"
 sudo apt-get update -q
-sudo apt-get install -y python3 python3-websockets
+sudo apt-get install -y python3 python3-pip
+pip3 install --break-system-packages aiohttp pycryptodome 2>/dev/null || pip3 install aiohttp pycryptodome
 
 echo -e "${GREEN}      ✓ Python dependencies installed${NC}"
 
