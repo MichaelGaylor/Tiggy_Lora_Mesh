@@ -1271,6 +1271,7 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
     </div>
     <div class="phone-nav">
       <div class="tab">Chat</div>
+      <div class="tab">Nodes</div>
       <div class="tab active">Control</div>
       <div class="tab">Settings</div>
     </div>
@@ -1284,8 +1285,9 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
   <tr><td>ViewModel</td><td><code>MeshViewModel.kt</code></td><td>Parse incoming data, manage UI state (messages, relays, config)</td></tr>
   <tr><td>Scan Screen</td><td><code>ScanScreen.kt</code></td><td>BLE device discovery with RSSI colour coding</td></tr>
   <tr><td>Chat Screen</td><td><code>ChatScreen.kt</code></td><td>Send/receive messages, broadcast/direct toggle</td></tr>
-  <tr><td>Control Screen</td><td><code>ControlScreen.kt</code></td><td>Relay toggles, pulse buttons, sensor readings</td></tr>
-  <tr><td>Settings Screen</td><td><code>SettingsScreen.kt</code></td><td>Node ID, AES key, power mode toggle, save to EEPROM, known nodes list</td></tr>
+  <tr><td>Control Screen</td><td><code>ControlScreen.kt</code></td><td>Relay toggles, pulse buttons, sensor sparklines, timers, setpoints, auto-poll</td></tr>
+  <tr><td>Nodes Screen</td><td><code>NodesScreen.kt</code></td><td>Discovered mesh nodes list with online/offline status and signal strength</td></tr>
+  <tr><td>Settings Screen</td><td><code>SettingsScreen.kt</code></td><td>Node ID, AES key, power mode toggle, save to EEPROM, Telegram config</td></tr>
   <tr><td>Theme</td><td><code>Theme.kt</code></td><td>Dark theme matching firmware cyan/green palette</td></tr>
 </table>
 </section>
@@ -1317,6 +1319,17 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
   <tr><td>Commit SF</td><td><code>SFGO,&lt;7-12&gt;</code></td><td><code>SFGO,7</code></td><td><code>OK,SFGO,7</code></td></tr>
   <tr><td>Solar Mode On</td><td><code>POWER,SOLAR</code></td><td></td><td><code>OK,POWER,SOLAR</code> (BLE disconnects)</td></tr>
   <tr><td>Solar Mode Off</td><td><code>POWER,NORMAL</code></td><td></td><td><code>OK,POWER,NORMAL</code></td></tr>
+  <tr><td>Poll Local Sensors</td><td><code>POLL</code></td><td></td><td><code>SDATA,0010,34:2048,36:1200</code></td></tr>
+  <tr><td>Poll Remote</td><td><code>POLL,&lt;nodeId&gt;</code></td><td><code>POLL,0002</code></td><td>Remote node replies with SDATA over mesh</td></tr>
+  <tr><td>Set Timer</td><td><code>TIMER,&lt;pin&gt;,ON|OFF,&lt;sec&gt;</code></td><td><code>TIMER,4,ON,300</code></td><td><code>OK,TIMER,4,ON,300</code></td></tr>
+  <tr><td>Pulse Timer</td><td><code>TIMER,&lt;pin&gt;,PULSE,&lt;on&gt;,&lt;off&gt;,&lt;rpt&gt;</code></td><td><code>TIMER,4,PULSE,60,120,5</code></td><td><code>OK,TIMER,4,PULSE</code></td></tr>
+  <tr><td>List Timers</td><td><code>TIMER,LIST</code></td><td></td><td><code>TIMERS,&lt;count&gt;,...</code></td></tr>
+  <tr><td>Clear Timers</td><td><code>TIMER,CLEAR</code></td><td></td><td><code>OK,TIMER,CLEAR</code></td></tr>
+  <tr><td>Set Setpoint</td><td><code>SETPOINT,&lt;sPin&gt;,&lt;op&gt;,&lt;thr&gt;,&lt;node&gt;,&lt;rPin&gt;,&lt;act&gt;</code></td><td><code>SETPOINT,34,GT,2000,0010,4,1</code></td><td><code>OK,SETPOINT</code></td></tr>
+  <tr><td>List Setpoints</td><td><code>SETPOINT,LIST</code></td><td></td><td><code>SETPOINTS,&lt;count&gt;,...</code></td></tr>
+  <tr><td>Clear Setpoints</td><td><code>SETPOINT,CLEAR</code></td><td></td><td><code>OK,SETPOINT,CLEAR</code></td></tr>
+  <tr><td>Start Auto-Poll</td><td><code>AUTOPOLL,&lt;nodeId&gt;,&lt;sec&gt;</code></td><td><code>AUTOPOLL,FFFF,300</code></td><td><code>OK,AUTOPOLL,FFFF,300</code></td></tr>
+  <tr><td>Stop Auto-Poll</td><td><code>AUTOPOLL,OFF</code></td><td></td><td><code>OK,AUTOPOLL,OFF</code></td></tr>
 </table>
 
 <div class="info-box orange">
@@ -1337,6 +1350,10 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
   <tr><td>CFG Proposed</td><td><code>CFGSTART,&lt;type&gt;,&lt;value&gt;,&lt;changeId&gt;</code></td><td><code>CFGSTART,SF,7,A1B2</code></td></tr>
   <tr><td>CFG Node ACK</td><td><code>CFGACK,&lt;nodeId&gt;,&lt;type&gt;,&lt;value&gt;,&lt;changeId&gt;</code></td><td><code>CFGACK,0010,SF,7,A1B2</code></td></tr>
   <tr><td>CFG Applied</td><td><code>CFGGO,&lt;type&gt;,&lt;value&gt;,&lt;changeId&gt;</code></td><td><code>CFGGO,SF,7,A1B2</code></td></tr>
+  <tr><td>Sensor Data</td><td><code>SDATA,&lt;nodeId&gt;,&lt;pin&gt;:&lt;val&gt;,...</code></td><td><code>SDATA,0010,34:2048,36:1200</code></td></tr>
+  <tr><td>Timer Fired</td><td><code>TIMER,FIRED,&lt;pin&gt;,ON|OFF</code></td><td><code>TIMER,FIRED,4,ON</code></td></tr>
+  <tr><td>Timer Done</td><td><code>TIMER,DONE,&lt;pin&gt;</code></td><td><code>TIMER,DONE,4</code></td></tr>
+  <tr><td>Setpoint Fired</td><td><code>SETPOINT,FIRED,&lt;pin&gt;,&lt;value&gt;</code></td><td><code>SETPOINT,FIRED,34,2100</code></td></tr>
 </table>
 </section>
 
@@ -1403,7 +1420,7 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
 <table>
   <tr><th>Command</th><th>Format</th><th>Description</th></tr>
   <tr><td>SET</td><td><code>CMD,SET,&lt;pin&gt;,&lt;0|1&gt;</code></td><td>Set pin HIGH (1) or LOW (0). Pin is configured as OUTPUT.</td></tr>
-  <tr><td>GET</td><td><code>CMD,GET,&lt;pin&gt;</code></td><td>Read pin value. Analog pins (34-39) return 0-4095. Digital pins return 0/1.</td></tr>
+  <tr><td>GET</td><td><code>CMD,GET,&lt;pin&gt;</code></td><td>Read pin value. Analog sensor pins return 0-4095. Digital pins return 0/1. (ESP32: ADC on GPIO 32-39. ESP32-S3: ADC on GPIO 1-20.)</td></tr>
   <tr><td>PULSE</td><td><code>CMD,PULSE,&lt;pin&gt;,&lt;ms&gt;</code></td><td>Set pin HIGH for N milliseconds, then LOW. Max 30 seconds.</td></tr>
   <tr><td>LIST</td><td><code>CMD,LIST</code></td><td>Returns configured relay and sensor pins.</td></tr>
   <tr><td>RSP</td><td><code>CMD,RSP,&lt;pin&gt;,&lt;value&gt;</code></td><td>Response containing pin value (sent back to requester).</td></tr>
@@ -1415,9 +1432,156 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
 </div>
 </section>
 
+<!-- ═══════════════ RELAY TIMERS ═══════════════ -->
+<section id="timers">
+<h2>14. Relay Timers</h2>
+
+<p>Up to 4 concurrent relay timers can be set via BLE, serial, or mesh command. Timers are <strong>ephemeral</strong> (not saved to EEPROM) and lost on reboot.</p>
+
+<h3>Timer Commands</h3>
+<table>
+  <tr><th>Command</th><th>Format</th><th>Description</th></tr>
+  <tr><td>Delay ON/OFF</td><td><code>TIMER,&lt;pin&gt;,ON|OFF,&lt;seconds&gt;</code></td><td>Set pin HIGH or LOW after a delay (max 86400s / 24 hours).</td></tr>
+  <tr><td>Pulse</td><td><code>TIMER,&lt;pin&gt;,PULSE,&lt;onSec&gt;,&lt;offSec&gt;,&lt;repeats&gt;</code></td><td>Alternating ON/OFF cycle. <code>repeats=0</code> = forever. Max 3600s per phase.</td></tr>
+  <tr><td>List</td><td><code>TIMER,LIST</code></td><td>Returns active timers and remaining time.</td></tr>
+  <tr><td>Clear</td><td><code>TIMER,CLEAR</code></td><td>Cancels all active timers.</td></tr>
+</table>
+
+<h3>Behaviour</h3>
+<ul style="color:var(--dim); padding-left:20px;">
+  <li>Setting a timer on a pin that already has one <strong>overwrites</strong> the existing timer.</li>
+  <li>When a timer fires, the node sends <code>TIMER,FIRED,&lt;pin&gt;,ON|OFF</code> over BLE.</li>
+  <li>When a repeating pulse completes, it sends <code>TIMER,DONE,&lt;pin&gt;</code>.</li>
+  <li>Timers work via both BLE and mesh (<code>CMD,TIMER,...</code>).</li>
+</ul>
+
+<h3>Example: Irrigation Pump</h3>
+<pre><span class="comment"># Turn on pump (GPIO 4) for 30 minutes, then off</span>
+TIMER,4,ON,0             <span class="comment"># ON immediately</span>
+TIMER,4,OFF,1800          <span class="comment"># OFF after 30 min</span>
+
+<span class="comment"># Pulse: 5 min on, 10 min off, repeat 3 times</span>
+TIMER,4,PULSE,300,600,3</pre>
+</section>
+
+<!-- ═══════════════ SETPOINTS ═══════════════ -->
+<section id="setpoints">
+<h2>15. Cross-Node Setpoint Rules</h2>
+
+<p>Setpoints are conditional automation rules: &ldquo;when sensor X crosses threshold Y, send a command to node Z&rsquo;s relay.&rdquo; Up to 4 rules per node, stored in RAM (not persisted across reboot).</p>
+
+<h3>Setpoint Commands</h3>
+<table>
+  <tr><th>Command</th><th>Format</th><th>Description</th></tr>
+  <tr><td>Set Rule</td><td><code>SETPOINT,&lt;sensorPin&gt;,&lt;op&gt;,&lt;threshold&gt;,&lt;targetNode&gt;,&lt;relayPin&gt;,&lt;action&gt;</code></td>
+    <td>When <code>sensorPin</code> reading matches <code>op threshold</code>, send <code>CMD,SET,relayPin,action</code> to <code>targetNode</code>.</td></tr>
+  <tr><td>List</td><td><code>SETPOINT,LIST</code></td><td>Returns active setpoint rules.</td></tr>
+  <tr><td>Clear</td><td><code>SETPOINT,CLEAR</code></td><td>Removes all setpoint rules.</td></tr>
+</table>
+
+<h3>Operators</h3>
+<table>
+  <tr><th>Op</th><th>Meaning</th><th>Example</th></tr>
+  <tr><td><code>GT</code></td><td>Greater than</td><td>Temperature above threshold &rarr; turn on fan</td></tr>
+  <tr><td><code>LT</code></td><td>Less than</td><td>Soil moisture below threshold &rarr; turn on pump</td></tr>
+  <tr><td><code>EQ</code></td><td>Equal to</td><td>Digital input matches value &rarr; trigger relay</td></tr>
+</table>
+
+<h3>Safety Features</h3>
+<ul style="color:var(--dim); padding-left:20px;">
+  <li><strong>Hysteresis:</strong> After triggering, the sensor must move past the threshold by 10% in the opposite direction before re-triggering.</li>
+  <li><strong>Cooldown:</strong> 10-second minimum between triggers per rule.</li>
+  <li><strong>Cross-node:</strong> The action is sent as an encrypted <code>CMD,SET</code> mesh packet to the target node &mdash; the sensor and relay can be on different physical devices.</li>
+  <li>When a setpoint fires, the node sends <code>SETPOINT,FIRED,&lt;sensorPin&gt;,&lt;value&gt;</code> over BLE.</li>
+</ul>
+
+<h3>Example: Frost Protection</h3>
+<pre><span class="comment"># When temp sensor (GPIO 34) drops below 300 (3.0°C on 0-4095 scale),</span>
+<span class="comment"># turn on heater (GPIO 4) on node 0010</span>
+SETPOINT,34,LT,300,0010,4,1
+
+<span class="comment"># When temp rises above 500 (5.0°C), turn heater off</span>
+SETPOINT,34,GT,500,0010,4,0</pre>
+</section>
+
+<!-- ═══════════════ SENSOR MONITORING ═══════════════ -->
+<section id="sensors">
+<h2>16. Sensor Monitoring &amp; Auto-Poll (SDATA)</h2>
+
+<p>Nodes can read local analog/digital sensors and broadcast bundled sensor data (<strong>SDATA</strong>) across the mesh for remote monitoring.</p>
+
+<h3>SDATA Format</h3>
+<pre>SDATA,&lt;nodeID&gt;,&lt;pin1&gt;:&lt;value1&gt;,&lt;pin2&gt;:&lt;value2&gt;,...
+
+<span class="comment"># Example: Node 0010 reporting 3 sensors</span>
+SDATA,0010,34:2048,36:1200,39:4095</pre>
+
+<h3>Reading Sensors</h3>
+<table>
+  <tr><th>Command</th><th>Format</th><th>Description</th></tr>
+  <tr><td>Local POLL</td><td><code>POLL</code> (BLE/serial)</td><td>Read all local sensor pins, return SDATA over BLE/serial.</td></tr>
+  <tr><td>Remote POLL</td><td><code>POLL,&lt;targetNodeId&gt;</code> (BLE)</td><td>Send <code>CMD,POLL</code> to a remote node; it replies with SDATA over the mesh.</td></tr>
+  <tr><td>Single Pin</td><td><code>CMD,GET,&lt;pin&gt;</code></td><td>Read one specific pin on a remote node.</td></tr>
+</table>
+
+<h3>Auto-Poll (Periodic Broadcasting)</h3>
+<p>Auto-Poll sends SDATA to a target node at a regular interval. Ideal for unattended sensor stations that periodically report readings.</p>
+
+<table>
+  <tr><th>Command</th><th>Format</th><th>Description</th></tr>
+  <tr><td>Start</td><td><code>AUTOPOLL,&lt;targetNodeId&gt;,&lt;intervalSec&gt;</code></td><td>Begin periodic SDATA broadcasts. Minimum interval: 30 seconds.</td></tr>
+  <tr><td>Stop</td><td><code>AUTOPOLL,OFF</code></td><td>Stop auto-polling.</td></tr>
+</table>
+
+<div class="info-box green">
+  <p><strong>Persistence:</strong> Auto-poll configuration is saved to EEPROM (address 433). It resumes automatically 10 seconds after reboot.</p>
+</div>
+
+<h3>Sensor Pin Types</h3>
+<table>
+  <tr><th>Pin Range</th><th>Read Method</th><th>Value Range</th><th>Use Case</th></tr>
+  <tr><td>ESP32: GPIO 32-39</td><td><code>analogRead()</code></td><td>0-4095 (12-bit ADC)</td><td>Temperature, soil moisture, light, wind speed</td></tr>
+  <tr><td>ESP32-S3: GPIO 1-20</td><td><code>analogRead()</code></td><td>0-4095 (12-bit ADC)</td><td>Same &mdash; S3 has ADC on most GPIOs</td></tr>
+  <tr><td>Any GPIO (digital)</td><td><code>digitalRead()</code></td><td>0 or 1</td><td>Door switches, reed sensors, rain gauges</td></tr>
+</table>
+
+<h3>Default Sensor Pins per Board</h3>
+<table>
+  <tr><th>Board</th><th>Default Sensor Pins</th><th>Notes</th></tr>
+  <tr><td>LoRa32 T3</td><td>34, 36, 39</td><td>Input-only, ADC1. Best for analog sensors.</td></tr>
+  <tr><td>Heltec V3</td><td>19, 20, 33</td><td>All ADC-capable on ESP32-S3.</td></tr>
+  <tr><td>Heltec V4</td><td>19, 20, 33</td><td>Same as V3. Extra pins available on headers.</td></tr>
+  <tr><td>XIAO ESP32S3</td><td>43, 44</td><td>Digital-only (UART pins). Use <code>SENSOR 2,4,5</code> for analog.</td></tr>
+  <tr><td>Heltec V2</td><td>36, 39</td><td>Input-only, ADC1. Used as WiFi gateway &mdash; sensors optional.</td></tr>
+  <tr><td>T-Deck Plus</td><td>None</td><td>No free GPIO &mdash; all pins used by display/keyboard/GPS.</td></tr>
+</table>
+
+<div class="info-box">
+  <p><strong>Reconfigure pins:</strong> Use <code>SENSOR &lt;pin1&gt;,&lt;pin2&gt;,...</code> via serial, then <code>SAVE</code>. This overrides the defaults.</p>
+</div>
+
+<h3>Farming &amp; Environmental Monitoring</h3>
+<p>The sensor system is designed for unattended outdoor monitoring. Typical setup:</p>
+<ul style="color:var(--dim); padding-left:20px;">
+  <li><strong>Wind speed:</strong> Analog anemometer (0-3.3V output) &rarr; GPIO 34 or 36</li>
+  <li><strong>Temperature:</strong> NTC thermistor with voltage divider &rarr; GPIO 39</li>
+  <li><strong>Soil moisture:</strong> Capacitive sensor (0-3.3V) &rarr; GPIO 36</li>
+  <li><strong>Rain gauge:</strong> Tipping bucket (digital pulse) &rarr; any digital GPIO</li>
+</ul>
+<p>Connect sensors to a solar-powered repeater node (see Section 21), configure <code>AUTOPOLL</code> to send readings every 5 minutes to a gateway node, and monitor via the PC gateway GUI, hub GUI, or web map &mdash; all with sparkline charts.</p>
+
+<h3>Viewing Sensor Data</h3>
+<ul style="color:var(--dim); padding-left:20px;">
+  <li><strong>Android app:</strong> Control screen shows live sparkline charts per sensor pin with min/max labels.</li>
+  <li><strong>PC Gateway GUI:</strong> Sensor Monitor panel with auto-decrypting sparklines. Enter AES key in the inspector, use POLL button to request readings.</li>
+  <li><strong>Hub GUI:</strong> Sensor Monitor canvas with sparklines for all sensors across all gateway-connected nodes.</li>
+  <li><strong>Web Map:</strong> Sensor bar at the bottom of the map page with live-updating sparkline cards per sensor.</li>
+</ul>
+</section>
+
 <!-- ═══════════════ EEPROM ═══════════════ -->
 <section id="eeprom">
-<h2>14. EEPROM Memory Map</h2>
+<h2>17. EEPROM Memory Map</h2>
 
 <p>512 bytes of EEPROM store persistent configuration. Layout is identical across all boards.</p>
 
@@ -1430,6 +1594,9 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
   <tr><td><code>430</code></td><td>1 byte</td><td>Solar mode flag (0=off, 1=on) &mdash; repeater only</td><td><code>0</code></td></tr>
   <tr><td><code>431</code></td><td>1 byte</td><td>Runtime spreading factor (7-12) &mdash; repeater only</td><td><code>9</code> (LORA_SF)</td></tr>
   <tr><td><code>432</code></td><td>1 byte</td><td>Display sleep timeout in seconds (0=off) &mdash; T-Deck only</td><td><code>60</code></td></tr>
+  <tr><td><code>433</code></td><td>1 byte</td><td>Auto-poll enabled flag (0=off, 1=on)</td><td><code>0</code></td></tr>
+  <tr><td><code>434</code></td><td>5 bytes</td><td>Auto-poll target node ID (4 chars + null)</td><td>Empty</td></tr>
+  <tr><td><code>439</code></td><td>2 bytes</td><td>Auto-poll interval in seconds (uint16)</td><td><code>300</code></td></tr>
   <tr><td><code>450</code></td><td>17 bytes</td><td>AES-128 key (16 chars + null)</td><td>Randomly generated on first boot</td></tr>
   <tr><td><code>508</code></td><td>1 byte</td><td>First-boot magic byte</td><td><code>0xA5</code> after first setup</td></tr>
 </table>
@@ -1441,7 +1608,7 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
 
 <!-- ═══════════════ BUILDING ═══════════════ -->
 <section id="building">
-<h2>15. Building &amp; Flashing</h2>
+<h2>18. Building &amp; Flashing</h2>
 
 <h3>Prerequisites</h3>
 <ul style="color:var(--dim); padding-left:20px;">
@@ -1488,7 +1655,7 @@ android-app/
 
 <!-- ═══════════════ GATEWAY ═══════════════ -->
 <section id="gateway">
-<h2>16. Gateway Bridge &mdash; Internet-Linked Mesh Islands</h2>
+<h2>19. Gateway Bridge &mdash; Internet-Linked Mesh Islands</h2>
 
 <p>The gateway feature connects geographically separated LoRa mesh networks over the internet. Each gateway node is a repeater connected via USB to a PC running the Python bridge server. Packets remain <strong>AES-128-CTR encrypted end-to-end</strong> &mdash; the servers never decrypt them.</p>
 
@@ -1781,7 +1948,7 @@ gateway/
 
 <!-- ═══════════════ WIFI GATEWAY ═══════════════ -->
 <section id="wifi-gateway">
-<h2>17. WiFi ESP Gateway — No PC Required</h2>
+<h2>20. WiFi ESP Gateway — No PC Required</h2>
 
 <p>The WiFi gateway firmware turns any ESP32 board into a standalone internet bridge. Unlike the PC-based gateway, it needs <strong>no computer</strong> — just power. Flash it, configure once via the Android app over BLE, mount it outside with a solar panel, and it runs forever.</p>
 
@@ -2003,7 +2170,7 @@ sudo systemctl restart tiggyopenmesh-hub</pre></div>
 
 <!-- ═══════════════ SOLAR MODE ═══════════════ -->
 <section id="solar">
-<h2>18. Solar / Low-Power Repeater Mode</h2>
+<h2>21. Solar / Low-Power Repeater Mode</h2>
 
 <p>Remote repeater nodes on hilltops or rooftops often need to run indefinitely from a small solar panel and an 18650 battery. Solar mode dramatically reduces power consumption by disabling non-essential peripherals and using the SX1262's hardware duty-cycle RX.</p>
 
@@ -2095,7 +2262,7 @@ sudo systemctl restart tiggyopenmesh-hub</pre></div>
 
 <!-- ═══════════════ DELIVERY TRACKING ═══════════════ -->
 <section id="delivery-tracking">
-<h2>19. Message Delivery Tracking</h2>
+<h2>22. Message Delivery Tracking</h2>
 
 <p>Every message sent through the mesh now has <strong>end-to-end delivery confirmation</strong>. The sender knows exactly whether the message was transmitted, delivered, or failed &mdash; with visual status indicators on both the T-Deck and the Android app.</p>
 
@@ -2150,7 +2317,7 @@ sudo systemctl restart tiggyopenmesh-hub</pre></div>
 
 <!-- ═══════════════ SF CHANGE PROTOCOL ═══════════════ -->
 <section id="sf-change">
-<h2>20. Spreading Factor Change Protocol</h2>
+<h2>23. Spreading Factor Change Protocol</h2>
 
 <p>LoRa Spreading Factor (SF) controls the trade-off between <strong>range</strong> and <strong>speed</strong>. Changing SF requires <em>all nodes</em> to switch simultaneously &mdash; a node on SF7 cannot hear one on SF12. The two-phase CFG protocol ensures safe, coordinated changes across the entire mesh.</p>
 
@@ -2226,7 +2393,7 @@ sudo systemctl restart tiggyopenmesh-hub</pre></div>
 
 <!-- ═══════════════ COLLISION DETECTION ═══════════════ -->
 <section id="collision">
-<h2>21. Node ID Collision Detection</h2>
+<h2>24. Node ID Collision Detection</h2>
 
 <p>Node IDs are 4-hex-char values (0001&ndash;FFFE) &mdash; 65534 possible addresses. As networks grow, or when default IDs are used, collisions become likely. Two nodes with the same ID cause <strong>routing chaos</strong> &mdash; messages get misdelivered, heartbeats overwrite routes, and the mesh becomes unreliable.</p>
 
@@ -2280,7 +2447,7 @@ sudo systemctl restart tiggyopenmesh-hub</pre></div>
 
 <!-- ═══════════════ DISPLAY SLEEP ═══════════════ -->
 <section id="display-sleep">
-<h2>22. Display Auto-Sleep (T-Deck Plus)</h2>
+<h2>25. Display Auto-Sleep (T-Deck Plus)</h2>
 
 <p>The T-Deck's 2.8" TFT backlight draws significant power. Display auto-sleep turns off the backlight after a configurable idle period, extending battery life for portable use.</p>
 
@@ -2331,7 +2498,7 @@ sudo systemctl restart tiggyopenmesh-hub</pre></div>
 
 <!-- ═══════════════ GATEWAY MAP ═══════════════ -->
 <section id="gateway-map">
-<h2>23. Live Gateway Coverage Map</h2>
+<h2>26. Live Gateway Coverage Map</h2>
 
 <p>The hub server hosts a live web map showing all registered gateways, their online/offline status, and estimated coverage areas. This is a <strong>peacetime management tool</strong> for network planning &mdash; the mesh itself operates without it.</p>
 
@@ -2427,7 +2594,7 @@ https://your-machine.tail1234.ts.net/</pre>
 
 <!-- ═══════════════ TELEGRAM ═══════════════ -->
 <section id="telegram">
-<h2>24. Telegram Alerts (Android App)</h2>
+<h2>27. Telegram Alerts (Android App)</h2>
 
 <p>The Android app can forward <strong>group mesh messages</strong> and <strong>SOS emergencies</strong> to a Telegram chat via a bot. This lets family members, a base-camp coordinator, or anyone with Telegram receive real-time alerts — even if they are miles away with no LoRa hardware.</p>
 
@@ -2493,7 +2660,7 @@ https://your-machine.tail1234.ts.net/</pre>
 
 <!-- ═══════════════ THEME ═══════════════ -->
 <section id="theme">
-<h2>25. Colour Theme Reference</h2>
+<h2>28. Colour Theme Reference</h2>
 
 <p>Consistent colour palette used across the TFT display, OLED, and Android app.</p>
 
@@ -2537,13 +2704,51 @@ https://your-machine.tail1234.ts.net/</pre>
 </table>
 </section>
 
+<!-- ═══════════════ CAVEATS ═══════════════ -->
+<section id="caveats">
+<h2>29. Known Issues &amp; Board-Specific Caveats</h2>
+
+<h3>Board-Specific Issues</h3>
+<table>
+  <tr><th>Board</th><th>Issue</th><th>Workaround</th></tr>
+  <tr><td>Heltec V2 (gateway)</td><td>Only ~80KB free heap after BLE+WiFi. TLS certificate verification (<code>beginSslWithCA</code>) fails due to insufficient memory for cert chain processing.</td>
+    <td><code>VERIFY_TLS_CERT</code> is disabled for this board. Uses insecure TLS (no cert verification). Other gateway boards (V3/V4/XIAO on ESP32-S3) have cert verification enabled.</td></tr>
+  <tr><td>Heltec V2 (gateway)</td><td>Flash is 86% full with <code>min_spiffs.csv</code> partition. Adding features may require removing debug output.</td>
+    <td><code>CORE_DEBUG_LEVEL=0</code> is already set for this target.</td></tr>
+  <tr><td>XIAO ESP32S3</td><td>Default sensor pins (43, 44) are UART TX/RX &mdash; digital only (0/1). No analog readings on defaults.</td>
+    <td>Reconfigure: <code>SENSOR 2,4,5,6</code> + <code>SAVE</code>. Pins 2-6 support ADC on ESP32-S3.</td></tr>
+  <tr><td>T-Deck Plus</td><td>No free GPIO pins for sensors or relays. All pins used by display, keyboard, GPS, and radio.</td>
+    <td>Use T-Deck as communicator only. Pair with a repeater node for sensor/relay control.</td></tr>
+  <tr><td>LoRa32 T3 (repeater)</td><td>SX1276 radio does not support duty-cycle solar mode (requires SX1262 <code>startReceiveDutyCycle</code>).</td>
+    <td>Use continuous RX. For low-power deployments, prefer Heltec V3/V4/XIAO with SX1262.</td></tr>
+</table>
+
+<h3>Protocol Notes</h3>
+<ul style="color:var(--dim); padding-left:20px;">
+  <li><strong>Hard protocol break:</strong> The AES-128-GCM encryption is incompatible with older firmware using AES-128-CTR. All nodes in a mesh must run the same firmware version.</li>
+  <li><strong>Message ID is 6 characters:</strong> Increased from 4 characters in v3.x. Dedup ring buffer is 128 entries.</li>
+  <li><strong>Setpoints and timers are ephemeral:</strong> Stored in RAM only. Lost on reboot. Auto-poll is the only sensor feature that persists (saved to EEPROM).</li>
+  <li><strong>ADC resolution:</strong> 12-bit (0-4095). Sensor values are raw ADC counts, not calibrated units. Calibration is done on the monitoring end (PC/phone/hub).</li>
+  <li><strong>Max 4 timers and 4 setpoints per node.</strong> Setting a timer on a pin that already has one overwrites the existing timer.</li>
+  <li><strong>Auto-poll minimum interval:</strong> 30 seconds. Shorter intervals risk channel congestion on busy meshes.</li>
+</ul>
+
+<h3>Gateway / Hub Notes</h3>
+<ul style="color:var(--dim); padding-left:20px;">
+  <li><strong>Tailscale Funnel hostname:</strong> May time out from some networks. Use the Tailscale IP address directly if the hostname fails (check <code>tailscale status</code>).</li>
+  <li><strong>Hub port conflict:</strong> If running multiple hub services (e.g. <code>tiggyopenmesh-hub</code> and <code>lora-mesh-hub</code>), only one can bind the port. Disable the conflicting service: <code>sudo systemctl disable &lt;service-name&gt;</code>.</li>
+  <li><strong>Sensor data in hub:</strong> SDATA packets must be decrypted to extract sensor readings. Enter the mesh AES key in the hub GUI's AES Key field.</li>
+  <li><strong>Hub requires <code>pycryptodome</code>:</strong> Install with <code>pip3 install pycryptodome</code> for AES-GCM decryption of sensor data.</li>
+</ul>
+</section>
+
 </div>
 
 <!-- Footer -->
 <div style="background:var(--panel); border-top:1px solid var(--faint); padding:30px 40px; text-align:center; color:var(--faint); font-size:0.85em;">
   <p>TiggyOpenMesh v4.0 &mdash; MeshCore Architecture</p>
-  <p>T-Deck Plus &bull; LoRa32 T3 V1.6.1 &bull; Heltec WiFi LoRa 32 V3 &bull; Heltec WiFi LoRa 32 V4</p>
-  <p>25 sections &mdash; Hardware, Protocol, UI, BLE, Gateway, Map, Solar, Delivery Tracking, SF Change, Collision Detection, Display Sleep</p>
+  <p>T-Deck Plus &bull; LoRa32 T3 V1.6.1 &bull; Heltec WiFi LoRa 32 V3 &bull; Heltec WiFi LoRa 32 V4 &bull; XIAO ESP32S3</p>
+  <p>29 sections &mdash; Hardware, Protocol, UI, BLE, Gateway, Timers, Setpoints, Sensors, Map, Solar, Delivery, SF Change, Collision Detection, Caveats</p>
   <p style="margin-top:8px;">Documentation generated March 2026</p>
 </div>
 

@@ -246,7 +246,7 @@ class GatewayGUIApp:
     def __init__(self):
         self.root = ctk.CTk()
         self.root.title("TiggyOpenMesh Gateway Client")
-        self.root.geometry("1050x780")
+        self.root.geometry("1100x950")
         self.root.configure(fg_color=COLORS["bg"])
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -263,10 +263,15 @@ class GatewayGUIApp:
         self.selected_packet: dict | None = None
         self.particles: list = []
 
+        # Sensor state
+        self.sensor_data: dict[str, list[tuple[float, int]]] = {}  # key -> [(ts, val)]
+        self.max_sensor_history = 120
+
         self.build_ui()
         self.refresh_ports()
         self.root.after(50, self.poll_events)
         self.root.after(33, self.animate_topology)
+        self.root.after(2000, self.redraw_sensors)
 
     # ─── UI Construction ────────────────────────────────────
 
@@ -367,6 +372,77 @@ class GatewayGUIApp:
                       text_color=COLORS["accent"], anchor="w").pack(fill="x", padx=10, pady=(5, 0))
         self.nodes_frame = ctk.CTkScrollableFrame(right_frame, fg_color=COLORS["bg"], corner_radius=0)
         self.nodes_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        # ─── Sensor Dashboard ────────────────────────────────
+        sensor_frame = ctk.CTkFrame(self.root, fg_color=COLORS["panel"], corner_radius=8, height=130)
+        sensor_frame.pack(fill="x", padx=10, pady=5)
+        sensor_frame.pack_propagate(False)
+        ctk.CTkLabel(sensor_frame, text="  Sensor Monitor", font=("Consolas", 11, "bold"),
+                      text_color=COLORS["accent"], anchor="w").pack(fill="x", padx=10, pady=(5, 0))
+        self.sensor_canvas = ctk.CTkCanvas(sensor_frame, bg=COLORS["bg"], highlightthickness=0, height=100)
+        self.sensor_canvas.pack(fill="both", expand=True, padx=10, pady=(0, 5))
+
+        # ─── Node Control Bar ───────────────────────────────
+        ctrl_frame = ctk.CTkFrame(self.root, fg_color=COLORS["panel"], corner_radius=8)
+        ctrl_frame.pack(fill="x", padx=10, pady=5)
+
+        ctrl_row = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
+        ctrl_row.pack(fill="x", padx=10, pady=8)
+
+        # Poll sensors
+        ctk.CTkButton(ctrl_row, text="POLL Local", width=90, font=("Consolas", 10),
+                        fg_color=COLORS["accent"], text_color="#000",
+                        command=self.cmd_poll_local).pack(side="left", padx=3)
+
+        ctk.CTkLabel(ctrl_row, text="Remote:", text_color=COLORS["dim"],
+                      font=("Consolas", 9)).pack(side="left", padx=(10, 2))
+        self.poll_target = ctk.CTkEntry(ctrl_row, width=60, placeholder_text="ID",
+                                         font=("Consolas", 9))
+        self.poll_target.pack(side="left", padx=2)
+        ctk.CTkButton(ctrl_row, text="POLL", width=50, font=("Consolas", 10),
+                        fg_color=COLORS["accent"], text_color="#000",
+                        command=self.cmd_poll_remote).pack(side="left", padx=3)
+
+        # Separator
+        ctk.CTkLabel(ctrl_row, text="│", text_color=COLORS["faint"]).pack(side="left", padx=5)
+
+        # Timer controls
+        ctk.CTkLabel(ctrl_row, text="Timer:", text_color=COLORS["dim"],
+                      font=("Consolas", 9)).pack(side="left", padx=2)
+        self.timer_pin = ctk.CTkEntry(ctrl_row, width=35, placeholder_text="pin",
+                                       font=("Consolas", 9))
+        self.timer_pin.pack(side="left", padx=2)
+        self.timer_action = ctk.CTkComboBox(ctrl_row, width=65, values=["ON", "OFF", "PULSE"],
+                                              font=("Consolas", 9))
+        self.timer_action.pack(side="left", padx=2)
+        self.timer_sec = ctk.CTkEntry(ctrl_row, width=40, placeholder_text="sec",
+                                       font=("Consolas", 9))
+        self.timer_sec.pack(side="left", padx=2)
+        ctk.CTkButton(ctrl_row, text="Set", width=40, font=("Consolas", 10),
+                        fg_color=COLORS["warn"], text_color="#000",
+                        command=self.cmd_timer_set).pack(side="left", padx=3)
+        ctk.CTkButton(ctrl_row, text="Clear", width=45, font=("Consolas", 10),
+                        fg_color=COLORS["faint"], text_color=COLORS["text"],
+                        command=self.cmd_timer_clear).pack(side="left", padx=2)
+
+        # Separator
+        ctk.CTkLabel(ctrl_row, text="│", text_color=COLORS["faint"]).pack(side="left", padx=5)
+
+        # Auto-poll controls
+        ctk.CTkLabel(ctrl_row, text="AutoPoll:", text_color=COLORS["dim"],
+                      font=("Consolas", 9)).pack(side="left", padx=2)
+        self.ap_target = ctk.CTkEntry(ctrl_row, width=50, placeholder_text="ID",
+                                       font=("Consolas", 9))
+        self.ap_target.pack(side="left", padx=2)
+        self.ap_interval = ctk.CTkEntry(ctrl_row, width=40, placeholder_text="sec",
+                                         font=("Consolas", 9))
+        self.ap_interval.pack(side="left", padx=2)
+        ctk.CTkButton(ctrl_row, text="Start", width=45, font=("Consolas", 10),
+                        fg_color=COLORS["good"], text_color="#000",
+                        command=self.cmd_autopoll_start).pack(side="left", padx=2)
+        ctk.CTkButton(ctrl_row, text="Stop", width=40, font=("Consolas", 10),
+                        fg_color=COLORS["bad"], text_color="#FFF",
+                        command=self.cmd_autopoll_stop).pack(side="left", padx=2)
 
         # Packet waterfall
         wf_frame = ctk.CTkFrame(self.root, fg_color=COLORS["panel"], corner_radius=8, height=130)
@@ -483,6 +559,16 @@ class GatewayGUIApp:
                 if len(self.packet_history) > 500:
                     self.packet_history.pop(0)
 
+                # Auto-decrypt and extract SDATA from MSG packets
+                if parsed.get("type") == "MSG":
+                    aes_key = self.aes_entry.get().strip()
+                    encrypted = parsed.get("encrypted", "")
+                    msg_id = parsed.get("msg_id", "")
+                    if len(aes_key) == 16 and encrypted:
+                        plain = decrypt_message(encrypted, msg_id, aes_key)
+                        if plain and plain.startswith("SDATA,"):
+                            self._parse_sdata(plain)
+
         elif etype == "stats":
             for key in ("radio_rx", "radio_tx", "peer_rx", "peer_tx"):
                 if key in event and key in self.stat_labels:
@@ -502,6 +588,9 @@ class GatewayGUIApp:
             # Try to extract node ID from status
             if text.startswith("ID:"):
                 self.local_id = text.split()[-1].strip()
+            # Parse direct SDATA from serial (local POLL response)
+            elif text.startswith("SDATA,"):
+                self._parse_sdata(text)
 
         elif etype == "log":
             pass  # Could add a log panel later
@@ -710,6 +799,123 @@ class GatewayGUIApp:
             self.decrypt_result.configure(text=f'Plain: "{plain}"', text_color=COLORS["good"])
         else:
             self.decrypt_result.configure(text="Decrypt failed (wrong key or auth failed)", text_color=COLORS["bad"])
+
+    # ─── Serial Commands ───────────────────────────────────
+
+    def _send_serial(self, cmd: str):
+        """Send a command to the connected node via serial."""
+        if self.gateway and self.gateway.serial_conn:
+            try:
+                self.gateway.serial_conn.write(f"{cmd}\n".encode("ascii"))
+            except Exception:
+                pass
+
+    def cmd_poll_local(self):
+        self._send_serial("POLL")
+
+    def cmd_poll_remote(self):
+        target = self.poll_target.get().strip()
+        if target:
+            self._send_serial(f"POLL,{target}")
+
+    def cmd_timer_set(self):
+        pin = self.timer_pin.get().strip()
+        action = self.timer_action.get().strip()
+        sec = self.timer_sec.get().strip()
+        if pin and sec:
+            if action == "PULSE":
+                self._send_serial(f"TIMER,{pin},PULSE,{sec},{sec},0")
+            else:
+                self._send_serial(f"TIMER,{pin},{action},{sec}")
+
+    def cmd_timer_clear(self):
+        self._send_serial("TIMER,CLEAR")
+
+    def cmd_autopoll_start(self):
+        target = self.ap_target.get().strip()
+        interval = self.ap_interval.get().strip()
+        if target and interval:
+            self._send_serial(f"AUTOPOLL,{target},{interval}")
+
+    def cmd_autopoll_stop(self):
+        self._send_serial("AUTOPOLL,OFF")
+
+    # ─── Sensor Dashboard ──────────────────────────────────
+
+    def _parse_sdata(self, line: str):
+        """Parse SDATA,<nodeId>,<pin>:<val>,... and store readings."""
+        parts = line.split(",")
+        if len(parts) < 3:
+            return
+        node_id = parts[1]
+        now = time.time()
+        for part in parts[2:]:
+            pv = part.split(":")
+            if len(pv) != 2:
+                continue
+            try:
+                pin, val = int(pv[0]), int(pv[1])
+            except ValueError:
+                continue
+            key = f"{node_id}:{pin}"
+            if key not in self.sensor_data:
+                self.sensor_data[key] = []
+            self.sensor_data[key].append((now, val))
+            if len(self.sensor_data[key]) > self.max_sensor_history:
+                self.sensor_data[key] = self.sensor_data[key][-self.max_sensor_history:]
+
+    def redraw_sensors(self):
+        """Redraw sensor sparkline canvas."""
+        c = self.sensor_canvas
+        c.delete("all")
+        w = c.winfo_width() or 400
+        h = c.winfo_height() or 100
+
+        if not self.sensor_data:
+            aes_key = self.aes_entry.get().strip()
+            hint = "Enter 16-char AES key to decode sensor data" if len(aes_key) != 16 else "Waiting for SDATA packets..."
+            c.create_text(w // 2, h // 2, text=hint,
+                           fill=COLORS["dim"], font=("Consolas", 10))
+            self.root.after(2000, self.redraw_sensors)
+            return
+
+        keys = sorted(self.sensor_data.keys())
+        n = len(keys)
+        chart_w = max(60, (w - 20) // min(n, 6))
+        chart_h = 60
+        palette = ["#00E5FF", "#00E676", "#FF9100", "#448AFF", "#FF5252", "#FFE000"]
+
+        for idx, key in enumerate(keys[:12]):
+            col = idx % 6
+            row = idx // 6
+            x0 = 10 + col * chart_w
+            y0 = 5 + row * (chart_h + 20)
+
+            readings = self.sensor_data[key]
+            values = [v for _, v in readings]
+
+            # Label + current value
+            c.create_text(x0 + chart_w // 2, y0, text=key, fill=COLORS["text"],
+                           font=("Consolas", 8), anchor="n")
+            c.create_text(x0 + chart_w - 5, y0, text=str(values[-1]),
+                           fill=palette[idx % len(palette)], font=("Consolas", 9, "bold"), anchor="ne")
+
+            # Sparkline
+            if len(values) >= 2:
+                max_v = max(values)
+                min_v = min(values)
+                vrange = max(max_v - min_v, 1)
+                step = (chart_w - 10) / (len(values) - 1)
+                sy = y0 + 12
+                points = []
+                for i, v in enumerate(values):
+                    px = x0 + 5 + i * step
+                    py = sy + chart_h - 12 - ((v - min_v) / vrange * (chart_h - 16))
+                    points.extend([px, py])
+                if len(points) >= 4:
+                    c.create_line(points, fill=palette[idx % len(palette)], width=2, smooth=True)
+
+        self.root.after(2000, self.redraw_sensors)
 
     # ─── Lifecycle ──────────────────────────────────────────
 
