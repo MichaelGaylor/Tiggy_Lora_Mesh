@@ -985,7 +985,7 @@ nonce(<span class="number">12</span> bytes) || ciphertext(N bytes) || tag(<span 
   <tr><th>Mechanism</th><th>Detail</th></tr>
   <tr><td><strong>Jitter Delay</strong></td><td>Random 50&ndash;500ms wait before forwarding. Prevents multiple nodes forwarding simultaneously.</td></tr>
   <tr><td><strong>Listen-Before-Talk</strong></td><td>Scans channel RSSI before transmitting. If &gt; -120 dBm, waits up to 200ms for channel to clear.</td></tr>
-  <tr><td><strong>Duty Cycle</strong></td><td>Tracks total airtime. Refuses to transmit if &gt;10% of the last hour was spent transmitting (EU 868 MHz legal compliance).</td></tr>
+  <tr><td><strong>Duty Cycle</strong></td><td>Tracks total airtime. The 10% budget (EU 868 MHz legal limit) is <strong>split</strong>: local traffic (messages, heartbeats, setpoint actions) is capped at <strong>7%</strong>, reserving <strong>3% exclusively for forwarding</strong>. This guarantees that a node acting as a repeater will never refuse to forward other nodes' packets because its own automation commands used up the budget.</td></tr>
   <tr><td><strong>Heartbeat Jitter</strong></td><td>Heartbeats sent every 30s &plusmn;2s random offset to prevent periodic collisions.</td></tr>
 </table>
 
@@ -1475,6 +1475,9 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
 <span class="keyword">AUTOPOLL</span> &lt;id&gt; &lt;sec&gt;    <span class="comment">Start auto-polling   e.g. AUTOPOLL FFFF 300</span>
 <span class="keyword">AUTOPOLL OFF</span>           <span class="comment">Stop auto-polling</span>
 <span class="keyword">PINMODE</span> &lt;pin&gt; &lt;mode&gt;   <span class="comment">Set sensor mode      e.g. PINMODE 34 PULSE (or AUTO)</span>
+<span class="keyword">PINMODE</span> &lt;pin&gt; PULSE &lt;ms&gt; <span class="comment">Pulse mode + sample window  e.g. PINMODE 5 PULSE 3000</span>
+<span class="keyword">EXPAND ON</span>              <span class="comment">Enable IO expansion board on UART2</span>
+<span class="keyword">EXPAND OFF</span>             <span class="comment">Disable IO expansion board</span>
 <span class="keyword">SOLAR ON</span>               <span class="comment">Enable solar/low-power mode (SX1262 boards only)</span>
 <span class="keyword">SOLAR OFF</span>              <span class="comment">Disable solar mode, restore normal operation</span>
 
@@ -1569,15 +1572,27 @@ TIMER,4,PULSE,300,600,3</pre>
 <section id="setpoints">
 <h2>15. Cross-Node Setpoint Rules</h2>
 
-<p>Setpoints are conditional automation rules: &ldquo;when sensor X crosses threshold Y, send a command to node Z&rsquo;s relay.&rdquo; Up to 4 rules per node, stored in RAM (not persisted across reboot).</p>
+<p>Setpoints are conditional automation rules that run <strong>on the node itself</strong> &mdash; no gateway needed. The node reads its own sensor, evaluates the condition locally, and only uses the radio when the condition triggers. This is far more efficient than gateway-polled rules.</p>
 
-<h3>Setpoint Commands</h3>
+<div class="info-box green">
+  <p><strong>Why on-node matters:</strong> A gateway rule polls the sensor every 5 seconds (3 radio transmissions per cycle even when nothing changes). An on-node setpoint uses <strong>zero radio</strong> until the condition triggers &mdash; then sends one packet. For battery/solar nodes this is critical.</p>
+</div>
+
+<h3>Two Action Types</h3>
 <table>
-  <tr><th>Command</th><th>Format</th><th>Description</th></tr>
-  <tr><td>Set Rule</td><td><code>SETPOINT,&lt;sensorPin&gt;,&lt;op&gt;,&lt;threshold&gt;,&lt;targetNode&gt;,&lt;relayPin&gt;,&lt;action&gt;</code></td>
-    <td>When <code>sensorPin</code> reading matches <code>op threshold</code>, send <code>CMD,SET,relayPin,action</code> to <code>targetNode</code>.</td></tr>
-  <tr><td>List</td><td><code>SETPOINT,LIST</code></td><td>Returns active setpoint rules.</td></tr>
-  <tr><td>Clear</td><td><code>SETPOINT,CLEAR</code></td><td>Removes all setpoint rules.</td></tr>
+  <tr><th>Type</th><th>Format</th><th>Description</th></tr>
+  <tr>
+    <td><strong>Relay</strong></td>
+    <td><code>SETPOINT,&lt;pin&gt;,&lt;op&gt;,&lt;threshold&gt;,&lt;target&gt;,&lt;relayPin&gt;,&lt;action&gt;</code></td>
+    <td>When condition triggers, send <code>CMD,SET</code> to target node. If target is <strong>self</strong>, the relay is set directly via <code>digitalWrite()</code> with zero radio usage.</td>
+  </tr>
+  <tr>
+    <td><strong>Message</strong></td>
+    <td><code>SETPOINT,&lt;pin&gt;,&lt;op&gt;,&lt;threshold&gt;,MSG,&lt;msgTrue&gt;[,&lt;msgFalse&gt;]</code></td>
+    <td>Broadcasts a text message when condition becomes true (e.g., &ldquo;Gate open&rdquo;) and optionally a different message when it clears (e.g., &ldquo;Gate closed&rdquo;).</td>
+  </tr>
+  <tr><td><strong>List</strong></td><td><code>SETPOINT,LIST</code></td><td>Returns all active setpoint rules.</td></tr>
+  <tr><td><strong>Clear</strong></td><td><code>SETPOINT,CLEAR</code></td><td>Removes all setpoint rules.</td></tr>
 </table>
 
 <h3>Operators</h3>
@@ -1585,24 +1600,50 @@ TIMER,4,PULSE,300,600,3</pre>
   <tr><th>Op</th><th>Meaning</th><th>Example</th></tr>
   <tr><td><code>GT</code></td><td>Greater than</td><td>Temperature above threshold &rarr; turn on fan</td></tr>
   <tr><td><code>LT</code></td><td>Less than</td><td>Soil moisture below threshold &rarr; turn on pump</td></tr>
-  <tr><td><code>EQ</code></td><td>Equal to</td><td>Digital input matches value &rarr; trigger relay</td></tr>
+  <tr><td><code>EQ</code></td><td>Equal to</td><td>Digital input = 1 &rarr; broadcast &ldquo;Gate open&rdquo;</td></tr>
+  <tr><td><code>GE</code></td><td>Greater or equal</td><td>Wind speed &ge; 15 m/s &rarr; sound alarm</td></tr>
+  <tr><td><code>LE</code></td><td>Less or equal</td><td>Battery &le; 3.3V &rarr; send low-battery alert</td></tr>
+  <tr><td><code>NE</code></td><td>Not equal</td><td>Value changed from expected &rarr; alert</td></tr>
+</table>
+
+<h3>Optional Suffixes: Scale &amp; Debounce</h3>
+<p>Append these to any setpoint command to add signal processing on the node:</p>
+<table>
+  <tr><th>Suffix</th><th>Format</th><th>What It Does</th></tr>
+  <tr>
+    <td><strong>SCALE</strong></td>
+    <td><code>,SCALE,&lt;factor&gt;,&lt;offset&gt;</code></td>
+    <td>Converts raw sensor reading to engineering units before comparison: <code>scaled = raw &times; factor + offset</code>. This means the threshold is in real units (m/s, &deg;C, etc.) not raw ADC counts.</td>
+  </tr>
+  <tr>
+    <td><strong>DEBOUNCE</strong></td>
+    <td><code>,DEBOUNCE,&lt;ms&gt;</code></td>
+    <td>Condition must stay true for this many milliseconds before the action fires. Filters out noise and brief spikes. If the condition goes false before the timer expires, it resets.</td>
+  </tr>
 </table>
 
 <h3>Safety Features</h3>
 <ul style="color:var(--dim); padding-left:20px;">
   <li><strong>Hysteresis:</strong> After triggering, the sensor must move past the threshold by 10% in the opposite direction before re-triggering.</li>
   <li><strong>Cooldown:</strong> 10-second minimum between triggers per rule.</li>
-  <li><strong>Cross-node:</strong> The action is sent as an encrypted <code>CMD,SET</code> mesh packet to the target node &mdash; the sensor and relay can be on different physical devices.</li>
-  <li>When a setpoint fires, the node sends <code>SETPOINT,FIRED,&lt;sensorPin&gt;,&lt;value&gt;</code> over BLE.</li>
+  <li><strong>One TX per loop cycle:</strong> If multiple setpoints trigger simultaneously, only one radio transmission happens per loop iteration. This prevents back-to-back transmissions that could interfere with packet reception.</li>
+  <li><strong>Local relay shortcut:</strong> When the target node is the same as the sensor node, <code>digitalWrite()</code> is called directly &mdash; no radio packet is generated at all.</li>
+  <li>When a setpoint fires, the node sends <code>SETPOINT,FIRED,&lt;sensorPin&gt;,&lt;value&gt;</code> over BLE for monitoring.</li>
 </ul>
 
-<h3>Example: Frost Protection</h3>
-<pre><span class="comment"># When temp sensor (GPIO 34) drops below 300 (3.0°C on 0-4095 scale),</span>
-<span class="comment"># turn on heater (GPIO 4) on node 0010</span>
-SETPOINT,34,LT,300,0010,4,1
+<h3>Examples</h3>
+<pre><span class="comment"># Gate monitor: broadcast "Gate open" / "Gate closed" on digital input change</span>
+SETPOINT,5,EQ,1,MSG,Gate open,Gate closed
 
-<span class="comment"># When temp rises above 500 (5.0°C), turn heater off</span>
-SETPOINT,34,GT,500,0010,4,0</pre>
+<span class="comment"># Wind alarm: Scale raw pulse rate to m/s, alarm if >= 15 m/s, debounce 3s</span>
+SETPOINT,5,GE,15.0,0010,2,1,SCALE,0.4524,0,DEBOUNCE,3000
+
+<span class="comment"># Frost protection: Scale ADC to °C, trigger heater when < 3°C</span>
+SETPOINT,34,LT,3.0,0010,4,1,SCALE,0.0244,-10.0
+
+<span class="comment"># Local relay: target is self (same node), no radio needed</span>
+SETPOINT,34,GT,2000,0001,4,1
+<span class="comment"># (where 0001 is this node's own ID)</span></pre>
 </section>
 
 <!-- ═══════════════ SENSOR MONITORING ═══════════════ -->
@@ -1684,14 +1725,15 @@ SDATA,0010,34:2048,36:1200,39:4095</pre>
 <section id="pulse-counter">
 <h2>17. Pulse Counter Mode (Wind Speed, Flow Meters)</h2>
 
-<p>Sensor pins can be switched from analog/digital read mode to <strong>pulse counter mode</strong>, where hardware interrupts count rising-edge pulses. This is ideal for anemometers, flow meters, rain gauges, and other pulse-output sensors.</p>
+<p>Sensor pins can be switched from analog/digital read mode to <strong>pulse counter mode</strong>, where hardware interrupts count rising-edge pulses. The firmware calculates <strong>pulses per second</strong> over a configurable sample window, so SDATA and setpoint rules work with rate values, not raw counts.</p>
 
 <h3>How It Works</h3>
 <ul style="color:var(--dim); padding-left:20px;">
   <li>Up to <strong>4 sensor pins</strong> can be set to pulse mode simultaneously.</li>
   <li>Each pin uses a dedicated hardware interrupt (IRAM_ATTR ISR, &lt;1&mu;s execution).</li>
-  <li>The SDATA response returns the <strong>pulse count since last read</strong> (delta), not total count. This lets you calculate frequency from the polling interval.</li>
+  <li>The firmware calculates <strong>pulses per second</strong> using a configurable sample window (default 5 seconds). The SDATA response returns <strong>rate &times; 100</strong> (centipulses per second) for integer precision.</li>
   <li>Pulse counters do <strong>not interfere with radio reception</strong> &mdash; the ISR is a single atomic increment that completes in nanoseconds, while LoRa packet reception takes milliseconds.</li>
+  <li>Use a <strong>setpoint with SCALE</strong> to convert the rate to engineering units on the node itself (e.g., pulses/sec &rarr; m/s for wind speed).</li>
 </ul>
 
 <h3>Commands</h3>
@@ -1699,30 +1741,33 @@ SDATA,0010,34:2048,36:1200,39:4095</pre>
   <tr><th>Interface</th><th>Command</th><th>Response</th></tr>
   <tr><td>BLE</td><td><code>PINMODE,&lt;pin&gt;,PULSE</code></td><td><code>OK,PINMODE,&lt;pin&gt;,PULSE</code></td></tr>
   <tr><td>BLE</td><td><code>PINMODE,&lt;pin&gt;,AUTO</code></td><td><code>OK,PINMODE,&lt;pin&gt;,AUTO</code></td></tr>
-  <tr><td>Serial</td><td><code>PINMODE &lt;pin&gt; PULSE</code></td><td><code>OK: Pin &lt;pin&gt; set to PULSE mode</code></td></tr>
+  <tr><td>Serial</td><td><code>PINMODE &lt;pin&gt; PULSE</code></td><td><code>OK: Pin &lt;pin&gt; set to PULSE mode (window=5000ms)</code></td></tr>
+  <tr><td>Serial</td><td><code>PINMODE &lt;pin&gt; PULSE &lt;windowMs&gt;</code></td><td><code>OK: Pin &lt;pin&gt; set to PULSE mode (window=&lt;windowMs&gt;ms)</code></td></tr>
   <tr><td>Serial</td><td><code>PINMODE &lt;pin&gt; AUTO</code></td><td><code>OK: Pin &lt;pin&gt; set to AUTO mode</code></td></tr>
 </table>
 
+<h3>Rate Calculation</h3>
+<p>Every sample window (default 5 seconds), the firmware reads the pulse count, calculates the delta since last read, and divides by elapsed time to get <strong>pulses per second</strong>. The SDATA value for pulse pins is <code>rate &times; 100</code> &mdash; so a reading of <code>470</code> means <strong>4.70 pulses per second</strong>.</p>
+
 <h3>Example: Wind Speed from Anemometer</h3>
 <pre>
-<span class="comment"># Configure sensor pin 34 for pulse counting</span>
-<span class="keyword">PINMODE 34 PULSE</span>
+<span class="comment"># Configure sensor pin 5 for pulse counting (3-second window)</span>
+<span class="keyword">PINMODE 5 PULSE 3000</span>
 
-<span class="comment"># Set up auto-poll every 10 seconds (local node)</span>
-<span class="keyword">AUTOPOLL FFFF 10</span>
-
-<span class="comment"># SDATA response shows pulses since last read:</span>
-<span class="comment"># SDATA,0010,34:47,36:2048</span>
-<span class="comment">#   pin 34: 47 pulses in 10 seconds = 4.7 Hz</span>
+<span class="comment"># SDATA response shows rate × 100 (centipulses/sec):</span>
+<span class="comment"># SDATA,0010,5:470,36:2048</span>
+<span class="comment">#   pin 5: 470 = 4.70 pulses/sec</span>
 <span class="comment">#   pin 36: 2048 (analog read, temperature sensor)</span>
+
+<span class="comment"># On-node setpoint: scale pulse rate to m/s, alarm at 15 m/s</span>
+<span class="comment"># For an anemometer with 7.2cm arm, 1 PPR:</span>
+<span class="comment">#   speed_ms = pulses_per_sec × 2π × 0.072 = rate × 0.4524</span>
+<span class="comment"># But SDATA gives rate×100, so scaleFactor = 0.4524 / 100 = 0.004524</span>
+<span class="keyword">SETPOINT,5,GE,15.0,0010,2,1,SCALE,0.004524,0</span>
 </pre>
 
-<div class="info-box cyan">
-  <p><strong>Calculating wind speed:</strong> Most anemometers produce a known number of pulses per revolution. If your sensor outputs 1 pulse/rev and 1 rev = 2.4 km/h: <code>wind_speed = pulses / interval * 2.4</code>. Check your sensor's datasheet for the calibration factor.</p>
-</div>
-
 <div class="info-box orange">
-  <p><strong>Pin requirements:</strong> Pulse counter pins must support hardware interrupts. On ESP32, most GPIO pins support interrupts. The pin is configured as <code>INPUT_PULLUP</code> when pulse mode is enabled. Use <code>PINMODE &lt;pin&gt; AUTO</code> to revert to normal analog/digital read.</p>
+  <p><strong>Pin requirements:</strong> Pulse counter pins must support hardware interrupts. On ESP32, most GPIO pins support interrupts. The pin is configured as <code>INPUT_PULLUP</code> when pulse mode is enabled. Use <code>PINMODE &lt;pin&gt; AUTO</code> to revert to normal analog/digital read. Minimum sample window is 100ms.</p>
 </div>
 </section>
 
@@ -2343,20 +2388,24 @@ gateway/
 <!-- ─── Deploy to Node ─── -->
 
 <h3>Deploy to Node (Firmware Setpoints)</h3>
-<p>For simple rules that match the firmware setpoint format, you can push the rule directly to a node so it runs <strong>autonomously without the gateway</strong>. Click the <strong>[Deploy]</strong> button to attempt this.</p>
+<p>For rules that match the firmware setpoint format, you can push the rule directly to a node so it runs <strong>autonomously without the gateway</strong>. Click the <strong>[Deploy]</strong> button to attempt this. Deployed rules use <strong>zero radio</strong> for monitoring &mdash; they only transmit when the condition triggers.</p>
 
-<p>A rule can be deployed as a firmware setpoint if it has exactly:</p>
+<p>A rule can be deployed as a firmware setpoint if it contains:</p>
 <ol style="color:var(--dim); padding-left:20px;">
   <li>One <strong>Sensor Read</strong> block</li>
-  <li>One <strong>Compare</strong> block (with operator &gt;, &lt;, or = only)</li>
-  <li>One <strong>Set Relay</strong> block</li>
+  <li>One <strong>Compare</strong> block (any operator: &gt;, &lt;, =, &ge;, &le;, &ne;)</li>
+  <li>One action: <strong>Set Relay</strong> or <strong>Broadcast Message</strong></li>
+  <li>Optionally one <strong>Scale</strong> block (factor + offset applied before comparison)</li>
+  <li>Optionally one <strong>Debounce</strong> block (hold time before firing)</li>
+  <li>One <strong>Constant</strong> block (the threshold value)</li>
 </ol>
 
-<p>The gateway sends a <code>SETPOINT</code> command to the node:</p>
-<pre>SETPOINT,&lt;sensorPin&gt;,&lt;operator&gt;,&lt;threshold&gt;,&lt;targetNode&gt;,&lt;relayPin&gt;,&lt;action&gt;</pre>
+<p>The gateway builds an expanded <code>SETPOINT</code> command with optional suffixes:</p>
+<pre>SETPOINT,&lt;pin&gt;,&lt;op&gt;,&lt;threshold&gt;,&lt;target&gt;,&lt;relayPin&gt;,&lt;action&gt;[,SCALE,&lt;f&gt;,&lt;o&gt;][,DEBOUNCE,&lt;ms&gt;]
+SETPOINT,&lt;pin&gt;,&lt;op&gt;,&lt;threshold&gt;,MSG,&lt;msgTrue&gt;[,&lt;msgFalse&gt;][,SCALE,&lt;f&gt;,&lt;o&gt;][,DEBOUNCE,&lt;ms&gt;]</pre>
 
 <div class="info-box orange">
-  <p><strong>Limitation:</strong> Firmware setpoints only support GT (greater than), LT (less than), and EQ (equal to) operators. Rules using transforms, logic gates, messages, or other operators can only run as gateway-evaluated rules. Each node supports a maximum of 4 setpoints.</p>
+  <p><strong>Limitation:</strong> Rules using Moving Average, Delta Rate, AND/OR/NOT gates, Latch, Pulse Relay, or Direct Message blocks cannot deploy to node &mdash; they can only run as gateway-evaluated rules. Each node supports a maximum of 4 setpoints (RAM only, lost on reboot).</p>
 </div>
 
 <!-- ─── Examples ─── -->
@@ -3175,9 +3224,76 @@ https://your-machine.tail1234.ts.net/</pre>
 </table>
 </section>
 
+<!-- ═══════════════ IO EXPANSION ═══════════════ -->
+<section id="io-expansion">
+<h2>32. IO Expansion Board (UART2 Daisy-Chain)</h2>
+
+<p>You can daisy-chain a <strong>second ESP32</strong> to any repeater node as an <strong>IO expansion board</strong>, adding up to 16 additional sensor inputs and relay outputs. The expansion board connects via UART (serial) and has no LoRa radio &mdash; it is a simple IO slave controlled by the main mesh node.</p>
+
+<div class="info-box green">
+  <p><strong>Why use an expansion board?</strong> Repeater nodes have limited free GPIO (typically 3&ndash;6 pins shared between sensors and relays). An expansion board gives you 6+ extra analog inputs and 6+ relay outputs using a cheap ESP32 devkit (&pound;3&ndash;5). The main node handles all mesh communication; the expansion board just reads sensors and sets pins.</p>
+</div>
+
+<h3>Wiring</h3>
+<p>Connect <strong>3 wires</strong> between the main node and the expansion ESP32:</p>
+<table>
+  <tr><th>Main Node</th><th>&harr;</th><th>Expansion Board</th></tr>
+  <tr><td>UART2 TX</td><td>&rarr;</td><td>RX (GPIO 3 or Serial RX)</td></tr>
+  <tr><td>UART2 RX</td><td>&larr;</td><td>TX (GPIO 1 or Serial TX)</td></tr>
+  <tr><td>GND</td><td>&mdash;</td><td>GND</td></tr>
+</table>
+
+<h4>UART2 Pins per Board</h4>
+<table>
+  <tr><th>Main Node Board</th><th>TX Pin</th><th>RX Pin</th></tr>
+  <tr><td>Heltec V3 / V4</td><td>GPIO 2</td><td>GPIO 3</td></tr>
+  <tr><td>XIAO ESP32S3</td><td>GPIO 2</td><td>GPIO 4</td></tr>
+  <tr><td>LoRa32 T3</td><td>GPIO 17</td><td>GPIO 16</td></tr>
+  <tr><td>Heltec V2</td><td>GPIO 17</td><td>GPIO 13</td></tr>
+</table>
+
+<h3>Enabling</h3>
+<pre><span class="comment"># Enable IO expansion (opens UART2 at 115200 baud)</span>
+<span class="keyword">EXPAND ON</span>
+
+<span class="comment"># Disable IO expansion</span>
+<span class="keyword">EXPAND OFF</span></pre>
+
+<h3>Virtual Pins</h3>
+<p>Once enabled, the expansion board's sensors appear as <strong>virtual pins 100&ndash;115</strong> on the main node. You can use these in setpoint rules, auto-poll SDATA, and the Logic Builder just like regular GPIO pins.</p>
+<pre><span class="comment"># Setpoint using expansion board sensor on virtual pin 100</span>
+SETPOINT,100,GT,2000,0010,4,1
+
+<span class="comment"># The main node polls the expansion board every 2 seconds</span>
+<span class="comment"># and caches the values. readSensorPin(100) returns the cached value.</span></pre>
+
+<h3>Serial Protocol</h3>
+<p>The main node and expansion board communicate over a simple ASCII line protocol at 115200 baud:</p>
+<table>
+  <tr><th>Main Sends</th><th>Expansion Responds</th><th>Purpose</th></tr>
+  <tr><td><code>?S</code></td><td><code>S,34:2048,36:1024,...</code></td><td>Read all sensors</td></tr>
+  <tr><td><code>?S,34</code></td><td><code>S,34:2048</code></td><td>Read single sensor</td></tr>
+  <tr><td><code>!R,4,1</code></td><td><code>R,OK</code></td><td>Set relay pin 4 HIGH</td></tr>
+  <tr><td><code>?P</code></td><td><code>P,5:1234,...</code></td><td>Read pulse counters</td></tr>
+  <tr><td><code>?I</code></td><td><code>I,ESP32,6S,6R</code></td><td>Identify board (6 sensors, 6 relays)</td></tr>
+  <tr><td><code>!P,5</code></td><td><code>P,OK,5</code></td><td>Enable pulse counter on pin 5</td></tr>
+</table>
+
+<h3>Expansion Board Firmware</h3>
+<p>The expansion board runs a separate, minimal firmware (<code>io-expansion</code> build target). It has no LoRa, no BLE, no mesh &mdash; just serial IO. Flash it using the web flasher or PlatformIO:</p>
+<pre>pio run -e io-expansion -t upload</pre>
+<p>Edit the pin arrays at the top of <code>src/io_expansion.cpp</code> to match your wiring:</p>
+<pre>const int SENSOR_PINS[] = {34, 35, 36, 39, 32, 33};  <span class="comment">// Analog/digital inputs</span>
+const int RELAY_PINS[]  = {2, 4, 5, 12, 13, 14};      <span class="comment">// Digital outputs</span></pre>
+
+<div class="info-box orange">
+  <p><strong>Non-blocking:</strong> The main node polls the expansion board every 2 seconds and caches the response. Sensor reads from virtual pins return the cached value instantly &mdash; there is no blocking serial wait that could delay LoRa reception.</p>
+</div>
+</section>
+
 <!-- ═══════════════ CAVEATS ═══════════════ -->
 <section id="caveats">
-<h2>32. Known Issues &amp; Board-Specific Caveats</h2>
+<h2>33. Known Issues &amp; Board-Specific Caveats</h2>
 
 <h3>Board-Specific Issues</h3>
 <table>
@@ -3219,7 +3335,7 @@ https://your-machine.tail1234.ts.net/</pre>
 <div style="background:var(--panel); border-top:1px solid var(--faint); padding:30px 40px; text-align:center; color:var(--faint); font-size:0.85em;">
   <p>TiggyOpenMesh v4.0 &mdash; MeshCore Architecture</p>
   <p>T-Deck Plus &bull; LoRa32 T3 V1.6.1 &bull; Heltec WiFi LoRa 32 V3 &bull; Heltec WiFi LoRa 32 V4 &bull; XIAO ESP32S3</p>
-  <p>32 sections &mdash; Hardware, Protocol, UI, BLE, Gateway, Logic Builder, Timers, Setpoints, Sensors, Pulse Counters, SOS, Map, Solar, Delivery, SF Change, Collision Detection, Caveats</p>
+  <p>33 sections &mdash; Hardware, Protocol, UI, BLE, Gateway, Logic Builder, Timers, Setpoints, Sensors, Pulse Counters, SOS, Map, Solar, Delivery, SF Change, Collision Detection, IO Expansion, Caveats</p>
   <p style="margin-top:8px;">Documentation generated March 2026</p>
 </div>
 
