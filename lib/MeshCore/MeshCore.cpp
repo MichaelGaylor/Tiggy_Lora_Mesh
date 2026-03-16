@@ -259,7 +259,18 @@ bool MeshCore::canTransmit() {
         hourStart = now;
         txTimeThisHour = 0;
     }
-    // 10% duty cycle = 360 seconds per hour
+    // Local traffic capped at 7% (252s/hr) — reserves 3% for forwarding
+    return txTimeThisHour < 252000UL;
+}
+
+bool MeshCore::canForward() {
+    unsigned long now = millis();
+    if (now - hourStart > 3600000UL) {
+        hourStart = now;
+        txTimeThisHour = 0;
+    }
+    // Forwarding allowed up to the full 10% legal limit (360s/hr)
+    // Repeating other nodes' packets must NEVER be starved by local traffic
     return txTimeThisHour < 360000UL;
 }
 
@@ -281,8 +292,9 @@ bool MeshCore::waitForClearChannel(int maxWaitMs) {
 // Packet Building & Transmission
 // ═══════════════════════════════════════════════════════════════
 
-void MeshCore::transmitPacket(uint16_t dest, const String& payload) {
-    if (!canTransmit() || !onTransmitRaw) return;
+// Internal shared TX — builds packet and sends
+void MeshCore::_doTransmit(uint16_t dest, const String& payload) {
+    if (!onTransmitRaw) return;
 
     uint16_t src = strtol(localID, nullptr, 16);
     uint16_t seq = seqCounter++;
@@ -294,12 +306,23 @@ void MeshCore::transmitPacket(uint16_t dest, const String& payload) {
     pkt[6] = TTL_DEFAULT;
     memcpy(pkt + 7, payload.c_str(), payload.length());
 
-    // Listen-before-talk
     waitForClearChannel(200);
 
     unsigned long txStart = millis();
     onTransmitRaw(pkt, pktLen);
     txTimeThisHour += (millis() - txStart);
+}
+
+// Local-originated traffic (messages, heartbeats, setpoints) — capped at 7%
+void MeshCore::transmitPacket(uint16_t dest, const String& payload) {
+    if (!canTransmit()) return;
+    _doTransmit(dest, payload);
+}
+
+// Forwarded traffic (repeating others' packets) — full 10% budget
+void MeshCore::forwardPacket(uint16_t dest, const String& payload) {
+    if (!canForward()) return;
+    _doTransmit(dest, payload);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -316,7 +339,7 @@ void MeshCore::smartForward(const String& from, const String& to,
                             const String& route, const String& enc,
                             uint16_t rawDest) {
     if (ttl <= 1) return;
-    if (!canTransmit()) return;
+    if (!canForward()) return;  // Forwarding uses full 10% budget — never starved by local TX
 
     String newRoute = route + "," + String(localID);
     String payload = from + "," + to + "," + mid + "," +
@@ -351,7 +374,7 @@ void MeshCore::processPendingForwards() {
     unsigned long now = millis();
     for (int i = 0; i < MAX_PENDING; i++) {
         if (pendingFwds[i].active && now >= pendingFwds[i].sendAt) {
-            transmitPacket(pendingFwds[i].dest, pendingFwds[i].payload);
+            forwardPacket(pendingFwds[i].dest, pendingFwds[i].payload);
             pendingFwds[i].active = false;
             packetsForwarded++;
         }
@@ -416,9 +439,9 @@ void MeshCore::processPacket(const MeshPacket& pkt) {
                 onAck(ackFrom, ackMid);
             }
         } else if (pkt.dest != myAddr && pkt.dest != 0xFFFF && pkt.ttl > 1) {
-            // Forward ACK
+            // Forward ACK — uses forwarding budget, never blocked by local traffic
             String payload = pkt.payload;
-            transmitPacket(pkt.dest, payload);
+            forwardPacket(pkt.dest, payload);
             packetsForwarded++;
         }
         return;
@@ -453,7 +476,7 @@ void MeshCore::processPacket(const MeshPacket& pkt) {
 
                 // Rebroadcast CFG so other nodes hear it
                 if (pkt.ttl > 1) {
-                    transmitPacket(0xFFFF, pkt.payload);
+                    forwardPacket(0xFFFF, pkt.payload);
                     packetsForwarded++;
                 }
             }
@@ -476,7 +499,7 @@ void MeshCore::processPacket(const MeshPacket& pkt) {
             }
         } else if (pkt.dest != myAddr && pkt.dest != 0xFFFF && pkt.ttl > 1) {
             // Forward CFGACK toward the initiator
-            transmitPacket(pkt.dest, pkt.payload);
+            forwardPacket(pkt.dest, pkt.payload);
             packetsForwarded++;
         }
         return;
@@ -503,7 +526,7 @@ void MeshCore::processPacket(const MeshPacket& pkt) {
 
                 // Rebroadcast CFGGO so all nodes hear it
                 if (pkt.ttl > 1) {
-                    transmitPacket(0xFFFF, pkt.payload);
+                    forwardPacket(0xFFFF, pkt.payload);
                     packetsForwarded++;
                 }
             }

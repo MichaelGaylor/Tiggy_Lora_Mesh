@@ -545,3 +545,25 @@
 #else
 #error "No board defined! Add -DBOARD_TDECK_PLUS or -DBOARD_LORA32 to build_flags in platformio.ini"
 #endif
+
+// ─── IO Expansion Board UART2 Pins ──────────────────────────
+// Secondary ESP32 connected via UART2 for additional I/O.
+// Pins chosen to avoid conflict with LoRa, OLED, BLE, and sensor defaults.
+#ifndef IO_EXPAND_TX
+  #if defined(BOARD_HELTEC_V3) || defined(BOARD_HELTEC_V4)
+    #define IO_EXPAND_TX  2
+    #define IO_EXPAND_RX  3
+  #elif defined(BOARD_XIAO_S3)
+    #define IO_EXPAND_TX  2
+    #define IO_EXPAND_RX  4
+  #elif defined(BOARD_LORA32)
+    #define IO_EXPAND_TX  17
+    #define IO_EXPAND_RX  16
+  #elif defined(BOARD_HELTEC_V2)
+    #define IO_EXPAND_TX  17
+    #define IO_EXPAND_RX  13
+  #else
+    #define IO_EXPAND_TX  -1
+    #define IO_EXPAND_RX  -1
+  #endif
+#endif

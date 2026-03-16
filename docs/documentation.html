@@ -21,6 +21,7 @@
     --bubble-in: #0a3040;
     --bubble-out: #0a3010;
     --selected: #1a2a3a;
+    --comment: #7fa0b8;
   }
   * { margin:0; padding:0; box-sizing:border-box; }
   body {
@@ -184,6 +185,15 @@
     border-left: 4px solid var(--red);
   }
   .info-box p { margin-bottom: 4px; }
+
+  .callout {
+    background: rgba(0,229,255,0.08);
+    border-left: 4px solid var(--cyan);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 14px 0 20px;
+    color: var(--dim);
+  }
 
   /* T-Deck screen mockups */
   .screen {
@@ -472,6 +482,7 @@
 
 <!-- ═══════════════ NAV ═══════════════ -->
 <nav>
+  <a href="#quick-start">Quick Start</a>
   <a href="#overview">Overview</a>
   <a href="#hardware">Hardware</a>
   <a href="#architecture">Architecture</a>
@@ -488,6 +499,7 @@
   <a href="#eeprom">EEPROM Map</a>
   <a href="#building">Building</a>
   <a href="#gateway">Gateway Bridge</a>
+  <a href="#logic-builder">Logic Builder</a>
   <a href="#wifi-gateway">WiFi Gateway (ESP)</a>
   <a href="#solar">Solar Mode</a>
   <a href="#delivery-tracking">Delivery Tracking</a>
@@ -501,15 +513,100 @@
 
 <div class="container">
 
-<!-- ═══════════════ OVERVIEW ═══════════════ -->
-<section id="overview">
-<h2>1. System Overview</h2>
+<!-- ═══════════════ QUICK START ═══════════════ -->
+<section id="quick-start">
+<h2>1. Quick Start</h2>
 
-<p>TiggyOpenMesh is a fully encrypted, self-healing mesh network built on cheap ESP32 LoRa boards. Messages hop across multiple nodes to reach their destination &mdash; no internet, no cellular, no infrastructure required.</p>
+<p>If you just want to get two devices talking, start here. You do not need to understand the protocol, gateway, or code structure first.</p>
+
+<div class="info-box green">
+  <p><strong>Fastest path:</strong> flash two nodes, give them different node IDs, make sure they share the same AES key, connect from the Android app or T-Deck, and send a test message.</p>
+</div>
+
+<h3>What You Need</h3>
+<table>
+  <tr><th>Item</th><th>Minimum</th><th>Recommended</th></tr>
+  <tr><td>LoRa nodes</td><td>2</td><td>2 nodes plus 1 repeater for extra range</td></tr>
+  <tr><td>Phone</td><td>1 Android phone</td><td>Android phone with the app installed</td></tr>
+  <tr><td>USB cables</td><td>Enough to flash each board</td><td>Known good data cables, not charge-only</td></tr>
+  <tr><td>Browser</td><td>Chrome or Edge</td><td>Latest Chrome or Edge for web flashing</td></tr>
+</table>
+
+<h3>Recommended Starter Setups</h3>
+<table>
+  <tr><th>Goal</th><th>Best Option</th><th>Why</th></tr>
+  <tr><td>Cheapest repeater</td><td>XIAO ESP32S3 + Wio-SX1262</td><td>Very low cost, compact, easy to deploy</td></tr>
+  <tr><td>Best value repeater</td><td>Heltec V3</td><td>OLED status, SX1262 radio, good general-purpose choice</td></tr>
+  <tr><td>Best handheld communicator</td><td>T-Deck Plus</td><td>Keyboard, screen, GPS, and direct field use without a phone</td></tr>
+</table>
+
+<h3>10-Minute Messaging Setup</h3>
+<ol style="color:var(--dim); padding-left:20px;">
+  <li>Flash your first device from the web flasher.</li>
+  <li>Flash your second device.</li>
+  <li>On first boot, note the randomly generated AES key or set your own shared key.</li>
+  <li>Make sure both devices use the <strong>same AES key</strong>.</li>
+  <li>Make sure each device has a <strong>different node ID</strong>.</li>
+  <li>Open the Android app or use the T-Deck UI.</li>
+  <li>Connect to a node over BLE.</li>
+  <li>Send a short test message to the other node.</li>
+</ol>
 
 <div class="info-box cyan">
-  <p><strong>What makes this different from Meshtastic?</strong></p>
-  <p>Directed routing (not just blind flooding), jitter-based collision avoidance, listen-before-talk, hash-based O(1) dedup with 64 slots, duty-cycle enforcement, <strong>message delivery receipts</strong>, <strong>two-phase spreading factor changes</strong>, <strong>auto ID collision detection</strong>, <strong>display auto-sleep</strong>, <strong>live gateway coverage map</strong>, and a shared library (<code>MeshCore</code>) so all mesh logic lives in one place.</p>
+  <p><strong>Important:</strong> matching AES key, matching radio settings, and unique node IDs are the three things that must be correct before anything else will work.</p>
+</div>
+
+<h3>Add a Repeater</h3>
+<p>If you want more range, flash a third node as a repeater and place it between the two endpoints. The mesh will forward traffic automatically when it hears packets that are not for itself.</p>
+
+<div class="flow">
+  <div class="flow-box">Node A</div>
+  <span class="flow-arrow">&rarr;</span>
+  <div class="flow-box" style="border-color:var(--orange);">Repeater</div>
+  <span class="flow-arrow">&rarr;</span>
+  <div class="flow-box">Node B</div>
+</div>
+
+<h3>Add Alerts or Remote Control</h3>
+<p>Once basic messaging works, connect a relay or sensor to a repeater node. From the Android app or T-Deck you can then read inputs, trigger outputs, and optionally forward group alerts to Telegram when a phone has internet access.</p>
+
+<h3>First Things To Configure</h3>
+<ul style="color:var(--dim); padding-left:20px;">
+  <li><strong>Node ID:</strong> each device must be unique</li>
+  <li><strong>AES key:</strong> every device in the same mesh must share the same key</li>
+  <li><strong>Target node:</strong> direct message target or <code>FFFF</code> for broadcast</li>
+  <li><strong>Telegram settings:</strong> optional, only needed for phone-based alert forwarding</li>
+  <li><strong>Gateway settings:</strong> optional, only needed for map or internet bridging</li>
+</ul>
+
+<h3>If It Does Not Work</h3>
+<table>
+  <tr><th>Symptom</th><th>Most likely cause</th></tr>
+  <tr><td>Nodes do not see each other</td><td>Different AES key, mismatched radio settings, bad antenna, or same node ID</td></tr>
+  <tr><td>BLE app cannot connect</td><td>Wrong firmware type, BLE disabled, or board is in solar mode</td></tr>
+  <tr><td>Message sends but never delivers</td><td>Target unreachable, wrong target ID, weak link, or ACK lost</td></tr>
+  <tr><td>Gateway does not appear on map</td><td>No location configured or hub connection not active</td></tr>
+</table>
+
+<div class="info-box orange">
+  <p><strong>Then keep reading:</strong> the rest of this page is the full reference manual covering boards, UI, protocol, gateway setup, GPIO control, power modes, and troubleshooting in more depth.</p>
+</div>
+</section>
+
+<!-- ═══════════════ OVERVIEW ═══════════════ -->
+<section id="overview">
+<h2>2. System Overview</h2>
+
+<p>TiggyOpenMesh is an off-grid messaging, alerting, and remote-control system built on cheap ESP32 LoRa boards. It is designed for small private networks where you want messages, SOS alerts, sensor inputs, and relay outputs to keep working even when there is no internet or mobile coverage.</p>
+
+<div class="info-box cyan">
+  <p><strong>Best fit:</strong> farms, estates, expeditions, cabins, remote sites, event control, and hobby emergency networks.</p>
+  <p><strong>Core strengths:</strong> directed routing, message delivery receipts, relay and sensor control, Android + BLE control, T-Deck handheld UI, WiFi and PC gateway options, SOS workflows, solar repeater mode, and a shared <code>MeshCore</code> library so all radio protocol logic is maintained in one place.</p>
+</div>
+
+<div class="info-box green">
+  <p><strong>What it does in practice:</strong></p>
+  <p>Send short messages between field nodes, trigger relays remotely, read sensor inputs, repeat traffic across solar-powered nodes, and forward alerts to Telegram when any connected phone regains internet access.</p>
 </div>
 
 <h3>System Roles</h3>
@@ -547,9 +644,9 @@
   <tr><td>Frequency</td><td><code>868.0 MHz</code> (EU ISM band)</td></tr>
   <tr><td>Modulation</td><td>LoRa &mdash; SF9, BW 125 kHz, CR 4/5</td></tr>
   <tr><td>TX Power</td><td>20 dBm (28 dBm with Heltec V4 PA)</td></tr>
-  <tr><td>Encryption</td><td>AES-128-CTR with CRC-16 integrity</td></tr>
+  <tr><td>Encryption</td><td>AES-128-GCM (authenticated encryption)</td></tr>
   <tr><td>Max Hops (TTL)</td><td>5</td></tr>
-  <tr><td>Max Nodes Tracked</td><td>20</td></tr>
+  <tr><td>Max Nodes Tracked</td><td>50</td></tr>
   <tr><td>Max Message Size</td><td>200 bytes (plaintext)</td></tr>
   <tr><td>Heartbeat Interval</td><td>30 seconds (&plusmn;2s jitter)</td></tr>
   <tr><td>Route Stale Timeout</td><td>120 seconds</td></tr>
@@ -728,14 +825,14 @@ loop() {
 <table>
   <tr><th>File</th><th>Purpose</th><th>Lines</th></tr>
   <tr><td><code>lib/MeshCore/MeshCore.h</code></td><td>Shared library header &mdash; constants, structs, class definition, callbacks</td><td>~234</td></tr>
-  <tr><td><code>lib/MeshCore/MeshCore.cpp</code></td><td>All shared mesh logic &mdash; CRC, crypto, routing, dedup, forwarding, CFG auth</td><td>~500</td></tr>
-  <tr><td><code>src/main.cpp</code></td><td>T-Deck Plus full communicator &mdash; TFT UI, keyboard, GPS, menus, display sleep, delivery tracking</td><td>~1900</td></tr>
-  <tr><td><code>src/repeater.cpp</code></td><td>Headless repeater &mdash; OLED stats, BLE, GPIO, serial config, solar mode, collision detection</td><td>~600</td></tr>
-  <tr><td><code>src/gateway_wifi.cpp</code></td><td>WiFi ESP gateway &mdash; LoRa + WiFi bridge, BLE config, GWHEIGHT, hub WebSocket</td><td>~700</td></tr>
-  <tr><td><code>include/Pins.h</code></td><td>Board-specific pin definitions (5 boards + custom template)</td><td>~180</td></tr>
-  <tr><td><code>include/phrases.h</code></td><td>Quick phrase library (40 phrases, 4 categories)</td><td>~70</td></tr>
-  <tr><td><code>android-app/</code></td><td>Kotlin + Jetpack Compose BLE controller app</td><td>~900</td></tr>
-  <tr><td><code>gateway/</code></td><td>Python gateway client, hub server (headless + GUI), web map</td><td>~1200</td></tr>
+  <tr><td><code>lib/MeshCore/MeshCore.cpp</code></td><td>All shared mesh logic &mdash; CRC, crypto, routing, dedup, forwarding, CFG auth</td><td>~575</td></tr>
+  <tr><td><code>src/main.cpp</code></td><td>T-Deck Plus full communicator &mdash; TFT UI, keyboard, GPS, menus, display sleep, delivery tracking</td><td>~2300</td></tr>
+  <tr><td><code>src/repeater.cpp</code></td><td>Headless repeater &mdash; OLED stats, BLE, GPIO, serial config, solar mode, pulse counters</td><td>~1800</td></tr>
+  <tr><td><code>src/gateway_wifi.cpp</code></td><td>WiFi ESP gateway &mdash; LoRa + WiFi bridge, BLE config, GWHEIGHT, hub WebSocket</td><td>~900</td></tr>
+  <tr><td><code>include/Pins.h</code></td><td>Board-specific pin definitions (5 boards + custom template)</td><td>~550</td></tr>
+  <tr><td><code>include/phrases.h</code></td><td>Quick phrase library (40 phrases, 4 categories)</td><td>~40</td></tr>
+  <tr><td><code>android-app/</code></td><td>Kotlin + Jetpack Compose BLE controller app</td><td>~3700</td></tr>
+  <tr><td><code>gateway/</code></td><td>Python gateway client, hub server (headless + GUI), web map</td><td>~3300</td></tr>
 </table>
 </section>
 
@@ -777,15 +874,15 @@ loop() {
 <h4>Data Message Payload</h4>
 <pre>&lt;from&gt;,&lt;to&gt;,&lt;mid&gt;,&lt;ttl&gt;,&lt;route&gt;,&lt;encrypted_hex&gt;
 
-Example: <span class="string">"0001,0002,XYZW,5,0001,48656C6C6F..."</span>
+Example: <span class="string">"0001,0002,abcxyz,5,0001,48656C6C6F..."</span>
 
 Fields:
   from          4-char hex sender ID
   to            4-char hex destination (FFFF = broadcast)
-  mid           4-char message ID (A-Z random)
+  mid           6-char message ID (A-Z random)
   ttl           Remaining hop count
   route         Comma-separated path (e.g. "0001,0003,0005")
-  encrypted_hex AES-128-CTR encrypted payload (hex encoded)</pre>
+  encrypted_hex AES-128-GCM encrypted payload (hex encoded, nonce || ciphertext || tag)</pre>
 
 <h4>After Decryption &mdash; Message Types</h4>
 <table>
@@ -795,7 +892,6 @@ Fields:
   <tr><td><code>POS,</code></td><td><code>POS,51.507222,-0.127500</code></td><td>GPS position broadcast</td></tr>
   <tr><td><code>SOS,</code></td><td><code>SOS,51.507222,-0.127500</code> or <code>SOS,NOFIX</code></td><td>Emergency distress signal</td></tr>
   <tr><td><code>CMD,</code></td><td><code>CMD,SET,2,1</code></td><td>Remote GPIO command</td></tr>
-  <tr><td><code>ACK_MSG,</code></td><td><code>ACK_MSG,XYZW</code></td><td>Delivery receipt &mdash; confirms message XYZW was received and decrypted</td></tr>
 </table>
 
 <h4>Special Packets (unencrypted)</h4>
@@ -809,7 +905,7 @@ Fields:
 </table>
 
 <div class="info-box cyan">
-  <p><strong>CFG Auth Tags:</strong> The 4-hex-char auth tag in CFG and CFGGO packets is <code>CRC16(changeId + AES_key)</code>. This proves the sender holds the same AES key as the mesh, preventing unauthorized config changes. Nodes verify the tag before accepting any CFG or CFGGO command.</p>
+  <p><strong>CFG Auth Tags:</strong> CFG and CFGGO packets include an <strong>8-hex-char auth tag</strong> derived from the current AES key and the change ID. Nodes verify this before accepting a spreading-factor change, which stops casual or accidental reconfiguration from nodes outside the key group.</p>
 </div>
 </section>
 
@@ -820,17 +916,17 @@ Fields:
 <div class="flow">
   <div class="flow-box">Plaintext<br><code>MSG,Hello</code></div>
   <span class="flow-arrow">&rarr;</span>
-  <div class="flow-box">Append CRC-16<br><code>[msg bytes][CRC hi][CRC lo]</code></div>
+  <div class="flow-box">Generate 12-byte<br>random nonce</div>
   <span class="flow-arrow">&rarr;</span>
-  <div class="flow-box">AES-128-CTR<br><code>encrypt(key, IV)</code></div>
+  <div class="flow-box">AES-128-GCM<br><code>encrypt(key, nonce)</code></div>
   <span class="flow-arrow">&rarr;</span>
-  <div class="flow-box">Hex Encode<br><code>48656C6C6F...</code></div>
+  <div class="flow-box">Hex Encode<br><code>nonce || ciphertext || tag</code></div>
 </div>
 
 <h3>AES Key</h3>
 <ul style="color:var(--dim); padding-left:20px;">
   <li>Exactly <strong>16 ASCII characters</strong> (128 bits)</li>
-  <li>Default: <strong>randomly generated on first boot</strong> (displayed on serial/OLED)</li>
+  <li>Generated <strong>randomly on first boot</strong> if no valid key is already stored</li>
   <li><strong>All nodes must share the same key</strong> to communicate</li>
   <li>Stored in EEPROM at address <code>450</code></li>
 </ul>
@@ -844,7 +940,7 @@ nonce(<span class="number">12</span> bytes) || ciphertext(N bytes) || tag(<span 
 <span class="comment">// If tag check fails → message rejected (tampered or wrong key)</span></pre>
 
 <h3>Message ID</h3>
-<p><strong>6-character random</strong> (a-z), used only for deduplication and ACK matching. Not used in encryption.</p>
+<p><strong>6-character random</strong> (A-Z), used for deduplication and ACK matching. It is not used as the encryption nonce.</p>
 </section>
 
 <!-- ═══════════════ ROUTING ═══════════════ -->
@@ -852,7 +948,7 @@ nonce(<span class="number">12</span> bytes) || ciphertext(N bytes) || tag(<span 
 <h2>6. Routing &amp; Scalability</h2>
 
 <h3>Directed Routing Algorithm</h3>
-<p>Unlike pure flooding (Meshtastic), this system maintains a <strong>routing table</strong> and prefers <strong>unicast directed forwarding</strong> when a route is known.</p>
+<p>This system maintains a <strong>routing table</strong> and prefers <strong>directed forwarding</strong> when a route is known. If no route exists, it falls back to a controlled broadcast with random jitter to reduce collision storms.</p>
 
 <pre><span class="comment">// Route cost = (hop_count &times; 10) - RSSI</span>
 <span class="comment">// Lower is better. Closer nodes with fewer hops win.</span>
@@ -865,7 +961,7 @@ nonce(<span class="number">12</span> bytes) || ciphertext(N bytes) || tag(<span 
 <div class="flow">
   <div class="flow-box">Packet arrives<br>not for me</div>
   <span class="flow-arrow">&rarr;</span>
-  <div class="flow-box">Check dedup<br>(hash ring, 64 slots)</div>
+  <div class="flow-box">Check dedup<br>(hash ring, 128 slots)</div>
   <span class="flow-arrow">&rarr;</span>
   <div class="flow-box" style="border-color:var(--green);">Route exists?<br>&amp; doesn't loop?</div>
   <span class="flow-arrow">&rarr;</span>
@@ -894,14 +990,14 @@ nonce(<span class="number">12</span> bytes) || ciphertext(N bytes) || tag(<span 
 </table>
 
 <h3>Deduplication</h3>
-<pre><span class="comment">// FNV-1a hash of the 4-char Message ID</span>
+<pre><span class="comment">// FNV-1a hash of the 6-char Message ID</span>
 hash = <span class="number">2166136261</span>;    <span class="comment">// FNV offset basis</span>
 <span class="keyword">for each</span> char c <span class="keyword">in</span> mid:
     hash ^= c;
     hash *= <span class="number">16777619</span>; <span class="comment">// FNV prime</span>
 hash |= <span class="number">1</span>;           <span class="comment">// Never zero (zero = empty slot)</span>
 
-<span class="comment">// Stored in 64-slot ring buffer. O(1) lookup, O(1) insert.</span></pre>
+<span class="comment">// Stored in 128-slot ring buffer. O(1) lookup, O(1) insert.</span></pre>
 </section>
 
 <!-- ═══════════════ T-DECK UI ═══════════════ -->
@@ -1224,6 +1320,7 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
     </div>
     <div class="phone-nav">
       <div class="tab active">Chat</div>
+      <div class="tab">Nodes</div>
       <div class="tab">Control</div>
       <div class="tab">Settings</div>
     </div>
@@ -1341,8 +1438,8 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
 <table>
   <tr><th>Event</th><th>Format</th><th>Example</th></tr>
   <tr><td>Incoming Message</td><td><code>RX,&lt;from&gt;,&lt;text&gt;,&lt;rssi&gt;</code></td><td><code>RX,0001,Hello,-85</code></td></tr>
-  <tr><td>Message Sent</td><td><code>SENT,&lt;mid&gt;</code></td><td><code>SENT,XYZW</code></td></tr>
-  <tr><td>Delivery ACK</td><td><code>ACK,&lt;from&gt;,&lt;mid&gt;</code></td><td><code>ACK,0002,XYZW</code></td></tr>
+  <tr><td>Message Sent</td><td><code>SENT,&lt;mid&gt;</code></td><td><code>SENT,abcxyz</code></td></tr>
+  <tr><td>Delivery ACK</td><td><code>ACK,&lt;from&gt;,&lt;mid&gt;</code></td><td><code>ACK,0002,abcxyz</code></td></tr>
   <tr><td>Command Response</td><td><code>CMD,RSP,&lt;pin&gt;,&lt;value&gt;</code></td><td><code>CMD,RSP,2,1</code></td></tr>
   <tr><td>Pin List</td><td><code>PINS,R:&lt;pins&gt;|S:&lt;pins&gt;</code></td><td><code>PINS,R:2,4,12|S:34,36</code></td></tr>
   <tr><td>Status</td><td><code>STATUS,&lt;key:val,...&gt;</code></td><td><code>STATUS,ID:0010,BOARD:LoRa32...,POWER:NORMAL</code></td></tr>
@@ -1572,7 +1669,7 @@ SDATA,0010,34:2048,36:1200,39:4095</pre>
   <li><strong>Soil moisture:</strong> Capacitive sensor (0-3.3V) &rarr; GPIO 36</li>
   <li><strong>Rain gauge:</strong> Tipping bucket (digital pulse) &rarr; any digital GPIO</li>
 </ul>
-<p>Connect sensors to a solar-powered repeater node (see Section 21), configure <code>AUTOPOLL</code> to send readings every 5 minutes to a gateway node, and monitor via the PC gateway GUI, hub GUI, or web map &mdash; all with sparkline charts.</p>
+<p>Connect sensors to a solar-powered repeater node (see <a href="#solar" style="color:var(--cyan);">Section 24: Solar Mode</a>), configure <code>AUTOPOLL</code> to send readings every 5 minutes to a gateway node, and monitor via the PC gateway GUI, hub GUI, or web map &mdash; all with sparkline charts.</p>
 
 <h3>Viewing Sensor Data</h3>
 <ul style="color:var(--dim); padding-left:20px;">
@@ -1741,7 +1838,7 @@ android-app/
 <section id="gateway">
 <h2>21. Gateway Bridge &mdash; Internet-Linked Mesh Islands</h2>
 
-<p>The gateway feature connects geographically separated LoRa mesh networks over the internet. Each gateway node is a repeater connected via USB to a PC running the Python bridge server. Packets remain <strong>AES-128-CTR encrypted end-to-end</strong> &mdash; the servers never decrypt them.</p>
+<p>The gateway feature connects geographically separated LoRa mesh networks over the internet. Each gateway node is a repeater connected via USB to a PC running the Python bridge server. Packets remain <strong>AES-128-GCM encrypted end-to-end</strong> &mdash; the servers never decrypt them.</p>
 
 <!-- ─── Hub Architecture ─── -->
 
@@ -1822,7 +1919,7 @@ android-app/
 <h3>Security Model</h3>
 <table>
   <tr><th>Layer</th><th>Protection</th></tr>
-  <tr><td style="color:var(--green);">Message Content</td><td>AES-128-CTR encrypted on-device. Hub and gateways <strong>never</strong> see plaintext.</td></tr>
+  <tr><td style="color:var(--green);">Message Content</td><td>AES-128-GCM encrypted on-device. Hub and gateways <strong>never</strong> see plaintext.</td></tr>
   <tr><td style="color:var(--cyan);">Hub Access</td><td>Optional authentication key (<code>--key</code>) &mdash; only gateways with the correct key can join.</td></tr>
   <tr><td style="color:var(--orange);">Transport</td><td>WebSocket (ws://) by default. Use <code>wss://</code> with a TLS reverse proxy (nginx/caddy) for encrypted transport.</td></tr>
   <tr><td style="color:var(--dim);">Network</td><td>For maximum security, run the hub on a VPN or use SSH tunnels between sites.</td></tr>
@@ -2018,6 +2115,9 @@ gateway/
   <span style="color:var(--cyan);">gateway_gui.py</span>          <span class="comment"># Gateway client — Windows GUI (topology view + packet waterfall)</span>
   <span style="color:var(--green);">gateway_hub.py</span>          <span class="comment"># Central hub server — headless (Linux/Windows CLI)</span>
   <span style="color:var(--green);">gateway_hub_gui.py</span>      <span class="comment"># Central hub server — Windows GUI (live dashboard)</span>
+  <span style="color:var(--orange);">automation_engine.py</span>    <span class="comment"># Logic Builder evaluation engine — rule model, persistence, anti-flood</span>
+  <span style="color:var(--orange);">automation_canvas.py</span>    <span class="comment"># Logic Builder visual canvas — drag, connect, configure blocks</span>
+  <span style="color:var(--dim);">rules.json</span>              <span class="comment"># Auto-generated Logic Builder rules (JSON persistence)</span>
   <span style="color:var(--dim);">requirements.txt</span>        <span class="comment"># Python dependencies: pyserial, websockets, aiohttp, customtkinter</span>
   <span style="color:var(--dim);">gateways.json</span>           <span class="comment"># Auto-generated gateway registry (location persistence)</span>
   <span style="color:var(--orange);">web/</span>
@@ -2030,9 +2130,289 @@ gateway/
 
 </section>
 
+<!-- ═══════════════ LOGIC BUILDER ═══════════════ -->
+<section id="logic-builder">
+<h2>22. Logic Builder &mdash; Visual Automation for the Gateway GUI</h2>
+
+<p>The Logic Builder is a <strong>PLC-style visual automation system</strong> built into the PC gateway GUI. It lets you create cross-node automation rules by dragging and connecting blocks on a canvas &mdash; like ladder logic or Scratch, but for your mesh network. Rules evaluate sensor data received from the mesh and fire actions (relay control, messages) back through the mesh.</p>
+
+<div class="info-box cyan">
+  <p><strong>Two levels of automation:</strong> The Logic Builder creates <em>gateway-evaluated</em> rules that run in the Python GUI process. For simple rules (one sensor &rarr; one compare &rarr; one relay), you can also <strong>deploy to the node</strong> as a firmware setpoint that runs autonomously even without the gateway &mdash; see <a href="#setpoints" style="color:var(--cyan);">Section 15: Cross-Node Setpoint Rules</a>.</p>
+</div>
+
+<!-- ─── Opening the Logic Builder ─── -->
+
+<h3>Opening the Logic Builder</h3>
+<p>Click the <strong>[Logic Builder]</strong> toggle button in the gateway GUI title bar (next to the connection status). This hides the packet waterfall and node inspector and shows the automation canvas in their place. Click again to switch back to the normal view. <strong>Rules continue evaluating in the background</strong> even when the Logic Builder panel is hidden.</p>
+
+<!-- ─── Creating a Rule ─── -->
+
+<h3>Creating a Rule</h3>
+<ol style="color:var(--dim); padding-left:20px;">
+  <li>Click <strong>[+ New]</strong> in the toolbar to create a new rule. Give it a descriptive name (e.g., &ldquo;Wind alarm&rdquo;, &ldquo;Gate monitor&rdquo;).</li>
+  <li>Use the <strong>[+ Input]</strong>, <strong>[+ Transform]</strong>, <strong>[+ Condition]</strong>, and <strong>[+ Action]</strong> dropdown buttons to add blocks to the canvas.</li>
+  <li><strong>Double-click</strong> any block to configure it (choose node ID, pin number, operator, etc.).</li>
+  <li><strong>Connect blocks</strong> by clicking an output port (right side, coloured dot) then clicking a compatible input port (left side) on another block.</li>
+  <li>Set the <strong>Check every</strong> interval and <strong>Min action gap</strong> (see below).</li>
+  <li>Tick <strong>Enabled</strong> to activate the rule.</li>
+</ol>
+
+<!-- ─── Block Types ─── -->
+
+<h3>Block Types</h3>
+
+<h4>Input Blocks (cyan border)</h4>
+<p>Input blocks read data from the mesh or provide constant values.</p>
+<table>
+  <tr><th>Block</th><th>What It Does</th><th>Configuration</th><th>Output</th></tr>
+  <tr>
+    <td style="color:var(--cyan);">Sensor Read</td>
+    <td>Reads the latest sensor value for a specific pin on a specific node. Uses SDATA data received by the gateway.</td>
+    <td><strong>Node ID:</strong> The 4-character hex ID of the node (e.g., A1B2). <strong>Pin:</strong> GPIO pin number. <strong>Label:</strong> Descriptive name (e.g., &ldquo;Wind Sensor&rdquo;).</td>
+    <td>A number (the raw sensor reading, 0&ndash;4095 for analog).</td>
+  </tr>
+  <tr>
+    <td style="color:var(--cyan);">Constant</td>
+    <td>Outputs a fixed number. Use as a threshold for comparisons.</td>
+    <td><strong>Value:</strong> Any number (e.g., 2000, 15.5).</td>
+    <td>A number.</td>
+  </tr>
+</table>
+
+<h4>Transform Blocks (green border)</h4>
+<p>Transform blocks convert raw sensor values into meaningful units.</p>
+<table>
+  <tr><th>Block</th><th>What It Does</th><th>Configuration</th><th>Formula</th></tr>
+  <tr>
+    <td style="color:var(--green);">Scale</td>
+    <td>Multiplies a value by a factor and adds an offset. Use this to convert raw ADC counts into real-world units.</td>
+    <td><strong>Factor:</strong> Multiply value by this number. <strong>Offset:</strong> Add this after multiplying. <strong>Unit:</strong> Label for the result (e.g., &ldquo;m/s&rdquo;, &ldquo;&deg;C&rdquo;).</td>
+    <td><code>output = (input &times; factor) + offset</code></td>
+  </tr>
+  <tr>
+    <td style="color:var(--green);">Moving Average</td>
+    <td>Smooths a noisy signal by averaging the last N samples.</td>
+    <td><strong>Window:</strong> Number of samples to average (e.g., 5).</td>
+    <td><code>output = average of last N inputs</code></td>
+  </tr>
+  <tr>
+    <td style="color:var(--green);">Delta Rate</td>
+    <td>Calculates the rate of change per second. Useful for converting a growing counter into a speed value.</td>
+    <td>None &mdash; automatic.</td>
+    <td><code>output = (current &minus; previous) / elapsed_seconds</code></td>
+  </tr>
+</table>
+
+<div class="info-box green">
+  <p><strong>Example &mdash; Wind speed from pulse counter:</strong> A Sensor Read block reads a pulse-counter pin. The Delta Rate block converts the growing count into pulses-per-second. A Scale block then multiplies by the anemometer's calibration factor (e.g., &times;0.0278) to get metres per second. The canvas shows live values on each wire so you can verify the maths.</p>
+</div>
+
+<h4>Condition Blocks (yellow border)</h4>
+<p>Condition blocks evaluate true/false logic to decide when actions should fire.</p>
+<table>
+  <tr><th>Block</th><th>What It Does</th><th>Configuration</th></tr>
+  <tr>
+    <td style="color:var(--yellow);">Compare</td>
+    <td>Compares two numbers and outputs true or false.</td>
+    <td><strong>Operator</strong> (choose one):
+      <table style="margin:8px 0; font-size:0.9em;">
+        <tr><td><code>&gt;</code></td><td>Greater than</td></tr>
+        <tr><td><code>&lt;</code></td><td>Less than</td></tr>
+        <tr><td><code>=</code></td><td>Equal to</td></tr>
+        <tr><td><code>!=</code></td><td>Not equal to</td></tr>
+        <tr><td><code>&gt;=</code></td><td>Greater than or equal to</td></tr>
+        <tr><td><code>&lt;=</code></td><td>Less than or equal to</td></tr>
+      </table>
+      Input <strong>a</strong> is compared against input <strong>b</strong>. Example: if a &gt; b, output is true.
+    </td>
+  </tr>
+  <tr>
+    <td style="color:var(--yellow);">AND Gate</td>
+    <td>Outputs true only when <strong>all</strong> connected inputs are true. Has up to 4 inputs (in1&ndash;in4).</td>
+    <td>None &mdash; connect 2&ndash;4 boolean inputs.</td>
+  </tr>
+  <tr>
+    <td style="color:var(--yellow);">OR Gate</td>
+    <td>Outputs true when <strong>any</strong> connected input is true. Has up to 4 inputs (in1&ndash;in4).</td>
+    <td>None &mdash; connect 2&ndash;4 boolean inputs.</td>
+  </tr>
+  <tr>
+    <td style="color:var(--yellow);">NOT Gate</td>
+    <td>Inverts a boolean: true becomes false, false becomes true.</td>
+    <td>None &mdash; one boolean input.</td>
+  </tr>
+  <tr>
+    <td style="color:var(--yellow);">Debounce</td>
+    <td>Only outputs true after the input has been true for a sustained period. Filters out brief spikes or noise.</td>
+    <td><strong>Hold (seconds):</strong> How long the input must stay true before the output becomes true (e.g., 5.0).</td>
+  </tr>
+  <tr>
+    <td style="color:var(--yellow);">Latch (SR Flip-Flop)</td>
+    <td>Once &ldquo;set&rdquo; goes true, the output stays true until &ldquo;reset&rdquo; goes true. Like a physical toggle switch.</td>
+    <td>None &mdash; connect a <strong>set</strong> signal and a <strong>reset</strong> signal.</td>
+  </tr>
+</table>
+
+<h4>Action Blocks (red border)</h4>
+<p>Action blocks send commands to the mesh when their <strong>trigger</strong> input transitions from false to true (rising edge).</p>
+<table>
+  <tr><th>Block</th><th>What It Does</th><th>Configuration</th></tr>
+  <tr>
+    <td style="color:var(--red);">Set Relay</td>
+    <td>Turns a relay (digital output) on or off on a target node.</td>
+    <td><strong>Node ID:</strong> Target node. <strong>Pin:</strong> GPIO pin number. <strong>Action:</strong> HIGH (on) or LOW (off).</td>
+  </tr>
+  <tr>
+    <td style="color:var(--red);">Pulse Relay</td>
+    <td>Briefly activates a relay for a set duration, then turns it off. Good for solenoids, buzzers, or momentary triggers.</td>
+    <td><strong>Node ID:</strong> Target node. <strong>Pin:</strong> GPIO pin number. <strong>Duration (ms):</strong> How long to hold the relay on.</td>
+  </tr>
+  <tr>
+    <td style="color:var(--red);">Send Broadcast</td>
+    <td>Sends a text message to <strong>all nodes</strong> on the mesh (address FFFF).</td>
+    <td><strong>Message (true):</strong> Text sent when trigger becomes true (e.g., &ldquo;Gate open&rdquo;). <strong>Message (false):</strong> Optional text sent when trigger becomes false (e.g., &ldquo;Gate closed&rdquo;).</td>
+  </tr>
+  <tr>
+    <td style="color:var(--red);">Send Direct</td>
+    <td>Sends a text message to a <strong>specific node</strong>.</td>
+    <td><strong>Node ID:</strong> Target node. <strong>Message (true):</strong> Text when true. <strong>Message (false):</strong> Optional text when false.</td>
+  </tr>
+</table>
+
+<!-- ─── Connecting Blocks ─── -->
+
+<h3>Connecting Blocks (Wires)</h3>
+<p>Blocks have <strong>ports</strong> &mdash; small coloured dots on the left (inputs) and right (outputs) of each block:</p>
+<ul style="color:var(--dim); padding-left:20px;">
+  <li><span style="color:var(--cyan);">Cyan dot</span> = number value (sensor reading, scaled value, constant)</li>
+  <li><span style="color:var(--yellow);">Yellow dot</span> = boolean value (true/false from comparisons, gates)</li>
+  <li><span style="color:var(--white);">White dot</span> = string value (text)</li>
+</ul>
+<p>To connect: click an <strong>output port</strong> on one block, then click a compatible <strong>input port</strong> on another block. A smooth Bezier curve wire appears between them. <strong>Live values</strong> are displayed on wires during evaluation (e.g., &ldquo;23.4&rdquo;, &ldquo;True&rdquo;).</p>
+
+<!-- ─── Toolbar Settings ─── -->
+
+<h3>Toolbar Settings</h3>
+<table>
+  <tr><th>Setting</th><th>What It Means</th><th>Default</th></tr>
+  <tr>
+    <td><strong>Check every</strong></td>
+    <td>How often the rule is evaluated (reads sensor data, runs all blocks, checks conditions). Lower values mean faster response but more processing.</td>
+    <td>5 seconds</td>
+  </tr>
+  <tr>
+    <td><strong>Min action gap</strong></td>
+    <td>Minimum time between action firings for the same rule. Prevents rapid relay toggling when a sensor value oscillates around a threshold (e.g., temperature bouncing between 19&deg;C and 21&deg;C around a 20&deg;C threshold).</td>
+    <td>10 seconds</td>
+  </tr>
+  <tr>
+    <td><strong>Enabled</strong></td>
+    <td>When ticked, the rule is actively evaluated. Untick to pause a rule without deleting it.</td>
+    <td>Enabled</td>
+  </tr>
+</table>
+
+<!-- ─── Canvas Interactions ─── -->
+
+<h3>Canvas Interactions</h3>
+<table>
+  <tr><th>Action</th><th>How</th></tr>
+  <tr><td>Add a block</td><td>Click one of the category dropdown buttons: <strong>[+ Input]</strong>, <strong>[+ Transform]</strong>, <strong>[+ Condition]</strong>, <strong>[+ Action]</strong></td></tr>
+  <tr><td>Move a block</td><td>Click and drag the block body. Blocks snap to a 10-pixel grid.</td></tr>
+  <tr><td>Configure a block</td><td>Double-click the block to open its settings dialog.</td></tr>
+  <tr><td>Connect blocks</td><td>Click an output port (right side), then click an input port (left side) on another block.</td></tr>
+  <tr><td>Delete a block</td><td>Right-click the block &rarr; <strong>Delete</strong> from the context menu, or select and press the <strong>Delete</strong> key. All connected wires are also removed.</td></tr>
+  <tr><td>Pan the canvas</td><td>Middle-click and drag, or scroll.</td></tr>
+</table>
+
+<!-- ─── Safety Features ─── -->
+
+<h3>Safety &amp; Anti-Flood Features</h3>
+<p>With many rules across many nodes, actions could flood the LoRa channel. The Logic Builder includes multiple layers of protection:</p>
+<ul style="color:var(--dim); padding-left:20px;">
+  <li><strong>Command queue with spacing:</strong> Actions do not send immediately. They are placed in a <strong>global command queue</strong> that drains one command every 3 seconds. This prevents multiple rules from firing back-to-back and overwhelming the LoRa channel. The queue holds up to 20 pending commands; excess commands are dropped with a warning.</li>
+  <li><strong>Rising-edge detection:</strong> Action blocks only fire when their trigger changes from false to true. A sustained &ldquo;true&rdquo; condition does not keep firing repeatedly.</li>
+  <li><strong>Per-rule action gap:</strong> After an action fires, the same rule cannot fire again until the <strong>min action gap</strong> elapses (default 10 seconds). Prevents oscillation when a sensor value bounces around a threshold.</li>
+  <li><strong>Global rate limit:</strong> Maximum 12 commands per minute to the mesh, across all rules. A hard safety backstop on top of the queue spacing.</li>
+  <li><strong>Queue status display:</strong> The event log shows how many commands are pending (e.g., &ldquo;Queue: 3 pending&rdquo;). The text turns yellow when the queue exceeds 5 items, giving early warning of congestion.</li>
+  <li><strong>Stale data warning:</strong> If a sensor reading is older than 5 minutes, the Sensor Read block shows a &ldquo;Stale&rdquo; warning. Action blocks <strong>never fire</strong> when any input in the chain has no data (None propagation).</li>
+  <li><strong>Auto-poll coordination:</strong> The engine automatically sends POLL requests to nodes referenced by active rules if their data is stale, at most once every 30 seconds per node.</li>
+  <li><strong>Encryption preserved:</strong> The gateway never decrypts mesh packets for automation. It sends plaintext serial commands to the locally connected node, which encrypts them before transmission over LoRa.</li>
+</ul>
+
+<!-- ─── Deploy to Node ─── -->
+
+<h3>Deploy to Node (Firmware Setpoints)</h3>
+<p>For simple rules that match the firmware setpoint format, you can push the rule directly to a node so it runs <strong>autonomously without the gateway</strong>. Click the <strong>[Deploy]</strong> button to attempt this.</p>
+
+<p>A rule can be deployed as a firmware setpoint if it has exactly:</p>
+<ol style="color:var(--dim); padding-left:20px;">
+  <li>One <strong>Sensor Read</strong> block</li>
+  <li>One <strong>Compare</strong> block (with operator &gt;, &lt;, or = only)</li>
+  <li>One <strong>Set Relay</strong> block</li>
+</ol>
+
+<p>The gateway sends a <code>SETPOINT</code> command to the node:</p>
+<pre>SETPOINT,&lt;sensorPin&gt;,&lt;operator&gt;,&lt;threshold&gt;,&lt;targetNode&gt;,&lt;relayPin&gt;,&lt;action&gt;</pre>
+
+<div class="info-box orange">
+  <p><strong>Limitation:</strong> Firmware setpoints only support GT (greater than), LT (less than), and EQ (equal to) operators. Rules using transforms, logic gates, messages, or other operators can only run as gateway-evaluated rules. Each node supports a maximum of 4 setpoints.</p>
+</div>
+
+<!-- ─── Examples ─── -->
+
+<h3>Example Rules</h3>
+
+<h4>Example 1: Wind Speed Alarm</h4>
+<p>Sound an alarm relay on a base-station node when wind speed exceeds 15 m/s.</p>
+<pre>
+<span style="color:var(--cyan);">[Sensor Read]</span> ──→ <span style="color:var(--green);">[Scale]</span> ──→ <span style="color:var(--yellow);">[Compare]</span> ──→ <span style="color:var(--red);">[Set Relay]</span>
+  A1B2:pin5          &times;0.0278     &gt; 15.0          C3D4:pin2=HIGH
+  "Anemometer"       m/s         &uarr;
+                              <span style="color:var(--cyan);">[Constant: 15]</span>
+</pre>
+<p style="color:var(--dim);">Sensor Read gets the raw pulse count from node A1B2 pin 5. Scale converts pulses to m/s. Compare checks if the speed exceeds the constant 15. Set Relay activates pin 2 on node C3D4.</p>
+
+<h4>Example 2: Gate Monitor with Messages</h4>
+<p>Broadcast &ldquo;Gate open&rdquo; or &ldquo;Gate closed&rdquo; based on a digital input.</p>
+<pre>
+<span style="color:var(--cyan);">[Sensor Read]</span> ──→ <span style="color:var(--yellow);">[Compare]</span> ──→ <span style="color:var(--red);">[Send Broadcast]</span>
+  F1E2:pin5           = 1           "Gate open" / "Gate closed"
+  "Gate Sensor"       &uarr;
+                  <span style="color:var(--cyan);">[Constant: 1]</span>
+</pre>
+<p style="color:var(--dim);">Sensor Read gets the digital value (0 or 1) from node F1E2 pin 5. Compare checks if it equals 1. Send Broadcast sends &ldquo;Gate open&rdquo; when true, &ldquo;Gate closed&rdquo; when the trigger goes false.</p>
+
+<h4>Example 3: Frost Protection with Debounce</h4>
+<p>Only activate a heater if temperature stays below threshold for 30 seconds (avoids reacting to brief cold gusts).</p>
+<pre>
+<span style="color:var(--cyan);">[Sensor Read]</span> ──→ <span style="color:var(--green);">[Scale]</span> ──→ <span style="color:var(--yellow);">[Compare]</span> ──→ <span style="color:var(--yellow);">[Debounce]</span> ──→ <span style="color:var(--red);">[Set Relay]</span>
+  0010:pin34         &times;0.1-40      &lt; 3.0           30 sec          0010:pin4=HIGH
+  "Temp Sensor"      &deg;C           &uarr;               hold            "Heater"
+                              <span style="color:var(--cyan);">[Constant: 3.0]</span>
+</pre>
+<p style="color:var(--dim);">Scale converts raw ADC (0&ndash;4095) to degrees Celsius. Compare checks if temp is below 3&deg;C. Debounce waits 30 seconds of continuous &ldquo;true&rdquo; before allowing the Set Relay to fire.</p>
+
+<!-- ─── Persistence ─── -->
+
+<h3>Persistence</h3>
+<p>All rules are automatically saved to <code>gateway/rules.json</code> whenever you make changes. Rules are reloaded when you restart the gateway GUI. The file stores block positions, configurations, wire connections, and rule settings.</p>
+
+<!-- ─── Event Log ─── -->
+
+<h3>Event Log</h3>
+<p>The bottom of the Logic Builder panel shows a one-line event log with timestamped status messages:</p>
+<ul style="color:var(--dim); padding-left:20px;">
+  <li><strong>Evaluation results:</strong> e.g., <code>14:23 eval OK &mdash; 3 blocks</code></li>
+  <li><strong>Action firings:</strong> e.g., <code>14:23 SET_RELAY C3D4:pin2=1</code></li>
+  <li><strong>Errors:</strong> e.g., <code>14:23 ERROR: node A1B2 data stale</code></li>
+</ul>
+
+</section>
+
 <!-- ═══════════════ WIFI GATEWAY ═══════════════ -->
 <section id="wifi-gateway">
-<h2>22. WiFi ESP Gateway — No PC Required</h2>
+<h2>23. WiFi ESP Gateway &mdash; No PC Required</h2>
 
 <p>The WiFi gateway firmware turns any ESP32 board into a standalone internet bridge. Unlike the PC-based gateway, it needs <strong>no computer</strong> — just power. Flash it, configure once via the Android app over BLE, mount it outside with a solar panel, and it runs forever.</p>
 
@@ -2254,7 +2634,7 @@ sudo systemctl restart tiggyopenmesh-hub</pre></div>
 
 <!-- ═══════════════ SOLAR MODE ═══════════════ -->
 <section id="solar">
-<h2>23. Solar / Low-Power Repeater Mode</h2>
+<h2>24. Solar / Low-Power Repeater Mode</h2>
 
 <p>Remote repeater nodes on hilltops or rooftops often need to run indefinitely from a small solar panel and an 18650 battery. Solar mode dramatically reduces power consumption by putting the ESP32-S3 into <strong>light sleep</strong> between radio events, while keeping the radio in continuous RX so <strong>no packets are lost</strong>.</p>
 
@@ -2353,7 +2733,7 @@ sudo systemctl restart tiggyopenmesh-hub</pre></div>
 
 <!-- ═══════════════ DELIVERY TRACKING ═══════════════ -->
 <section id="delivery-tracking">
-<h2>24. Message Delivery Tracking</h2>
+<h2>25. Message Delivery Tracking</h2>
 
 <p>Every message sent through the mesh now has <strong>end-to-end delivery confirmation</strong>. The sender knows exactly whether the message was transmitted, delivered, or failed &mdash; with visual status indicators on both the T-Deck and the Android app.</p>
 
@@ -2376,7 +2756,7 @@ sudo systemctl restart tiggyopenmesh-hub</pre></div>
 <ol style="color:var(--dim); padding-left:20px;">
   <li>Sender transmits message &mdash; state set to <strong>SENDING</strong></li>
   <li>Radio confirms transmission complete &mdash; firmware sends <code>SENT,&lt;mid&gt;</code> to BLE, state becomes <strong>SENT</strong></li>
-  <li>Recipient decrypts the message successfully and sends back an encrypted <code>ACK_MSG,&lt;mid&gt;</code> inside the mesh payload</li>
+  <li>Recipient decrypts the message successfully and sends back a directed plain <code>ACK,&lt;from&gt;,&lt;mid&gt;</code> packet to the original sender</li>
   <li>Sender receives the ACK &mdash; state becomes <strong>DELIVERED</strong></li>
   <li>If no ACK arrives within <strong>3 seconds</strong>, state becomes <strong>FAILED</strong> (the message may still have been received &mdash; the ACK could have been lost)</li>
 </ol>
@@ -2408,7 +2788,7 @@ sudo systemctl restart tiggyopenmesh-hub</pre></div>
 
 <!-- ═══════════════ SF CHANGE PROTOCOL ═══════════════ -->
 <section id="sf-change">
-<h2>25. Spreading Factor Change Protocol</h2>
+<h2>26. Spreading Factor Change Protocol</h2>
 
 <p>LoRa Spreading Factor (SF) controls the trade-off between <strong>range</strong> and <strong>speed</strong>. Changing SF requires <em>all nodes</em> to switch simultaneously &mdash; a node on SF7 cannot hear one on SF12. The two-phase CFG protocol ensures safe, coordinated changes across the entire mesh.</p>
 
@@ -2484,7 +2864,7 @@ sudo systemctl restart tiggyopenmesh-hub</pre></div>
 
 <!-- ═══════════════ COLLISION DETECTION ═══════════════ -->
 <section id="collision">
-<h2>26. Node ID Collision Detection</h2>
+<h2>27. Node ID Collision Detection</h2>
 
 <p>Node IDs are 4-hex-char values (0001&ndash;FFFE) &mdash; 65534 possible addresses. As networks grow, or when default IDs are used, collisions become likely. Two nodes with the same ID cause <strong>routing chaos</strong> &mdash; messages get misdelivered, heartbeats overwrite routes, and the mesh becomes unreliable.</p>
 
@@ -2538,7 +2918,7 @@ sudo systemctl restart tiggyopenmesh-hub</pre></div>
 
 <!-- ═══════════════ DISPLAY SLEEP ═══════════════ -->
 <section id="display-sleep">
-<h2>27. Display Auto-Sleep (T-Deck Plus)</h2>
+<h2>28. Display Auto-Sleep (T-Deck Plus)</h2>
 
 <p>The T-Deck's 2.8" TFT backlight draws significant power. Display auto-sleep turns off the backlight after a configurable idle period, extending battery life for portable use.</p>
 
@@ -2589,12 +2969,12 @@ sudo systemctl restart tiggyopenmesh-hub</pre></div>
 
 <!-- ═══════════════ GATEWAY MAP ═══════════════ -->
 <section id="gateway-map">
-<h2>28. Live Gateway Coverage Map</h2>
+<h2>29. Live Gateway Coverage Map</h2>
 
-<p>The hub server hosts a live web map showing all registered gateways, their online/offline status, and estimated coverage areas. This is a <strong>peacetime management tool</strong> for network planning &mdash; the mesh itself operates without it.</p>
+<p>The hub server hosts a live web map showing registered gateways, their online/offline status, and estimated coverage areas. It is an <strong>optional planning and monitoring tool</strong> &mdash; the radio mesh itself works without it.</p>
 
 <div class="info-box green">
-  <p><strong>Zero internet dependency for the mesh:</strong> The LoRa mesh is fully standalone peer-to-peer radio. Nodes talk directly via LoRa &mdash; no internet, no hub, no server needed. The map is an <em>optional add-on</em> that provides visibility when internet is available. In a disaster or war zone with no internet, the mesh works exactly the same.</p>
+  <p><strong>Zero internet dependency for the mesh:</strong> nodes talk directly over LoRa with no internet, hub, or cloud service required. The map is only an <em>optional add-on</em> that provides visibility when internet is available.</p>
 </div>
 
 <h3>Accessing the Map</h3>
@@ -2685,7 +3065,7 @@ https://your-machine.tail1234.ts.net/</pre>
 
 <!-- ═══════════════ TELEGRAM ═══════════════ -->
 <section id="telegram">
-<h2>29. Telegram Alerts (Android App)</h2>
+<h2>30. Telegram Alerts (Android App)</h2>
 
 <p>The Android app can forward <strong>group mesh messages</strong> and <strong>SOS emergencies</strong> to a Telegram chat via a bot. This lets family members, a base-camp coordinator, or anyone with Telegram receive real-time alerts — even if they are miles away with no LoRa hardware.</p>
 
@@ -2695,7 +3075,7 @@ https://your-machine.tail1234.ts.net/</pre>
 
 <h3>How it works</h3>
 <ul>
-  <li>Every group in the mesh uses a shared AES key (e.g. <code>MyHikingGroup!</code>).</li>
+  <li>Every group in the mesh uses a shared AES key (for example <code>MyHikingGroup!</code>).</li>
   <li>When the Android app receives a packet it decrypts it locally using that key.</li>
   <li>If decryption succeeds <em>and</em> the message is a group broadcast or SOS, it is forwarded to your Telegram bot via a standard HTTPS POST.</li>
   <li>Direct node-to-node messages are never forwarded — they stay private.</li>
@@ -2751,7 +3131,7 @@ https://your-machine.tail1234.ts.net/</pre>
 
 <!-- ═══════════════ THEME ═══════════════ -->
 <section id="theme">
-<h2>30. Colour Theme Reference</h2>
+<h2>31. Colour Theme Reference</h2>
 
 <p>Consistent colour palette used across the TFT display, OLED, and Android app.</p>
 
@@ -2797,7 +3177,7 @@ https://your-machine.tail1234.ts.net/</pre>
 
 <!-- ═══════════════ CAVEATS ═══════════════ -->
 <section id="caveats">
-<h2>31. Known Issues &amp; Board-Specific Caveats</h2>
+<h2>32. Known Issues &amp; Board-Specific Caveats</h2>
 
 <h3>Board-Specific Issues</h3>
 <table>
@@ -2810,8 +3190,8 @@ https://your-machine.tail1234.ts.net/</pre>
     <td>Reconfigure: <code>SENSOR 2,4,5,6</code> + <code>SAVE</code>. Pins 2-6 support ADC on ESP32-S3.</td></tr>
   <tr><td>T-Deck Plus</td><td>No free GPIO pins for sensors or relays. All pins used by display, keyboard, GPS, and radio.</td>
     <td>Use T-Deck as communicator only. Pair with a repeater node for sensor/relay control.</td></tr>
-  <tr><td>LoRa32 T3 (repeater)</td><td>SX1276 radio does not support duty-cycle solar mode (requires SX1262 <code>startReceiveDutyCycle</code>).</td>
-    <td>Use continuous RX. For low-power deployments, prefer Heltec V3/V4/XIAO with SX1262.</td></tr>
+  <tr><td>LoRa32 T3 (repeater)</td><td>ESP32 (not S3) has different light-sleep behaviour. Solar mode uses <code>esp_light_sleep_start()</code> which works on both, but power savings vary by chip.</td>
+    <td>For lowest-power solar deployments, prefer Heltec V3/V4/XIAO on ESP32-S3.</td></tr>
 </table>
 
 <h3>Protocol Notes</h3>
@@ -2839,7 +3219,7 @@ https://your-machine.tail1234.ts.net/</pre>
 <div style="background:var(--panel); border-top:1px solid var(--faint); padding:30px 40px; text-align:center; color:var(--faint); font-size:0.85em;">
   <p>TiggyOpenMesh v4.0 &mdash; MeshCore Architecture</p>
   <p>T-Deck Plus &bull; LoRa32 T3 V1.6.1 &bull; Heltec WiFi LoRa 32 V3 &bull; Heltec WiFi LoRa 32 V4 &bull; XIAO ESP32S3</p>
-  <p>31 sections &mdash; Hardware, Protocol, UI, BLE, Gateway, Timers, Setpoints, Sensors, Pulse Counters, SOS, Map, Solar, Delivery, SF Change, Collision Detection, Caveats</p>
+  <p>32 sections &mdash; Hardware, Protocol, UI, BLE, Gateway, Logic Builder, Timers, Setpoints, Sensors, Pulse Counters, SOS, Map, Solar, Delivery, SF Change, Collision Detection, Caveats</p>
   <p style="margin-top:8px;">Documentation generated March 2026</p>
 </div>
 

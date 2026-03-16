@@ -87,7 +87,10 @@ uint8_t sensorMode[MAX_SENSOR_PINS_CFG] = {0}; // mode per sensor pin
 struct PulseCounter {
     uint8_t pin;
     volatile uint32_t count;
-    uint32_t lastRead;     // count at last SDATA/POLL read
+    uint32_t lastRead;           // count at last rate calculation
+    unsigned long lastReadTime;  // millis() at last rate calculation
+    float rate;                  // pulses per second (calculated)
+    uint16_t sampleWindowMs;     // configurable window (default 5000ms)
     bool active;
 };
 static PulseCounter pulseCounters[MAX_PULSE_PINS];
@@ -119,6 +122,9 @@ static bool enablePulseCounter(uint8_t pin) {
     pulseCounters[idx].pin = pin;
     pulseCounters[idx].count = 0;
     pulseCounters[idx].lastRead = 0;
+    pulseCounters[idx].lastReadTime = millis();
+    pulseCounters[idx].rate = 0;
+    pulseCounters[idx].sampleWindowMs = 5000;
     pulseCounters[idx].active = true;
     pinMode(pin, INPUT_PULLUP);
     attachInterrupt(digitalPinToInterrupt(pin), pulseISRs[idx], RISING);
@@ -146,18 +152,52 @@ static uint32_t readPulseCount(uint8_t pin) {
     return delta;
 }
 
+// Update pulse counter rates — called from loop(), non-blocking.
+// Recalculates pulses/sec when the sample window has elapsed.
+static void updatePulseRates() {
+    unsigned long now = millis();
+    for (int i = 0; i < pulseCounterCount; i++) {
+        if (!pulseCounters[i].active) continue;
+        if (now - pulseCounters[i].lastReadTime < pulseCounters[i].sampleWindowMs) continue;
+        noInterrupts();
+        uint32_t current = pulseCounters[i].count;
+        uint32_t delta = current - pulseCounters[i].lastRead;
+        pulseCounters[i].lastRead = current;
+        interrupts();
+        float dt = (now - pulseCounters[i].lastReadTime) / 1000.0f;
+        pulseCounters[i].rate = (dt > 0.01f) ? (float)delta / dt : 0;
+        pulseCounters[i].lastReadTime = now;
+    }
+}
+
+// Get pulse rate for a pin (pulses per second)
+static float getPulseRate(uint8_t pin) {
+    int idx = findPulseCounter(pin);
+    return (idx >= 0) ? pulseCounters[idx].rate : 0;
+}
+
+// IO expansion constants (full implementation defined later, after solar mode)
+#define IO_EXPAND_MAX_PINS   16
+#define IO_EXPAND_VPIN_BASE  100
+int ioExpandRead(int vpin);  // forward declaration
+
 // ─── Sensor read helper ─────────────────────────────────
-// Checks sensor mode first: PULSE returns edge count since last read.
+// PULSE mode: returns rate × 100 (centipulses/sec) for integer precision.
+// Use setpoint Scale to convert to engineering units (e.g., m/s).
 // AUTO mode: ESP32-S3 has ADC on GPIOs 1-20; classic ESP32 has ADC1 on 32-39.
 static int readSensorPin(int pin) {
+    // Virtual pins 100-115: IO expansion board
+    if (pin >= IO_EXPAND_VPIN_BASE && pin < IO_EXPAND_VPIN_BASE + IO_EXPAND_MAX_PINS)
+        return ioExpandRead(pin);
+    // Pulse counter mode
     for (int i = 0; i < sensorCount; i++) {
         if (sensorPins[i] == pin && sensorMode[i] == SENSOR_MODE_PULSE)
-            return (int)readPulseCount(pin);
+            return (int)(getPulseRate(pin) * 100.0f);  // centipulses/sec
     }
 #ifdef CONFIG_IDF_TARGET_ESP32S3
-    return analogRead(pin);      // S3: ADC available on all sensor-capable GPIOs
+    return analogRead(pin);
 #else
-    return (pin >= 32) ? analogRead(pin) : digitalRead(pin);  // Classic ESP32
+    return (pin >= 32) ? analogRead(pin) : digitalRead(pin);
 #endif
 }
 
@@ -199,19 +239,31 @@ struct RelayTimer {
 };
 RelayTimer timers[MAX_TIMERS];
 
-// ─── Cross-Node Setpoints (RAM only for v1) ────────────────
+// ─── On-Node Setpoints ──────────────────────────────────────
+// Action types:
+//   0 = RELAY  — send CMD,SET to targetNode (or local digitalWrite if target is self)
+//   1 = MSG    — broadcast msgTrue when triggered, msgFalse when cleared
+// Op codes: 0=GT, 1=LT, 2=EQ, 3=GE, 4=LE, 5=NE
 #define MAX_SETPOINTS 4
 #define SETPOINT_COOLDOWN 10000  // 10s between triggers
+#define SETPOINT_MSG_LEN 32     // Max message length for MSG action
 struct SetpointRule {
     bool active = false;
     uint8_t sensorPin;
-    uint8_t op;           // 0=GT, 1=LT, 2=EQ
-    uint16_t threshold;
+    uint8_t op;              // 0=GT, 1=LT, 2=EQ, 3=GE, 4=LE, 5=NE
+    float threshold;         // In scaled engineering units (after scale applied)
+    float scaleFactor;       // raw * factor + offset = engineering units
+    float scaleOffset;
+    uint16_t debounceMs;     // Hold time before firing (0=immediate)
     char targetNode[NODE_ID_LEN + 1];
+    uint8_t actionType;      // 0=RELAY, 1=MSG
     uint8_t relayPin;
-    uint8_t action;       // 0=LOW, 1=HIGH
-    bool triggered;       // hysteresis: true after first trigger
+    uint8_t action;          // RELAY: 0=LOW, 1=HIGH
+    char msgTrue[SETPOINT_MSG_LEN + 1];
+    char msgFalse[SETPOINT_MSG_LEN + 1];
+    bool triggered;
     unsigned long lastFired;
+    unsigned long debounceStart;  // Runtime: when condition first became true
 };
 SetpointRule setpoints[MAX_SETPOINTS];
 
@@ -222,6 +274,82 @@ SetpointRule setpoints[MAX_SETPOINTS];
 bool solarMode = false;
 bool solarOledTemporary = false;
 unsigned long solarOledWakeUntil = 0;
+
+// ─── IO Expansion Board (UART2) ─────────────────────────────
+// Daisy-chain a second ESP32 for additional I/O.
+// Virtual pins 100-115 map to expansion board sensors.
+// Non-blocking: caches last response, polls periodically.
+#define IO_EXPAND_BAUD       115200
+#define IO_EXPAND_TIMEOUT    100     // ms max wait for response
+#define IO_EXPAND_POLL_MS    2000    // poll interval
+// IO_EXPAND_MAX_PINS and IO_EXPAND_VPIN_BASE defined above (before readSensorPin)
+
+#if IO_EXPAND_TX >= 0
+HardwareSerial IOSerial(2);
+#endif
+bool ioExpandEnabled = false;
+int  ioExpandCache[IO_EXPAND_MAX_PINS];   // Cached sensor values
+bool ioExpandCacheValid[IO_EXPAND_MAX_PINS];
+unsigned long ioExpandLastPoll = 0;
+String ioExpandRxBuf;
+
+// Non-blocking poll: send query and parse any available response
+void ioExpandPoll() {
+#if IO_EXPAND_TX >= 0
+    if (!ioExpandEnabled) return;
+    unsigned long now = millis();
+
+    // Read any available response bytes (non-blocking)
+    while (IOSerial.available()) {
+        char c = IOSerial.read();
+        if (c == '\n') {
+            ioExpandRxBuf.trim();
+            if (ioExpandRxBuf.startsWith("S,")) {
+                // Parse: S,<pin>:<val>,<pin>:<val>,...
+                String data = ioExpandRxBuf.substring(2);
+                while (data.length() > 0) {
+                    int colon = data.indexOf(':');
+                    if (colon < 0) break;
+                    int comma = data.indexOf(',');
+                    int pin = data.substring(0, colon).toInt();
+                    String valStr = (comma > 0) ? data.substring(colon + 1, comma)
+                                                : data.substring(colon + 1);
+                    if (pin >= 0 && pin < IO_EXPAND_MAX_PINS) {
+                        ioExpandCache[pin] = valStr.toInt();
+                        ioExpandCacheValid[pin] = true;
+                    }
+                    if (comma < 0) break;
+                    data = data.substring(comma + 1);
+                }
+            }
+            ioExpandRxBuf = "";
+        } else {
+            ioExpandRxBuf += c;
+        }
+    }
+
+    // Send poll query periodically
+    if (now - ioExpandLastPoll >= IO_EXPAND_POLL_MS) {
+        IOSerial.println("?S");
+        ioExpandLastPoll = now;
+    }
+#endif
+}
+
+// Read a virtual pin (100-115) from expansion board cache
+int ioExpandRead(int vpin) {
+    int idx = vpin - IO_EXPAND_VPIN_BASE;
+    if (idx < 0 || idx >= IO_EXPAND_MAX_PINS) return 0;
+    return ioExpandCacheValid[idx] ? ioExpandCache[idx] : 0;
+}
+
+// Send a relay command to expansion board
+void ioExpandSetRelay(int pin, int val) {
+#if IO_EXPAND_TX >= 0
+    if (!ioExpandEnabled) return;
+    IOSerial.println("!R," + String(pin) + "," + String(val));
+#endif
+}
 
 // ─── BLE State (declared early for solar mode access) ──────
 bool bleConnected = false;
@@ -603,43 +731,84 @@ String processSetpointCommand(const String& args) {
     if (args == "LIST") {
         String resp = "SETPOINTS";
         int count = 0;
-        const char* ops[] = {"GT", "LT", "EQ"};
+        const char* ops[] = {"GT", "LT", "EQ", "GE", "LE", "NE"};
         for (int i = 0; i < MAX_SETPOINTS; i++) {
             if (!setpoints[i].active) continue;
             count++;
             resp += "," + String(setpoints[i].sensorPin) + ":" +
                     String(ops[setpoints[i].op]) + ":" +
-                    String(setpoints[i].threshold) + "->" +
-                    String(setpoints[i].targetNode) + ":" +
-                    String(setpoints[i].relayPin) + ":" +
-                    String(setpoints[i].action);
+                    String(setpoints[i].threshold, 1) + "->";
+            if (setpoints[i].actionType == 1) {
+                resp += "MSG:" + String(setpoints[i].msgTrue);
+                if (setpoints[i].msgFalse[0]) resp += "/" + String(setpoints[i].msgFalse);
+            } else {
+                resp += String(setpoints[i].targetNode) + ":" +
+                        String(setpoints[i].relayPin) + ":" +
+                        String(setpoints[i].action);
+            }
+            if (setpoints[i].scaleFactor != 1.0f || setpoints[i].scaleOffset != 0.0f)
+                resp += "(x" + String(setpoints[i].scaleFactor, 3) + "+" + String(setpoints[i].scaleOffset, 1) + ")";
+            if (setpoints[i].debounceMs > 0)
+                resp += "[" + String(setpoints[i].debounceMs) + "ms]";
         }
         if (count == 0) resp += ",NONE";
         return resp;
     }
 
-    // Parse: <sensorPin>,<op>,<threshold>,<targetNode>,<relayPin>,<action>
-    // Example: 34,GT,2000,0010,4,1
-    int c[5];
+    // Formats (with optional SCALE/DEBOUNCE suffixes):
+    //   RELAY: <pin>,<op>,<threshold>,<target>,<relayPin>,<action>[,SCALE,<f>,<o>][,DEBOUNCE,<ms>]
+    //   MSG:   <pin>,<op>,<threshold>,MSG,<msgTrue>[,<msgFalse>][,SCALE,<f>,<o>][,DEBOUNCE,<ms>]
+    int c[3];
     c[0] = args.indexOf(',');
-    for (int i = 1; i < 5; i++) c[i] = args.indexOf(',', c[i-1] + 1);
-    if (c[4] < 0) return "ERR,SETPOINT,FORMAT";
+    c[1] = (c[0] > 0) ? args.indexOf(',', c[0] + 1) : -1;
+    c[2] = (c[1] > 0) ? args.indexOf(',', c[1] + 1) : -1;
+    if (c[2] < 0) return "ERR,SETPOINT,FORMAT";
 
     uint8_t sensorPin = args.substring(0, c[0]).toInt();
     String opStr = args.substring(c[0] + 1, c[1]); opStr.toUpperCase();
-    uint16_t threshold = args.substring(c[1] + 1, c[2]).toInt();
-    String targetNode = args.substring(c[2] + 1, c[3]); targetNode.trim(); targetNode.toUpperCase();
-    uint8_t relayPin = args.substring(c[3] + 1, c[4]).toInt();
-    uint8_t action = args.substring(c[4] + 1).toInt();
+    float threshold = args.substring(c[1] + 1, c[2]).toFloat();
+    String rest = args.substring(c[2] + 1);
 
     if (!isPinSafe(sensorPin)) return "ERR,SETPOINT,BADSENSOR";
-    if (!mesh.isValidNodeID(targetNode)) return "ERR,SETPOINT,BADTARGET";
 
     uint8_t op = 255;
     if (opStr == "GT") op = 0;
     else if (opStr == "LT") op = 1;
     else if (opStr == "EQ") op = 2;
-    if (op > 2) return "ERR,SETPOINT,BADOP";
+    else if (opStr == "GE") op = 3;
+    else if (opStr == "LE") op = 4;
+    else if (opStr == "NE") op = 5;
+    if (op > 5) return "ERR,SETPOINT,BADOP";
+
+    // Extract optional SCALE and DEBOUNCE suffixes before parsing action
+    float scaleFactor = 1.0f, scaleOffset = 0.0f;
+    uint16_t debounceMs = 0;
+    int scalePos = rest.indexOf(",SCALE,");
+    int debouncePos = rest.indexOf(",DEBOUNCE,");
+    String actionPart = rest;  // Will be trimmed below
+
+    if (scalePos >= 0 || debouncePos >= 0) {
+        // Find where suffixes start (whichever comes first)
+        int suffixStart = (scalePos >= 0 && debouncePos >= 0) ? min(scalePos, debouncePos)
+                        : (scalePos >= 0) ? scalePos : debouncePos;
+        actionPart = rest.substring(0, suffixStart);
+        String suffixes = rest.substring(suffixStart);
+
+        if (scalePos >= 0) {
+            int sIdx = suffixes.indexOf("SCALE,") + 6;
+            int sComma = suffixes.indexOf(',', sIdx);
+            if (sComma > sIdx) {
+                scaleFactor = suffixes.substring(sIdx, sComma).toFloat();
+                int sEnd = suffixes.indexOf(',', sComma + 1);
+                scaleOffset = (sEnd > sComma) ? suffixes.substring(sComma + 1, sEnd).toFloat()
+                                              : suffixes.substring(sComma + 1).toFloat();
+            }
+        }
+        if (debouncePos >= 0) {
+            int dIdx = suffixes.indexOf("DEBOUNCE,") + 9;
+            debounceMs = suffixes.substring(dIdx).toInt();
+        }
+    }
 
     int slot = -1;
     for (int i = 0; i < MAX_SETPOINTS; i++) {
@@ -647,20 +816,57 @@ String processSetpointCommand(const String& args) {
     }
     if (slot < 0) return "ERR,SETPOINT,FULL";
 
+    memset(&setpoints[slot], 0, sizeof(SetpointRule));
     setpoints[slot].active = true;
     setpoints[slot].sensorPin = sensorPin;
     setpoints[slot].op = op;
     setpoints[slot].threshold = threshold;
-    strncpy(setpoints[slot].targetNode, targetNode.c_str(), NODE_ID_LEN);
-    setpoints[slot].targetNode[NODE_ID_LEN] = '\0';
-    setpoints[slot].relayPin = relayPin;
-    setpoints[slot].action = action;
-    setpoints[slot].triggered = false;
-    setpoints[slot].lastFired = 0;
+    setpoints[slot].scaleFactor = scaleFactor;
+    setpoints[slot].scaleOffset = scaleOffset;
+    setpoints[slot].debounceMs = debounceMs;
 
-    const char* ops[] = {"GT", "LT", "EQ"};
-    return "OK,SETPOINT," + String(sensorPin) + "," + String(ops[op]) + "," +
-           String(threshold) + "," + targetNode + "," + String(relayPin) + "," + String(action);
+    const char* ops[] = {"GT", "LT", "EQ", "GE", "LE", "NE"};
+    String resp = "OK,SETPOINT," + String(sensorPin) + "," + String(ops[op]) + "," + String(threshold, 2);
+
+    if (actionPart.startsWith("MSG,")) {
+        String msgPart = actionPart.substring(4);
+        int comma = msgPart.indexOf(',');
+        String msgTrue = (comma > 0) ? msgPart.substring(0, comma) : msgPart;
+        String msgFalse = (comma > 0) ? msgPart.substring(comma + 1) : "";
+        msgTrue.trim(); msgFalse.trim();
+        if (msgTrue.length() == 0) return "ERR,SETPOINT,EMPTYMSG";
+        if (msgTrue.length() > SETPOINT_MSG_LEN) return "ERR,SETPOINT,MSGTOOLONG";
+
+        setpoints[slot].actionType = 1;
+        strncpy(setpoints[slot].msgTrue, msgTrue.c_str(), SETPOINT_MSG_LEN);
+        strncpy(setpoints[slot].msgFalse, msgFalse.c_str(), SETPOINT_MSG_LEN);
+        strncpy(setpoints[slot].targetNode, mesh.localID, NODE_ID_LEN);
+        resp += ",MSG," + msgTrue;
+        if (msgFalse.length() > 0) resp += "," + msgFalse;
+    } else {
+        int rc1 = actionPart.indexOf(',');
+        int rc2 = (rc1 > 0) ? actionPart.indexOf(',', rc1 + 1) : -1;
+        if (rc2 < 0) return "ERR,SETPOINT,FORMAT";
+
+        String targetNode = actionPart.substring(0, rc1); targetNode.trim(); targetNode.toUpperCase();
+        uint8_t relayPin = actionPart.substring(rc1 + 1, rc2).toInt();
+        uint8_t action = actionPart.substring(rc2 + 1).toInt();
+
+        if (!mesh.isValidNodeID(targetNode)) return "ERR,SETPOINT,BADTARGET";
+
+        setpoints[slot].actionType = 0;
+        strncpy(setpoints[slot].targetNode, targetNode.c_str(), NODE_ID_LEN);
+        setpoints[slot].targetNode[NODE_ID_LEN] = '\0';
+        setpoints[slot].relayPin = relayPin;
+        setpoints[slot].action = action;
+        resp += "," + targetNode + "," + String(relayPin) + "," + String(action);
+    }
+
+    if (scaleFactor != 1.0f || scaleOffset != 0.0f)
+        resp += ",SCALE," + String(scaleFactor, 4) + "," + String(scaleOffset, 4);
+    if (debounceMs > 0)
+        resp += ",DEBOUNCE," + String(debounceMs);
+    return resp;
 }
 
 // Handle SETPOINT command received over mesh (CMD,SETPOINT,...)
@@ -720,52 +926,123 @@ void processTimers() {
     }
 }
 
-// Check setpoint rules against current sensor values — called from loop()
-void checkSetpoints() {
-    unsigned long now = millis();
-    for (int i = 0; i < MAX_SETPOINTS; i++) {
-        if (!setpoints[i].active) continue;
-        if (now - setpoints[i].lastFired < SETPOINT_COOLDOWN) continue;
+// Fire a setpoint action — relay (local or remote) or message
+// Returns true if a LoRa TX happened (caller should yield to avoid back-to-back)
+bool fireSetpointAction(SetpointRule& sp, int value, bool triggered) {
+    String target = String(sp.targetNode);
+    bool isLocal = (target == String(mesh.localID));
 
-        int value = (setpoints[i].sensorPin >= 34) ? analogRead(setpoints[i].sensorPin)
-                                                     : digitalRead(setpoints[i].sensorPin);
-        bool condition = false;
-        switch (setpoints[i].op) {
-            case 0: condition = (value > setpoints[i].threshold); break;  // GT
-            case 1: condition = (value < setpoints[i].threshold); break;  // LT
-            case 2: condition = (value == setpoints[i].threshold); break; // EQ
-        }
+    if (sp.actionType == 0) {
+        // RELAY action
+        if (!triggered) return false;  // Relay only fires on rising edge
 
-        if (condition && !setpoints[i].triggered) {
-            // Threshold crossed — fire CMD,SET to target node over mesh
-            setpoints[i].triggered = true;
-            setpoints[i].lastFired = now;
-
-            String target = String(setpoints[i].targetNode);
-            String cmdText = "CMD,SET," + String(setpoints[i].relayPin) + "," + String(setpoints[i].action);
+        if (isLocal) {
+            // Local relay — no radio needed, just set the pin directly
+            digitalWrite(sp.relayPin, sp.action ? HIGH : LOW);
+            debugPrint("SETPOINT LOCAL: pin " + String(sp.sensorPin) + "=" + String(value) +
+                       " -> pin " + String(sp.relayPin) + "=" + String(sp.action));
+            bleSend("SETPOINT,FIRED," + String(sp.sensorPin) + "," + String(value) + ",LOCAL");
+            return false;  // No radio TX
+        } else {
+            // Remote relay — send over mesh
+            String cmdText = "CMD,SET," + String(sp.relayPin) + "," + String(sp.action);
             uint16_t dest = strtol(target.c_str(), nullptr, 16);
             String mid = mesh.generateMsgID();
             String hex = mesh.encryptMsg(cmdText);
             String payload = String(mesh.localID) + "," + target + "," + mid + "," +
                              String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
             mesh.transmitPacket(dest, payload);
-
-            debugPrint("SETPOINT: pin " + String(setpoints[i].sensorPin) + "=" + String(value) +
-                       " -> " + target + " pin " + String(setpoints[i].relayPin) + "=" + String(setpoints[i].action));
-            bleSend("SETPOINT,FIRED," + String(setpoints[i].sensorPin) + "," + String(value) + "," + target);
+            debugPrint("SETPOINT: pin " + String(sp.sensorPin) + "=" + String(value) +
+                       " -> " + target + " pin " + String(sp.relayPin) + "=" + String(sp.action));
+            bleSend("SETPOINT,FIRED," + String(sp.sensorPin) + "," + String(value) + "," + target);
+            return true;  // Radio TX happened
         }
-        else if (!condition && setpoints[i].triggered) {
-            // Hysteresis: reset trigger when value moves past threshold by 10% margin
-            uint16_t margin = setpoints[i].threshold / 10;
-            if (margin < 1) margin = 1;
-            bool clearCondition = false;
-            switch (setpoints[i].op) {
-                case 0: clearCondition = (value < (int)(setpoints[i].threshold - margin)); break;
-                case 1: clearCondition = (value > (int)(setpoints[i].threshold + margin)); break;
-                case 2: clearCondition = (value != setpoints[i].threshold); break;
+    }
+    else if (sp.actionType == 1) {
+        // MSG action — broadcast message on state change (both edges)
+        const char* msg = triggered ? sp.msgTrue : sp.msgFalse;
+        if (msg[0] == '\0') return false;  // No message configured for this edge
+
+        String msgText = "MSG," + String(msg);
+        String mid = mesh.generateMsgID();
+        String hex = mesh.encryptMsg(msgText);
+        String payload = String(mesh.localID) + ",FFFF," + mid + "," +
+                         String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+        mesh.transmitPacket(0xFFFF, payload);
+        debugPrint("SETPOINT MSG: pin " + String(sp.sensorPin) + "=" + String(value) +
+                   " -> broadcast '" + String(msg) + "'");
+        bleSend("SETPOINT,MSG," + String(sp.sensorPin) + "," + String(value) + "," + String(msg));
+        return true;  // Radio TX happened
+    }
+    return false;
+}
+
+// Evaluate setpoint condition: apply scale then compare
+bool evalSetpointCondition(SetpointRule& sp, int rawValue, float& scaled) {
+    scaled = (float)rawValue * sp.scaleFactor + sp.scaleOffset;
+    switch (sp.op) {
+        case 0: return scaled >  sp.threshold;  // GT
+        case 1: return scaled <  sp.threshold;  // LT
+        case 2: return fabsf(scaled - sp.threshold) < 0.001f;  // EQ (float-safe)
+        case 3: return scaled >= sp.threshold;  // GE
+        case 4: return scaled <= sp.threshold;  // LE
+        case 5: return fabsf(scaled - sp.threshold) >= 0.001f; // NE
+    }
+    return false;
+}
+
+// Check setpoint rules against current sensor values — called from loop()
+// Only fires ONE radio TX per call to avoid back-to-back LoRa TX.
+// Local relay actions (no radio) all run immediately.
+void checkSetpoints() {
+    unsigned long now = millis();
+    for (int i = 0; i < MAX_SETPOINTS; i++) {
+        if (!setpoints[i].active) continue;
+        if (now - setpoints[i].lastFired < SETPOINT_COOLDOWN) continue;
+
+        int rawValue = readSensorPin(setpoints[i].sensorPin);
+        float scaled;
+        bool condition = evalSetpointCondition(setpoints[i], rawValue, scaled);
+
+        if (condition && !setpoints[i].triggered) {
+            // Debounce: condition must hold continuously for debounceMs
+            if (setpoints[i].debounceMs > 0) {
+                if (setpoints[i].debounceStart == 0) {
+                    setpoints[i].debounceStart = now;  // Start timer
+                }
+                if (now - setpoints[i].debounceStart < setpoints[i].debounceMs) {
+                    continue;  // Not held long enough yet
+                }
             }
-            if (clearCondition) {
-                setpoints[i].triggered = false;
+            // Rising edge — condition confirmed (debounce passed or no debounce)
+            setpoints[i].triggered = true;
+            setpoints[i].lastFired = now;
+            setpoints[i].debounceStart = 0;
+            if (fireSetpointAction(setpoints[i], rawValue, true))
+                return;  // Radio TX happened — yield, check remaining next loop
+        }
+        else if (!condition) {
+            setpoints[i].debounceStart = 0;  // Reset debounce timer
+            if (setpoints[i].triggered) {
+                // Falling edge — hysteresis check on scaled value
+                float margin = fabsf(setpoints[i].threshold) * 0.1f;
+                if (margin < 0.1f) margin = 0.1f;
+                bool clearCondition = false;
+                switch (setpoints[i].op) {
+                    case 0: case 3: clearCondition = (scaled < (setpoints[i].threshold - margin)); break;
+                    case 1: case 4: clearCondition = (scaled > (setpoints[i].threshold + margin)); break;
+                    case 2: clearCondition = (fabsf(scaled - setpoints[i].threshold) >= 0.001f); break;
+                    case 5: clearCondition = (fabsf(scaled - setpoints[i].threshold) < 0.001f); break;
+                    default: clearCondition = true;
+                }
+                if (clearCondition) {
+                    setpoints[i].triggered = false;
+                    setpoints[i].lastFired = now;
+                    if (setpoints[i].actionType == 1) {
+                        if (fireSetpointAction(setpoints[i], rawValue, false))
+                            return;
+                    }
+                }
             }
         }
     }
@@ -1028,6 +1305,8 @@ void setupBLE() {
 }
 
 void bleSend(const String& line) {
+    // Echo BLE responses to serial when in gateway mode (so gateway GUI sees feedback)
+    if (gatewayMode) Serial.println(line);
     if (!bleConnected || !bleRxChar) return;
     String msg = line + "\n";
     for (unsigned int i = 0; i < msg.length(); i += 20) {
@@ -1321,7 +1600,7 @@ void handleSerialConfig() {
         mesh.hexToBytes(hexData, pkt, pktLen);
         if (pktLen < 7) { Serial.println("ERROR: Packet too short"); return; }
         // Transmit into local mesh via radio
-        if (mesh.canTransmit()) {
+        if (mesh.canForward()) {
             radioTransmit(pkt, pktLen);
             Serial.println("OK,PKT,TX," + String(pktLen));
         } else {
@@ -1389,10 +1668,21 @@ void handleSerialConfig() {
             if (sensorPins[i] == pin) { pinIdx = i; break; }
         }
         if (pinIdx < 0) { Serial.println("ERROR: Pin " + String(pin) + " is not a configured sensor pin"); return; }
-        if (mode == "PULSE") {
+        if (mode.startsWith("PULSE")) {
             if (!enablePulseCounter(pin)) { Serial.println("ERROR: Max 4 pulse counters"); return; }
             sensorMode[pinIdx] = SENSOR_MODE_PULSE;
-            Serial.println("OK: Pin " + String(pin) + " set to PULSE mode");
+            // Optional sample window: PINMODE <pin> PULSE <windowMs>
+            int sp2 = mode.indexOf(' ');
+            if (sp2 > 0) {
+                uint16_t windowMs = mode.substring(sp2 + 1).toInt();
+                if (windowMs >= 100) {
+                    int idx = findPulseCounter(pin);
+                    if (idx >= 0) pulseCounters[idx].sampleWindowMs = windowMs;
+                }
+            }
+            int idx = findPulseCounter(pin);
+            uint16_t win = (idx >= 0) ? pulseCounters[idx].sampleWindowMs : 5000;
+            Serial.println("OK: Pin " + String(pin) + " set to PULSE mode (window=" + String(win) + "ms)");
         } else if (mode == "ANALOG" || mode == "AUTO") {
             disablePulseCounter(pin);
             sensorMode[pinIdx] = SENSOR_MODE_AUTO;
@@ -1401,6 +1691,33 @@ void handleSerialConfig() {
         } else {
             Serial.println("ERROR: Unknown mode. Use PULSE, ANALOG, or AUTO");
         }
+    }
+    else if (line == "EXPAND ON") {
+#if IO_EXPAND_TX >= 0
+        IOSerial.begin(IO_EXPAND_BAUD, SERIAL_8N1, IO_EXPAND_RX, IO_EXPAND_TX);
+        ioExpandEnabled = true;
+        memset(ioExpandCache, 0, sizeof(ioExpandCache));
+        memset(ioExpandCacheValid, 0, sizeof(ioExpandCacheValid));
+        ioExpandRxBuf = "";
+        Serial.println("OK: IO expansion enabled on UART2 (TX=" + String(IO_EXPAND_TX) + " RX=" + String(IO_EXPAND_RX) + ")");
+        Serial.println("Virtual pins " + String(IO_EXPAND_VPIN_BASE) + "-" + String(IO_EXPAND_VPIN_BASE + IO_EXPAND_MAX_PINS - 1));
+#else
+        Serial.println("ERROR: IO expansion not supported on this board");
+#endif
+    }
+    else if (line == "EXPAND OFF") {
+#if IO_EXPAND_TX >= 0
+        ioExpandEnabled = false;
+        Serial.println("OK: IO expansion disabled");
+#else
+        Serial.println("ERROR: IO expansion not supported on this board");
+#endif
+    }
+    // Route BLE-format comma commands received over serial (gateway GUI uses this format)
+    else if (line.startsWith("POLL") || line.startsWith("TIMER,") ||
+             line.startsWith("CMD,") || line.startsWith("MSG,") ||
+             line.startsWith("SETPOINT,") || line.startsWith("AUTOPOLL,")) {
+        processBleCommand(line);
     }
     else Serial.println("Commands: ID xxxx | KEY xxx... | RELAY 2,4,12 | SENSOR 34,36 | STATUS | SAVE | RESET | GATEWAY ON/OFF | AUTOPOLL <id> <sec> | PINMODE <pin> PULSE|AUTO"
 #if defined(RADIO_SX1262)
@@ -1749,8 +2066,10 @@ void loop() {
         // Button: temporarily show OLED status
         solarCheckButton();
 
-        // Timers, setpoints, and auto-poll still run
+        // Timers, IO expansion, pulse rates, setpoints, and auto-poll still run
         processTimers();
+        ioExpandPoll();
+        updatePulseRates();
         checkSetpoints();
         executeAutoPoll();
 
@@ -1816,7 +2135,9 @@ void loop() {
     // 7. Relay timers
     processTimers();
 
-    // 8. Setpoint rules
+    // 8. IO expansion, pulse rates, setpoint rules
+    ioExpandPoll();
+    updatePulseRates();
     checkSetpoints();
 
     // 9. Auto-poll periodic sensor reporting
