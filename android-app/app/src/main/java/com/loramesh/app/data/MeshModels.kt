@@ -27,7 +27,8 @@ data class MeshNode(
     val lastSeen: Long = System.currentTimeMillis(),
     val hops: Int = 0,
     val age: Int = 0,       // seconds since last heard (from firmware)
-    val active: Boolean = true
+    val active: Boolean = true,
+    val nextHop: String = ""  // next hop node ID for route chain
 )
 
 data class RelayPin(

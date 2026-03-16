@@ -102,11 +102,16 @@ class GUIGatewayServer:
                     line, buf = buf.split(b"\n", 1)
                     line_str = line.decode("ascii", errors="replace").strip()
                     if line_str.startswith("PKT,"):
-                        hex_data = line_str[4:]
+                        # Format: PKT,<hex>,<rssi> or PKT,<hex>
+                        pkt_parts = line_str[4:].rsplit(",", 1)
+                        hex_data = pkt_parts[0]
+                        pkt_rssi = int(pkt_parts[1]) if len(pkt_parts) > 1 else -100
                         if self.dedup.is_duplicate(hex_data):
                             continue
                         self.packets_from_radio += 1
                         parsed = HexPacketParser.parse_raw(hex_data)
+                        if parsed:
+                            parsed["rssi"] = pkt_rssi
                         self._emit("packet_from_radio", hex_data=hex_data, parsed=parsed)
                         self._emit("stats", **self._stats())
                         await self.send_to_hub(hex_data)
@@ -260,6 +265,7 @@ class GatewayGUIApp:
         # Mesh state
         self.topo_nodes: dict[str, TopoNode] = {}
         self.topo_edges: dict[tuple[str, str], float] = {}  # (src,dst) -> last_seen
+        self.topo_edge_rssi: dict[tuple[str, str], int] = {}  # (src,dst) -> rssi
         self.local_id = "????"
         self.packet_history: list[dict] = []
         self.selected_packet: dict | None = None
@@ -639,6 +645,8 @@ class GatewayGUIApp:
         ptype = parsed.get("type", "")
         src = parsed.get("src", "")
 
+        pkt_rssi = parsed.get("rssi", -100)
+
         if ptype == "HB":
             hb_from = parsed.get("hb_from", src)
             if hb_from and hb_from != "FFFF":
@@ -647,6 +655,13 @@ class GatewayGUIApp:
                 node = self.topo_nodes[hb_from]
                 node.last_seen = now
                 node.packets += 1
+                node.rssi = pkt_rssi
+                node.hops = 1
+                node.next_hop = hb_from
+                # Direct link edge: us ↔ them
+                if self.local_id:
+                    self.topo_edges[(self.local_id, hb_from)] = now
+                    self.topo_edge_rssi[(self.local_id, hb_from)] = pkt_rssi
 
         elif ptype == "MSG":
             msg_from = parsed.get("msg_from", "")
@@ -656,6 +671,7 @@ class GatewayGUIApp:
                     self.topo_nodes[msg_from] = TopoNode(msg_from, msg_from == self.local_id)
                 self.topo_nodes[msg_from].last_seen = now
                 self.topo_nodes[msg_from].packets += 1
+                self.topo_nodes[msg_from].rssi = pkt_rssi
 
             # Build edges from route
             if route:
@@ -664,13 +680,19 @@ class GatewayGUIApp:
                     a, b = hops[i], hops[i + 1]
                     if a and b:
                         self.topo_edges[(a, b)] = now
+                        # Last hop has the actual RSSI; others are estimated
+                        if i == len(hops) - 2:
+                            self.topo_edge_rssi[(a, b)] = pkt_rssi
                         for nid in (a, b):
                             if nid not in self.topo_nodes:
                                 self.topo_nodes[nid] = TopoNode(nid, nid == self.local_id)
                             self.topo_nodes[nid].last_seen = now
                 if len(hops) >= 1:
-                    # Hops for the sender
-                    self.topo_nodes.get(msg_from, TopoNode(msg_from)).hops = len(hops)
+                    node = self.topo_nodes.get(msg_from)
+                    if node:
+                        node.hops = len(hops)
+                        if len(hops) >= 2:
+                            node.next_hop = hops[-1]
 
         self.update_node_cards()
 
@@ -702,13 +724,36 @@ class GatewayGUIApp:
 
             row2 = ctk.CTkFrame(card, fg_color="transparent")
             row2.pack(fill="x", padx=8, pady=(0, 5))
-            ctk.CTkLabel(row2, text=f"Pkts: {node.packets}", font=("Consolas", 9),
-                          text_color=COLORS["dim"]).pack(side="left")
-            if node.hops:
-                ctk.CTkLabel(row2, text=f"Hops: {node.hops}", font=("Consolas", 9),
-                              text_color=COLORS["dim"]).pack(side="left", padx=10)
+            # RSSI with colour
+            rssi_color = COLORS["good"] if node.rssi > -80 else (COLORS["warn"] if node.rssi > -100 else COLORS["bad"])
+            if not online:
+                rssi_color = COLORS["faint"]
+            # Signal bars: ▁▃▅▇
+            bars = 0 if not online else (4 if node.rssi > -60 else (3 if node.rssi > -75 else (2 if node.rssi > -90 else (1 if node.rssi > -105 else 0))))
+            bar_str = "".join("█" if i < bars else "░" for i in range(4))
+            ctk.CTkLabel(row2, text=f"{bar_str} {node.rssi}dBm", font=("Consolas", 10),
+                          text_color=rssi_color).pack(side="left")
+            ctk.CTkLabel(row2, text=f"Pkts:{node.packets}", font=("Consolas", 9),
+                          text_color=COLORS["dim"]).pack(side="left", padx=8)
+            if node.hops and node.hops > 1 and node.next_hop:
+                ctk.CTkLabel(row2, text=f"{node.hops}hop via {node.next_hop}", font=("Consolas", 9),
+                              text_color=COLORS["dim"]).pack(side="left", padx=4)
+            elif node.hops:
+                ctk.CTkLabel(row2, text=f"Direct", font=("Consolas", 9),
+                              text_color=COLORS["dim"]).pack(side="left", padx=4)
 
     # ─── Topology Canvas Animation ──────────────────────────
+
+    @staticmethod
+    def _rssi_edge_color(rssi: int) -> str:
+        """Map RSSI to green (strong) → orange (fair) → red (weak)."""
+        if rssi > -70:
+            return "#00E676"   # green — strong
+        if rssi > -85:
+            return "#00E5FF"   # cyan — good
+        if rssi > -100:
+            return "#FFA500"   # orange — fair
+        return "#FF5252"       # red — weak
 
     def animate_topology(self):
         canvas = self.topo_canvas
@@ -723,35 +768,66 @@ class GatewayGUIApp:
 
         if n == 0:
             canvas.create_text(cx, cy, text="Waiting for mesh traffic...",
-                                fill=COLORS["dim"], font=("Consolas", 10))
+                                fill=COLORS["dim"], font=("Consolas", 11))
             self.root.after(33, self.animate_topology)
             return
 
-        # Circular layout
-        radius = min(w, h) * 0.35
+        # Signal quality summary bar at top
+        online_nodes = [nd for nd in nodes if (now - nd.last_seen < 120) and nd.rssi < 0]
+        if online_nodes:
+            rssi_vals = [nd.rssi for nd in online_nodes]
+            best, worst, avg = max(rssi_vals), min(rssi_vals), sum(rssi_vals) // len(rssi_vals)
+            summary = f"{len(online_nodes)} nodes | Best: {best}dBm | Worst: {worst}dBm | Avg: {avg}dBm"
+            canvas.create_text(w // 2, 10, text=summary, fill="#B0B0B0", font=("Consolas", 9))
+            # Weak link warning
+            weak = [nd for nd in online_nodes if nd.rssi < -100]
+            if weak:
+                worst_node = min(weak, key=lambda nd: nd.rssi)
+                via = f" via {worst_node.next_hop}" if worst_node.next_hop and worst_node.next_hop != worst_node.id else ""
+                warn = f"Weak: {worst_node.id} ({worst_node.rssi}dBm{via})"
+                canvas.create_text(w // 2, 22, text=warn, fill=COLORS["warn"], font=("Consolas", 9))
+
+        # Circular layout with padding for summary
+        top_pad = 35
+        radius = min(w, h - top_pad) * 0.33
         for i, node in enumerate(nodes):
             angle = i * (2 * math.pi / n) - math.pi / 2
             node.x = cx + radius * math.cos(angle)
-            node.y = cy + radius * math.sin(angle)
+            node.y = (cy + top_pad // 2) + radius * math.sin(angle)
 
-        # Draw edges
+        # Draw edges — colour and thickness by RSSI
         for (a, b), last in self.topo_edges.items():
             na = self.topo_nodes.get(a)
             nb = self.topo_nodes.get(b)
             if na and nb:
                 age = now - last
-                alpha = max(0.2, 1.0 - age / 120.0)
-                # Approximate alpha with color blend
-                r = int(0x00 + (0x00 - 0x00) * alpha)
-                g = int(0x44 + (0xE5 - 0x44) * alpha)
-                b_val = int(0x44 + (0xFF - 0x44) * alpha)
-                color = f"#{r:02X}{g:02X}{b_val:02X}"
-                canvas.create_line(na.x, na.y, nb.x, nb.y, fill=color, width=1)
+                if age > 300:
+                    continue  # Prune old edges
+                rssi = self.topo_edge_rssi.get((a, b), -100)
+                color = self._rssi_edge_color(rssi)
+                # Fade old edges
+                if age > 120:
+                    color = COLORS["faint"]
+                # Thickness: strong=3, weak=1
+                thickness = max(1, min(3, int((rssi + 110) / 15)))
+                canvas.create_line(na.x, na.y, nb.x, nb.y, fill=color, width=thickness)
+                # RSSI label on edge midpoint
+                if rssi > -120:
+                    mx = (na.x + nb.x) / 2
+                    my = (na.y + nb.y) / 2
+                    canvas.create_text(mx, my - 6, text=f"{rssi}", fill=color,
+                                        font=("Consolas", 8))
 
-        # Draw nodes
+        # Draw nodes — size by hop count
         for node in nodes:
             age = now - node.last_seen if node.last_seen else 9999
-            r = 14 if node.is_local else 10
+            # Size: local=16, direct=12, multi-hop=9
+            if node.is_local:
+                r = 16
+            elif node.hops <= 1:
+                r = 12
+            else:
+                r = 9
 
             if age < 120:
                 outline = COLORS["good"] if age < 30 else COLORS["warn"]
@@ -762,7 +838,12 @@ class GatewayGUIApp:
             canvas.create_oval(node.x - r, node.y - r, node.x + r, node.y + r,
                                 fill=fill, outline=outline, width=2)
             canvas.create_text(node.x, node.y, text=node.id, fill=COLORS["text"],
-                                font=("Consolas", 7 if not node.is_local else 8, "bold"))
+                                font=("Consolas", 8 if node.is_local else 7, "bold"))
+            # RSSI below node
+            if age < 120 and node.rssi < 0:
+                canvas.create_text(node.x, node.y + r + 8, text=f"{node.rssi}dBm",
+                                    fill=self._rssi_edge_color(node.rssi),
+                                    font=("Consolas", 7))
 
         self.root.after(33, self.animate_topology)
 

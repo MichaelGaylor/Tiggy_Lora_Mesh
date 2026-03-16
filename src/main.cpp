@@ -1332,6 +1332,13 @@ void viewKnownNodes() {
       display.setCursor(210, y);
       if (age < 60) display.print(String(age) + "s");
       else display.print(String(age / 60) + "m");
+
+      // Route info: show "via <nextHop>" for multi-hop nodes
+      int hops = it->second.cost / COST_WEIGHT;
+      if (hops > 1 && it->second.nextHop.length() > 0) {
+        display.setCursor(250, y);
+        display.print("via " + it->second.nextHop);
+      }
     } else {
       display.setTextColor(COL_FAINT, COL_BG);
       display.setCursor(80, y);
