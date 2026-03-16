@@ -27,6 +27,7 @@
 #if defined(RADIO_SX1262)
 #include "esp_sleep.h"
 #include "driver/gpio.h"
+#include "driver/uart.h"
 #endif
 
 // Only compile for repeater boards
@@ -69,23 +70,96 @@ SX1262 radio = new Module(RADIO_CS, RADIO_DIO1, RADIO_RST, RADIO_BUSY, loraSPI);
 SX1276 radio = new Module(RADIO_CS, RADIO_DIO0, RADIO_RST, -1, loraSPI);
 #endif
 
+// ─── GPIO State ──────────────────────────────────────────────
+uint8_t relayPins[MAX_RELAY_PINS_CFG];
+uint8_t relayCount = 0;
+uint8_t sensorPins[MAX_SENSOR_PINS_CFG];
+uint8_t sensorCount = 0;
+
+// ─── Pulse Counter Mode ─────────────────────────────────────
+// Sensor pin modes: 0=auto (analog/digital), 1=pulse counter
+#define SENSOR_MODE_AUTO   0
+#define SENSOR_MODE_PULSE  1
+#define MAX_PULSE_PINS     4
+
+uint8_t sensorMode[MAX_SENSOR_PINS_CFG] = {0}; // mode per sensor pin
+
+struct PulseCounter {
+    uint8_t pin;
+    volatile uint32_t count;
+    uint32_t lastRead;     // count at last SDATA/POLL read
+    bool active;
+};
+static PulseCounter pulseCounters[MAX_PULSE_PINS];
+static uint8_t pulseCounterCount = 0;
+
+// ISR handlers — single-instruction increments, IRAM_ATTR keeps them in fast RAM.
+// These complete in <1us and do NOT touch radio state, so they cannot cause
+// packet loss or interfere with LoRa reception (which takes milliseconds).
+static void IRAM_ATTR pulseISR0() { pulseCounters[0].count++; }
+static void IRAM_ATTR pulseISR1() { pulseCounters[1].count++; }
+static void IRAM_ATTR pulseISR2() { pulseCounters[2].count++; }
+static void IRAM_ATTR pulseISR3() { pulseCounters[3].count++; }
+static void (*pulseISRs[MAX_PULSE_PINS])() = { pulseISR0, pulseISR1, pulseISR2, pulseISR3 };
+
+// Find pulse counter for a pin, or -1 if not found
+static int findPulseCounter(uint8_t pin) {
+    for (int i = 0; i < pulseCounterCount; i++) {
+        if (pulseCounters[i].pin == pin && pulseCounters[i].active)
+            return i;
+    }
+    return -1;
+}
+
+// Enable pulse counting on a pin
+static bool enablePulseCounter(uint8_t pin) {
+    if (findPulseCounter(pin) >= 0) return true; // already active
+    if (pulseCounterCount >= MAX_PULSE_PINS) return false;
+    int idx = pulseCounterCount++;
+    pulseCounters[idx].pin = pin;
+    pulseCounters[idx].count = 0;
+    pulseCounters[idx].lastRead = 0;
+    pulseCounters[idx].active = true;
+    pinMode(pin, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(pin), pulseISRs[idx], RISING);
+    return true;
+}
+
+// Disable pulse counting on a pin
+static void disablePulseCounter(uint8_t pin) {
+    int idx = findPulseCounter(pin);
+    if (idx < 0) return;
+    detachInterrupt(digitalPinToInterrupt(pin));
+    pulseCounters[idx].active = false;
+}
+
+// Read a pulse counter — returns count since last read (delta).
+// Brief interrupt disable ensures atomic read of count vs lastRead.
+static uint32_t readPulseCount(uint8_t pin) {
+    int idx = findPulseCounter(pin);
+    if (idx < 0) return 0;
+    noInterrupts();
+    uint32_t current = pulseCounters[idx].count;
+    uint32_t delta = current - pulseCounters[idx].lastRead;
+    pulseCounters[idx].lastRead = current;
+    interrupts();
+    return delta;
+}
+
 // ─── Sensor read helper ─────────────────────────────────
-// ESP32-S3 has ADC on GPIOs 1-20; classic ESP32 has ADC1 on 32-39.
-// Sensor pins are user-configured, so always use analogRead for them
-// on S3 boards regardless of pin number.
-static inline int readSensorPin(int pin) {
+// Checks sensor mode first: PULSE returns edge count since last read.
+// AUTO mode: ESP32-S3 has ADC on GPIOs 1-20; classic ESP32 has ADC1 on 32-39.
+static int readSensorPin(int pin) {
+    for (int i = 0; i < sensorCount; i++) {
+        if (sensorPins[i] == pin && sensorMode[i] == SENSOR_MODE_PULSE)
+            return (int)readPulseCount(pin);
+    }
 #ifdef CONFIG_IDF_TARGET_ESP32S3
     return analogRead(pin);      // S3: ADC available on all sensor-capable GPIOs
 #else
     return (pin >= 32) ? analogRead(pin) : digitalRead(pin);  // Classic ESP32
 #endif
 }
-
-// ─── GPIO State ──────────────────────────────────────────────
-uint8_t relayPins[MAX_RELAY_PINS_CFG];
-uint8_t relayCount = 0;
-uint8_t sensorPins[MAX_SENSOR_PINS_CFG];
-uint8_t sensorCount = 0;
 
 // ─── Timing ──────────────────────────────────────────────────
 unsigned long nextHeartbeatTime = 0;
@@ -142,7 +216,8 @@ struct SetpointRule {
 SetpointRule setpoints[MAX_SETPOINTS];
 
 // ─── Solar Mode ─────────────────────────────────────────────
-// Low-power mode: OLED off, radio+BLE stay active.
+// Deep low-power mode: OLED off, BLE deinited, ESP32 light-sleeps
+// between radio DIO1 interrupts. Radio stays in continuous RX.
 // Persisted to EEPROM so it survives power cycles.
 bool solarMode = false;
 bool solarOledTemporary = false;
@@ -261,23 +336,51 @@ void receiveCheck() {
 
 void startSolarMode() {
     solarMode = true;
-    debugPrint("SOLAR: Entering low-power mode");
+    debugPrint("SOLAR: Entering deep low-power mode");
 
-    // Disable OLED (biggest power draw after radio)
+    // 1. Disable OLED via Vext — saves ~15mA
 #ifdef VEXT_CTRL
     digitalWrite(VEXT_CTRL, HIGH);  // Vext OFF
 #endif
     oledAvailable = false;
 
-    // Keep BLE alive — user can still configure/monitor via app
-    // Keep radio in continuous RX — no packet loss
-    // Heartbeat interval extended to 60s to save TX power
-    debugPrint("SOLAR: OLED off, BLE+radio stay active");
+    // 2. Deinitialise BLE — saves ~15mA and ~60KB RAM
+    BLEDevice::deinit(true);
+    debugPrint("SOLAR: BLE deinited");
+
+    // 3. Configure light sleep with DIO1 wakeup
+    //    Radio stays in continuous RX. DIO1 fires on packet → wakes CPU.
+    //    Between events, CPU draws ~0.8mA instead of ~80mA.
+    gpio_wakeup_enable((gpio_num_t)RADIO_DIO1, GPIO_INTR_HIGH_LEVEL);
+#if defined(BOARD_BUTTON) && BOARD_BUTTON >= 0
+    gpio_wakeup_enable((gpio_num_t)BOARD_BUTTON, GPIO_INTR_LOW_LEVEL);
+#endif
+    esp_sleep_enable_gpio_wakeup();
+    // Wake on timer for heartbeats (60s)
+    esp_sleep_enable_timer_wakeup(HB_INTERVAL_SOLAR * 1000ULL);  // microseconds
+    // Wake on UART input so serial commands (SOLAR OFF) work during sleep
+    uart_set_wakeup_threshold(UART_NUM_0, 3);  // wake after 3 edges on RX
+    esp_sleep_enable_uart_wakeup(UART_NUM_0);
+
+    debugPrint("SOLAR: OLED off, BLE off, light sleep armed");
+    debugPrint("SOLAR: Press PRG button or send SOLAR OFF via serial to exit");
+    Serial.flush();
+}
+
+void solarLightSleep() {
+    // Enter light sleep — CPU halts until DIO1, button, or timer wakes it
+    // All RAM preserved, GPIO config preserved, radio stays in RX
+    esp_light_sleep_start();
+    // Woken up — check what woke us and handle it
 }
 
 void stopSolarMode() {
     solarMode = false;
     debugPrint("SOLAR: Restoring normal operation");
+
+    // Disable light sleep wakeup sources
+    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_GPIO);
+    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
 
     // Re-enable OLED
 #ifdef VEXT_CTRL
@@ -295,8 +398,11 @@ void stopSolarMode() {
         oled.println("Normal operation");
         oled.display();
     }
-
     debugPrint("SOLAR: OLED restored");
+
+    // Reinit BLE
+    setupBLE();
+    debugPrint("SOLAR: BLE restored — full operation resumed");
 }
 
 void solarCheckButton() {
@@ -1009,10 +1115,11 @@ void processBleCommand(const String& line) {
     }
 #if defined(RADIO_SX1262)
     else if (line == "POWER,SOLAR") {
+        bleSend("OK,POWER,SOLAR");  // Send response BEFORE deiniting BLE
+        delay(200);  // Allow BLE notification to be sent
         solarMode = true;
         saveConfig();
         startSolarMode();
-        bleSend("OK,POWER,SOLAR");
     }
     else if (line == "POWER,NORMAL") {
         if (solarMode) { stopSolarMode(); saveConfig(); }
@@ -1096,6 +1203,32 @@ void processBleCommand(const String& line) {
     }
     else if (line.startsWith("SETPOINT,")) {
         handleSetpointBle(line.substring(9));
+    }
+    else if (line.startsWith("PINMODE,")) {
+        // PINMODE,<pin>,PULSE|ANALOG|AUTO — set sensor pin mode
+        String args = line.substring(8); args.trim();
+        int comma = args.indexOf(',');
+        if (comma < 0) { bleSend("ERR,PINMODE,FORMAT"); return; }
+        int pin = args.substring(0, comma).toInt();
+        String mode = args.substring(comma + 1); mode.trim(); mode.toUpperCase();
+        // Verify pin is a configured sensor pin
+        int pinIdx = -1;
+        for (int i = 0; i < sensorCount; i++) {
+            if (sensorPins[i] == pin) { pinIdx = i; break; }
+        }
+        if (pinIdx < 0) { bleSend("ERR,PINMODE,NOT_SENSOR"); return; }
+        if (mode == "PULSE") {
+            if (!enablePulseCounter(pin)) { bleSend("ERR,PINMODE,MAX4"); return; }
+            sensorMode[pinIdx] = SENSOR_MODE_PULSE;
+            bleSend("OK,PINMODE," + String(pin) + ",PULSE");
+        } else if (mode == "ANALOG" || mode == "AUTO") {
+            disablePulseCounter(pin);
+            sensorMode[pinIdx] = SENSOR_MODE_AUTO;
+            pinMode(pin, INPUT);
+            bleSend("OK,PINMODE," + String(pin) + ",AUTO");
+        } else {
+            bleSend("ERR,PINMODE,UNKNOWN");
+        }
     }
 }
 
@@ -1233,8 +1366,9 @@ void handleSerialConfig() {
     else if (line == "SOLAR ON") {
         solarMode = true;
         saveConfig();
-        Serial.println("OK: Solar mode ON — entering low-power state");
-        delay(100);
+        Serial.println("OK: Solar mode ON — OLED off, BLE off, CPU light-sleep between packets");
+        Serial.println("Send SOLAR OFF via serial or press PRG to exit");
+        Serial.flush();
         startSolarMode();
     }
     else if (line == "SOLAR OFF") {
@@ -1243,7 +1377,32 @@ void handleSerialConfig() {
         Serial.println("OK: Solar mode OFF — normal operation restored");
     }
 #endif
-    else Serial.println("Commands: ID xxxx | KEY xxx... | RELAY 2,4,12 | SENSOR 34,36 | STATUS | SAVE | RESET | GATEWAY ON/OFF | AUTOPOLL <id> <sec>"
+    else if (line.startsWith("PINMODE ")) {
+        // PINMODE <pin> PULSE|ANALOG|AUTO — set sensor pin mode
+        String args = line.substring(8); args.trim();
+        int sp = args.indexOf(' ');
+        if (sp < 0) { Serial.println("Usage: PINMODE <pin> PULSE|ANALOG|AUTO"); return; }
+        int pin = args.substring(0, sp).toInt();
+        String mode = args.substring(sp + 1); mode.trim(); mode.toUpperCase();
+        int pinIdx = -1;
+        for (int i = 0; i < sensorCount; i++) {
+            if (sensorPins[i] == pin) { pinIdx = i; break; }
+        }
+        if (pinIdx < 0) { Serial.println("ERROR: Pin " + String(pin) + " is not a configured sensor pin"); return; }
+        if (mode == "PULSE") {
+            if (!enablePulseCounter(pin)) { Serial.println("ERROR: Max 4 pulse counters"); return; }
+            sensorMode[pinIdx] = SENSOR_MODE_PULSE;
+            Serial.println("OK: Pin " + String(pin) + " set to PULSE mode");
+        } else if (mode == "ANALOG" || mode == "AUTO") {
+            disablePulseCounter(pin);
+            sensorMode[pinIdx] = SENSOR_MODE_AUTO;
+            pinMode(pin, INPUT);
+            Serial.println("OK: Pin " + String(pin) + " set to AUTO mode");
+        } else {
+            Serial.println("ERROR: Unknown mode. Use PULSE, ANALOG, or AUTO");
+        }
+    }
+    else Serial.println("Commands: ID xxxx | KEY xxx... | RELAY 2,4,12 | SENSOR 34,36 | STATUS | SAVE | RESET | GATEWAY ON/OFF | AUTOPOLL <id> <sec> | PINMODE <pin> PULSE|AUTO"
 #if defined(RADIO_SX1262)
         " | SOLAR ON/OFF"
 #endif
@@ -1530,8 +1689,8 @@ void setup() {
         }
         nextHeartbeatTime = millis() + random(2000, 8000);
         startSolarMode();
-        Serial.println("Solar mode active. OLED off, BLE+radio stay on.");
-        Serial.println("Send SOLAR OFF via serial or POWER,NORMAL via BLE to restore.");
+        Serial.println("Solar mode active. OLED off, BLE off, CPU light-sleep between packets.");
+        Serial.println("Send SOLAR OFF via serial or press PRG button to restore.");
         return;
     }
 #endif
@@ -1564,13 +1723,13 @@ void setup() {
 }
 
 void loop() {
-    // ─── Solar mode — OLED off, everything else runs normally ──
+    // ─── Solar mode — deep low-power with light sleep ──────────
+    // OLED off, BLE off, CPU sleeps between DIO1 (radio packet) interrupts.
+    // Radio stays in continuous RX — no packets lost.
+    // ~11mA total (CPU 0.8mA light-sleep + radio 10mA RX).
 #if defined(RADIO_SX1262)
     if (solarMode) {
-        // BLE commands still processed
-        processBleQueue();
-
-        // Radio RX — continuous, no packet loss
+        // Radio RX — process any packet that woke us
         receiveCheck();
         mesh.processPendingForwards();
 
@@ -1590,13 +1749,19 @@ void loop() {
         // Button: temporarily show OLED status
         solarCheckButton();
 
-        // Timers, setpoints, and auto-poll run in solar mode too
+        // Timers, setpoints, and auto-poll still run
         processTimers();
         checkSetpoints();
         executeAutoPoll();
 
-        // Serial commands (full set, not restricted)
+        // Serial commands — only way to exit solar mode (BLE is off)
         handleSerialConfig();
+
+        // Enter light sleep — CPU halts until DIO1 (packet), button, or timer
+        // This is where the power saving happens (~0.8mA vs ~80mA active)
+        if (!mesh.rxFlag && !Serial.available()) {
+            solarLightSleep();
+        }
         return;
     }
 #endif

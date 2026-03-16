@@ -28,7 +28,29 @@ fun ChatScreen(viewModel: MeshViewModel) {
     val messages by viewModel.messages.collectAsState()
     var input by remember { mutableStateOf("") }
     var targetId by remember { mutableStateOf("FFFF") }
+    var showSosDialog by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
+
+    // SOS confirmation dialog
+    if (showSosDialog) {
+        AlertDialog(
+            onDismissRequest = { showSosDialog = false },
+            title = { Text("SOS Emergency", color = Color(0xFFFF1744)) },
+            text = { Text("This will broadcast an SOS alert with your GPS location to ALL nodes on the mesh and Telegram.\n\nAre you sure?") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.sendSOS()
+                        showSosDialog = false
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF1744))
+                ) { Text("Send SOS") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSosDialog = false }) { Text("Cancel") }
+            }
+        )
+    }
 
     // Auto-scroll to bottom on new messages
     LaunchedEffect(messages.size) {
@@ -38,7 +60,7 @@ fun ChatScreen(viewModel: MeshViewModel) {
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        // Target selector
+        // Target selector + SOS button
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -64,6 +86,18 @@ fun ChatScreen(viewModel: MeshViewModel) {
                 color = if (targetId == "FFFF") MeshOrange else MeshGreen,
                 style = MaterialTheme.typography.bodySmall
             )
+            Spacer(Modifier.weight(1f))
+            // SOS Button
+            Button(
+                onClick = { showSosDialog = true },
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF1744)),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                modifier = Modifier.height(36.dp)
+            ) {
+                Icon(Icons.Default.Warning, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("SOS", style = MaterialTheme.typography.labelMedium)
+            }
         }
 
         // Messages

@@ -97,6 +97,12 @@ class GatewayHub:
         self.total_packets_relayed = 0
         self.total_connections = 0
 
+        # Encrypted sensor packet store — ring buffer of raw MSG payloads
+        # Each entry: {from, to, mid, encrypted, timestamp}
+        # Hub never decrypts — web clients decrypt in-browser with user's AES key
+        self.encrypted_packets: list[dict] = []
+        self.MAX_ENCRYPTED_PACKETS = 500
+
         # Gateway registry (persisted to disk so offline gateways appear on map)
         self.registry_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gateways.json")
         self.registry: dict[str, dict] = {}  # id -> {name, lat, lon, ...}
@@ -232,6 +238,9 @@ class GatewayHub:
             gw.packets_relayed += 1
             self.total_packets_relayed += 1
 
+            # Extract MSG fields for encrypted sensor API (never decrypts)
+            self._extract_msg_from_packet(hex_data)
+
             # Relay to all other authenticated gateways
             relay_msg = json.dumps({
                 "type": "pkt",
@@ -284,6 +293,37 @@ class GatewayHub:
             except (ConnectionError, ConnectionResetError):
                 pass
 
+    # ─── Encrypted Packet Extraction ─────────────────────────
+
+    def _extract_msg_from_packet(self, hex_data: str):
+        """Extract MSG fields from a raw hex packet (never decrypts).
+        Packet binary format: dest(2) + src(2) + seq(2) + ttl(1) + payload(N) + crc(2)
+        Payload text: MSG,<from>,<to>,<mid>,<ttl>,<route>,<encrypted_hex>
+        """
+        try:
+            raw = bytes.fromhex(hex_data)
+            if len(raw) < 9:
+                return
+            payload_bytes = raw[7:-2]  # strip header(7) and CRC(2)
+            payload = payload_bytes.decode("ascii", errors="replace")
+            if not payload.startswith("MSG,"):
+                return
+            parts = payload.split(",", 6)  # MSG,from,to,mid,ttl,route,encrypted
+            if len(parts) < 7:
+                return
+            self.encrypted_packets.append({
+                "from": parts[1],
+                "to": parts[2],
+                "mid": parts[3],
+                "encrypted": parts[6],
+                "ts": time.time(),
+            })
+            # Trim ring buffer
+            if len(self.encrypted_packets) > self.MAX_ENCRYPTED_PACKETS:
+                self.encrypted_packets = self.encrypted_packets[-self.MAX_ENCRYPTED_PACKETS:]
+        except Exception:
+            pass
+
     # ─── HTTP API (serves map + gateway data) ────────────────
 
     def _get_gateways_json(self):
@@ -330,6 +370,15 @@ class GatewayHub:
         """GET /api/gateways — JSON array of gateway info."""
         return web.json_response(self._get_gateways_json())
 
+    async def handle_api_sensors(self, request):
+        """GET /api/sensors — encrypted MSG packets for client-side decryption.
+        Query params: since=<timestamp> to get only recent packets.
+        The hub never decrypts — the web client does it in-browser with the user's AES key.
+        """
+        since = float(request.query.get("since", 0))
+        packets = [p for p in self.encrypted_packets if p["ts"] > since]
+        return web.json_response({"packets": packets})
+
     async def handle_root(self, request):
         """GET / — WebSocket upgrade → gateway handler; normal GET → map.html."""
         # If this is a WebSocket upgrade request, handle as gateway connection
@@ -363,6 +412,7 @@ class GatewayHub:
         log.info(f"  WebSocket: ws://0.0.0.0:{self.listen_port}/ws")
         log.info(f"  Map:       http://0.0.0.0:{self.listen_port}/")
         log.info(f"  API:       http://0.0.0.0:{self.listen_port}/api/gateways")
+        log.info(f"  Sensors:   http://0.0.0.0:{self.listen_port}/api/sensors")
         if self.auth_key:
             log.info(f"  Authentication: ENABLED (key required)")
         else:
@@ -373,6 +423,7 @@ class GatewayHub:
         app.router.add_get("/ws", self.ws_handler)
         # HTTP endpoints for map API
         app.router.add_get("/api/gateways", self.handle_api_gateways)
+        app.router.add_get("/api/sensors", self.handle_api_sensors)
         # Static files from gateway/web/
         web_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
         if os.path.isdir(web_dir):

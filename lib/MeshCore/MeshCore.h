@@ -26,7 +26,7 @@
 #define LORA_SYNC       0x12
 
 #define EEPROM_SIZE     512
-#define MAX_NODES       20
+#define MAX_NODES       50      // Each node tracks up to 50 peers (was 20)
 #define NODE_ID_LEN     4
 #define MAX_MSG_LEN     200
 #define AES_KEY_LEN     16
