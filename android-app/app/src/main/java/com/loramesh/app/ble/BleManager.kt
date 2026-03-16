@@ -196,6 +196,11 @@ class BleManager(private val context: Context) {
             }
 
             _connectionState.value = ConnectionState.CONNECTED
+
+            // Auto-request STATUS so the app knows the board type, power mode, etc.
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                send("STATUS")
+            }, 500)
         }
 
         // Android 13+ uses new signature with value parameter
