@@ -371,7 +371,7 @@ fun SettingsScreen(viewModel: MeshViewModel) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text("Solar Mode", style = MaterialTheme.typography.bodyMedium)
                             Text(
-                                "Turns off OLED to save power. BLE and radio stay fully active.",
+                                "Turns off OLED, enables light sleep between packets. BLE and radio stay active.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MeshGrey
                             )

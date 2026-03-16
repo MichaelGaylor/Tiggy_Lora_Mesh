@@ -463,7 +463,7 @@ void receiveCheck() {
 
 void startSolarMode() {
     solarMode = true;
-    debugPrint("SOLAR: Entering deep low-power mode");
+    debugPrint("SOLAR: Entering low-power mode");
 
     // 1. Disable OLED via Vext — saves ~15mA
 #ifdef VEXT_CTRL
@@ -471,13 +471,13 @@ void startSolarMode() {
 #endif
     oledAvailable = false;
 
-    // 2. Deinitialise BLE — saves ~15mA and ~60KB RAM
-    BLEDevice::deinit(true);
-    debugPrint("SOLAR: BLE deinited");
+    // BLE stays active — needed for app control and solar mode toggle
+    // Radio stays in continuous RX
 
-    // 3. Configure light sleep with DIO1 wakeup
+    // 2. Configure light sleep with DIO1 wakeup
     //    Radio stays in continuous RX. DIO1 fires on packet → wakes CPU.
-    //    Between events, CPU draws ~0.8mA instead of ~80mA.
+    //    Between events, CPU draws ~2-3mA instead of ~80mA (higher than
+    //    full deep sleep because BLE is still active, but much less than normal).
     gpio_wakeup_enable((gpio_num_t)RADIO_DIO1, GPIO_INTR_HIGH_LEVEL);
 #if defined(BOARD_BUTTON) && BOARD_BUTTON >= 0
     gpio_wakeup_enable((gpio_num_t)BOARD_BUTTON, GPIO_INTR_LOW_LEVEL);
@@ -489,12 +489,20 @@ void startSolarMode() {
     uart_set_wakeup_threshold(UART_NUM_0, 3);  // wake after 3 edges on RX
     esp_sleep_enable_uart_wakeup(UART_NUM_0);
 
-    debugPrint("SOLAR: OLED off, BLE off, light sleep armed");
-    debugPrint("SOLAR: Press PRG button or send SOLAR OFF via serial to exit");
+    debugPrint("SOLAR: OLED off, BLE active, light sleep armed");
+    debugPrint("SOLAR: Toggle off via app, PRG button, or SOLAR OFF via serial");
     Serial.flush();
 }
 
 void solarLightSleep() {
+#if defined(CONFIG_IDF_TARGET_ESP32S3) && ARDUINO_USB_CDC_ON_BOOT
+    // ESP32-S3 USB-CDC disconnects during light sleep — skip if gateway
+    // mode is active (needs USB serial for data). Just use delay instead.
+    if (gatewayMode) {
+        delay(100);  // Yield CPU without disconnecting USB
+        return;
+    }
+#endif
     // Enter light sleep — CPU halts until DIO1, button, or timer wakes it
     // All RAM preserved, GPIO config preserved, radio stays in RX
     esp_light_sleep_start();
@@ -525,11 +533,8 @@ void stopSolarMode() {
         oled.println("Normal operation");
         oled.display();
     }
-    debugPrint("SOLAR: OLED restored");
-
-    // Reinit BLE
-    setupBLE();
-    debugPrint("SOLAR: BLE restored — full operation resumed");
+    debugPrint("SOLAR: OLED restored — full operation resumed");
+    // BLE was never deinited, so no need to reinit
 }
 
 void solarCheckButton() {
@@ -1858,8 +1863,16 @@ void updateOLED() {
 // ═══════════════════════════════════════════════════════════════
 
 void setup() {
+#if defined(CONFIG_IDF_TARGET_ESP32S3) && ARDUINO_USB_CDC_ON_BOOT
+    // ESP32-S3 USB-CDC needs time to enumerate after power-on/flash.
+    // Without this delay, the host may not see the port.
+    Serial.begin(115200);
+    delay(2000);  // Give USB host time to enumerate CDC device
+    Serial.setTxTimeoutMs(0);  // Don't block on USB if host isn't listening
+#else
     Serial.begin(115200);
     delay(500);
+#endif
     Serial.println("\n═══════════════════════════════════");
     Serial.println("  TiggyOpenMesh Repeater v4.0");
     Serial.println("  Board: " + String(BOARD_NAME));
