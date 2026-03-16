@@ -1863,16 +1863,8 @@ void updateOLED() {
 // ═══════════════════════════════════════════════════════════════
 
 void setup() {
-#if defined(CONFIG_IDF_TARGET_ESP32S3) && ARDUINO_USB_CDC_ON_BOOT
-    // ESP32-S3 USB-CDC needs time to enumerate after power-on/flash.
-    // Without this delay, the host may not see the port.
     Serial.begin(115200);
-    delay(2000);  // Give USB host time to enumerate CDC device
-    Serial.setTxTimeoutMs(0);  // Don't block on USB if host isn't listening
-#else
-    Serial.begin(115200);
-    delay(500);
-#endif
+    delay(1000);
     Serial.println("\n═══════════════════════════════════");
     Serial.println("  TiggyOpenMesh Repeater v4.0");
     Serial.println("  Board: " + String(BOARD_NAME));
