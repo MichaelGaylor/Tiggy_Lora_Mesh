@@ -77,9 +77,14 @@
 <div id="map"></div>
 
 <div class="sensor-bar">
-  <h2>Sensor Monitor</h2>
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px">
+    <h2 style="margin:0">Sensor Monitor</h2>
+    <input id="aes-key" type="password" placeholder="AES key (16 chars)" maxlength="16"
+      style="background:#141a22;border:1px solid #1a2030;border-radius:4px;padding:4px 8px;color:#c5cdd9;font-size:11px;width:160px;font-family:monospace">
+    <span id="decrypt-status" style="font-size:10px;color:#556"></span>
+  </div>
   <div class="sensor-grid" id="sensor-grid">
-    <div class="no-sensors" id="no-sensors">No sensor data — set AES key in Hub GUI to decode SDATA packets</div>
+    <div class="no-sensors" id="no-sensors">Enter AES key to decrypt sensor data from mesh nodes</div>
   </div>
 </div>
 
@@ -320,13 +325,107 @@ async function fetchGateways() {
   }
 }
 
-async function fetchSensors() {
+// ── AES-128-GCM client-side decryption (Web Crypto API) ──
+// The hub stores raw encrypted hex blobs. We decrypt in-browser
+// so sensor data stays end-to-end encrypted — hub never sees plaintext.
+
+const GCM_NONCE_LEN = 12;
+const GCM_TAG_LEN = 16;
+let lastSensorTs = 0;
+const sensorState = {};  // key -> {current, min, max, count, history[]}
+const MAX_HISTORY = 60;
+
+function hexToBytes(hex) {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < hex.length; i += 2)
+    bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
+  return bytes;
+}
+
+async function importAesKey(keyStr) {
+  const enc = new TextEncoder();
+  return crypto.subtle.importKey('raw', enc.encode(keyStr), { name: 'AES-GCM' }, false, ['decrypt']);
+}
+
+async function decryptGcm(hexBlob, cryptoKey) {
+  const raw = hexToBytes(hexBlob);
+  if (raw.length < GCM_NONCE_LEN + GCM_TAG_LEN + 1) return null;
+  const nonce = raw.slice(0, GCM_NONCE_LEN);
+  const ciphertextAndTag = raw.slice(GCM_NONCE_LEN);
   try {
-    const resp = await fetch('/api/sensors');
-    const data = await resp.json();
-    updateSensors(data);
+    const plainBuf = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: nonce, tagLength: GCM_TAG_LEN * 8 },
+      cryptoKey,
+      ciphertextAndTag
+    );
+    return new TextDecoder().decode(plainBuf);
   } catch (e) {
-    // Sensor API may not be available
+    return null;  // wrong key or tampered
+  }
+}
+
+function processSensorText(nodeId, text) {
+  // text format: SDATA,<nodeId>,<pin>:<val>,... or just the raw message
+  const sdataPrefix = 'SDATA,';
+  if (!text.startsWith(sdataPrefix)) return;
+  const parts = text.split(',');
+  if (parts.length < 3) return;
+  const srcNode = parts[1];
+  for (let i = 2; i < parts.length; i++) {
+    const pv = parts[i].split(':');
+    if (pv.length !== 2) continue;
+    const pin = parseInt(pv[0]), val = parseInt(pv[1]);
+    if (isNaN(pin) || isNaN(val)) continue;
+    const key = srcNode + ':' + pin;
+    if (!sensorState[key]) {
+      sensorState[key] = { current: val, min: val, max: val, count: 0, history: [] };
+    }
+    const s = sensorState[key];
+    s.current = val;
+    s.min = Math.min(s.min, val);
+    s.max = Math.max(s.max, val);
+    s.count++;
+    s.history.push({ v: val, t: Date.now() });
+    if (s.history.length > MAX_HISTORY) s.history.shift();
+  }
+}
+
+async function fetchSensors() {
+  const keyInput = document.getElementById('aes-key');
+  const status = document.getElementById('decrypt-status');
+  const keyStr = keyInput.value;
+  if (keyStr.length !== 16) {
+    if (keyStr.length > 0) status.textContent = 'Key must be 16 chars';
+    return;
+  }
+
+  try {
+    const cryptoKey = await importAesKey(keyStr);
+    const resp = await fetch('/api/sensors?since=' + lastSensorTs);
+    const data = await resp.json();
+    const packets = data.packets || [];
+    let decrypted = 0, failed = 0;
+
+    for (const pkt of packets) {
+      if (pkt.ts > lastSensorTs) lastSensorTs = pkt.ts;
+      const plain = await decryptGcm(pkt.encrypted, cryptoKey);
+      if (plain) {
+        processSensorText(pkt.from, plain);
+        decrypted++;
+      } else {
+        failed++;
+      }
+    }
+
+    if (packets.length > 0) {
+      status.textContent = `${decrypted} decrypted` + (failed ? `, ${failed} failed` : '');
+      status.style.color = failed ? '#FF9100' : '#00E676';
+    }
+
+    updateSensors(sensorState);
+  } catch (e) {
+    status.textContent = 'Decrypt error';
+    status.style.color = '#FF5252';
   }
 }
 

@@ -1317,7 +1317,7 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
   <tr><td>Save Config</td><td><code>SAVE</code></td><td></td><td><code>OK,SAVED</code></td></tr>
   <tr><td>Set SF</td><td><code>SF,&lt;7-12&gt;</code></td><td><code>SF,7</code></td><td><code>OK,SF,7</code></td></tr>
   <tr><td>Commit SF</td><td><code>SFGO,&lt;7-12&gt;</code></td><td><code>SFGO,7</code></td><td><code>OK,SFGO,7</code></td></tr>
-  <tr><td>Solar Mode On</td><td><code>POWER,SOLAR</code></td><td></td><td><code>OK,POWER,SOLAR</code> (BLE disconnects)</td></tr>
+  <tr><td>Solar Mode On</td><td><code>POWER,SOLAR</code></td><td></td><td><code>OK,POWER,SOLAR</code> (BLE deinits, connection drops)</td></tr>
   <tr><td>Solar Mode Off</td><td><code>POWER,NORMAL</code></td><td></td><td><code>OK,POWER,NORMAL</code></td></tr>
   <tr><td>Poll Local Sensors</td><td><code>POLL</code></td><td></td><td><code>SDATA,0010,34:2048,36:1200</code></td></tr>
   <tr><td>Poll Remote</td><td><code>POLL,&lt;nodeId&gt;</code></td><td><code>POLL,0002</code></td><td>Remote node replies with SDATA over mesh</td></tr>
@@ -1330,10 +1330,11 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
   <tr><td>Clear Setpoints</td><td><code>SETPOINT,CLEAR</code></td><td></td><td><code>OK,SETPOINT,CLEAR</code></td></tr>
   <tr><td>Start Auto-Poll</td><td><code>AUTOPOLL,&lt;nodeId&gt;,&lt;sec&gt;</code></td><td><code>AUTOPOLL,FFFF,300</code></td><td><code>OK,AUTOPOLL,FFFF,300</code></td></tr>
   <tr><td>Stop Auto-Poll</td><td><code>AUTOPOLL,OFF</code></td><td></td><td><code>OK,AUTOPOLL,OFF</code></td></tr>
+  <tr><td>Set Pin Mode</td><td><code>PINMODE,&lt;pin&gt;,PULSE|AUTO</code></td><td><code>PINMODE,34,PULSE</code></td><td><code>OK,PINMODE,34,PULSE</code></td></tr>
 </table>
 
 <div class="info-box orange">
-  <p><strong>POWER,SOLAR warning:</strong> Enabling solar mode via BLE immediately deinitialises BLE &mdash; the connection drops. The app must warn the user before sending this command. To restore normal mode, use serial (<code>SOLAR OFF</code>) or the PRG button.</p>
+  <p><strong>POWER,SOLAR warning:</strong> Enabling solar mode via BLE deinitialises BLE after sending the response &mdash; the connection drops. The app should warn the user before sending. To restore: connect via USB serial and send <code>SOLAR OFF</code>, or press the PRG button.</p>
 </div>
 
 <h3>Notifications: Node &rarr; Phone</h3>
@@ -1374,6 +1375,9 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
 <span class="keyword">GATEWAY ON</span>             <span class="comment">Enable gateway mode (raw packet forwarding)</span>
 <span class="keyword">GATEWAY OFF</span>            <span class="comment">Disable gateway mode</span>
 <span class="keyword">PKT,</span>&lt;hex&gt;              <span class="comment">Inject raw packet into mesh (gateway mode only)</span>
+<span class="keyword">AUTOPOLL</span> &lt;id&gt; &lt;sec&gt;    <span class="comment">Start auto-polling   e.g. AUTOPOLL FFFF 300</span>
+<span class="keyword">AUTOPOLL OFF</span>           <span class="comment">Stop auto-polling</span>
+<span class="keyword">PINMODE</span> &lt;pin&gt; &lt;mode&gt;   <span class="comment">Set sensor mode      e.g. PINMODE 34 PULSE (or AUTO)</span>
 <span class="keyword">SOLAR ON</span>               <span class="comment">Enable solar/low-power mode (SX1262 boards only)</span>
 <span class="keyword">SOLAR OFF</span>              <span class="comment">Disable solar mode, restore normal operation</span>
 
@@ -1575,13 +1579,93 @@ SDATA,0010,34:2048,36:1200,39:4095</pre>
   <li><strong>Android app:</strong> Control screen shows live sparkline charts per sensor pin with min/max labels.</li>
   <li><strong>PC Gateway GUI:</strong> Sensor Monitor panel with auto-decrypting sparklines. Enter AES key in the inspector, use POLL button to request readings.</li>
   <li><strong>Hub GUI:</strong> Sensor Monitor canvas with sparklines for all sensors across all gateway-connected nodes.</li>
-  <li><strong>Web Map:</strong> Sensor bar at the bottom of the map page with live-updating sparkline cards per sensor.</li>
+  <li><strong>Web Map:</strong> Sensor bar at the bottom of the map page. Enter your 16-char AES key to decrypt sensor data client-side &mdash; the hub never sees plaintext. Sparkline cards auto-update every 5 seconds.</li>
 </ul>
+</section>
+
+<!-- ═══════════════ PULSE COUNTER ═══════════════ -->
+<section id="pulse-counter">
+<h2>17. Pulse Counter Mode (Wind Speed, Flow Meters)</h2>
+
+<p>Sensor pins can be switched from analog/digital read mode to <strong>pulse counter mode</strong>, where hardware interrupts count rising-edge pulses. This is ideal for anemometers, flow meters, rain gauges, and other pulse-output sensors.</p>
+
+<h3>How It Works</h3>
+<ul style="color:var(--dim); padding-left:20px;">
+  <li>Up to <strong>4 sensor pins</strong> can be set to pulse mode simultaneously.</li>
+  <li>Each pin uses a dedicated hardware interrupt (IRAM_ATTR ISR, &lt;1&mu;s execution).</li>
+  <li>The SDATA response returns the <strong>pulse count since last read</strong> (delta), not total count. This lets you calculate frequency from the polling interval.</li>
+  <li>Pulse counters do <strong>not interfere with radio reception</strong> &mdash; the ISR is a single atomic increment that completes in nanoseconds, while LoRa packet reception takes milliseconds.</li>
+</ul>
+
+<h3>Commands</h3>
+<table>
+  <tr><th>Interface</th><th>Command</th><th>Response</th></tr>
+  <tr><td>BLE</td><td><code>PINMODE,&lt;pin&gt;,PULSE</code></td><td><code>OK,PINMODE,&lt;pin&gt;,PULSE</code></td></tr>
+  <tr><td>BLE</td><td><code>PINMODE,&lt;pin&gt;,AUTO</code></td><td><code>OK,PINMODE,&lt;pin&gt;,AUTO</code></td></tr>
+  <tr><td>Serial</td><td><code>PINMODE &lt;pin&gt; PULSE</code></td><td><code>OK: Pin &lt;pin&gt; set to PULSE mode</code></td></tr>
+  <tr><td>Serial</td><td><code>PINMODE &lt;pin&gt; AUTO</code></td><td><code>OK: Pin &lt;pin&gt; set to AUTO mode</code></td></tr>
+</table>
+
+<h3>Example: Wind Speed from Anemometer</h3>
+<pre>
+<span class="comment"># Configure sensor pin 34 for pulse counting</span>
+<span class="keyword">PINMODE 34 PULSE</span>
+
+<span class="comment"># Set up auto-poll every 10 seconds (local node)</span>
+<span class="keyword">AUTOPOLL FFFF 10</span>
+
+<span class="comment"># SDATA response shows pulses since last read:</span>
+<span class="comment"># SDATA,0010,34:47,36:2048</span>
+<span class="comment">#   pin 34: 47 pulses in 10 seconds = 4.7 Hz</span>
+<span class="comment">#   pin 36: 2048 (analog read, temperature sensor)</span>
+</pre>
+
+<div class="info-box cyan">
+  <p><strong>Calculating wind speed:</strong> Most anemometers produce a known number of pulses per revolution. If your sensor outputs 1 pulse/rev and 1 rev = 2.4 km/h: <code>wind_speed = pulses / interval * 2.4</code>. Check your sensor's datasheet for the calibration factor.</p>
+</div>
+
+<div class="info-box orange">
+  <p><strong>Pin requirements:</strong> Pulse counter pins must support hardware interrupts. On ESP32, most GPIO pins support interrupts. The pin is configured as <code>INPUT_PULLUP</code> when pulse mode is enabled. Use <code>PINMODE &lt;pin&gt; AUTO</code> to revert to normal analog/digital read.</p>
+</div>
+</section>
+
+<!-- ═══════════════ SOS EMERGENCY ═══════════════ -->
+<section id="sos">
+<h2>18. SOS Emergency Alert</h2>
+
+<p>The mesh network includes a built-in SOS emergency system. When triggered, an SOS alert is broadcast to <strong>all nodes</strong> on the mesh with the sender's GPS location (if available), and forwarded to Telegram.</p>
+
+<h3>Sending an SOS</h3>
+<ul style="color:var(--dim); padding-left:20px;">
+  <li><strong>Android App:</strong> Press the red <strong>SOS</strong> button in the Chat screen header bar. A confirmation dialog prevents accidental triggers. The app automatically attaches your phone's GPS coordinates.</li>
+  <li><strong>T-Deck Plus:</strong> SOS can be sent as a broadcast message: <code>SOS,lat,lon</code></li>
+</ul>
+
+<h3>SOS Message Format</h3>
+<pre>
+<span class="comment"># With GPS fix:</span>
+SOS,51.481583,-3.178500
+
+<span class="comment"># Without GPS:</span>
+SOS
+</pre>
+
+<h3>What Happens When SOS Is Received</h3>
+<ul style="color:var(--dim); padding-left:20px;">
+  <li>All nodes display the SOS alert with the sender's ID.</li>
+  <li>The Android app plays a notification sound and shows the message in chat.</li>
+  <li>If Telegram is configured, the app forwards the SOS with a <strong>Google Maps link</strong> to the configured chat.</li>
+  <li>Gateways relay the SOS to all connected mesh islands via the hub.</li>
+</ul>
+
+<div class="info-box red">
+  <p><strong>Emergency use only:</strong> SOS alerts are broadcast to the entire mesh and cannot be recalled. The confirmation dialog is there for a reason &mdash; only send when you genuinely need help.</p>
+</div>
 </section>
 
 <!-- ═══════════════ EEPROM ═══════════════ -->
 <section id="eeprom">
-<h2>17. EEPROM Memory Map</h2>
+<h2>19. EEPROM Memory Map</h2>
 
 <p>512 bytes of EEPROM store persistent configuration. Layout is identical across all boards.</p>
 
@@ -1608,7 +1692,7 @@ SDATA,0010,34:2048,36:1200,39:4095</pre>
 
 <!-- ═══════════════ BUILDING ═══════════════ -->
 <section id="building">
-<h2>18. Building &amp; Flashing</h2>
+<h2>20. Building &amp; Flashing</h2>
 
 <h3>Prerequisites</h3>
 <ul style="color:var(--dim); padding-left:20px;">
@@ -1655,7 +1739,7 @@ android-app/
 
 <!-- ═══════════════ GATEWAY ═══════════════ -->
 <section id="gateway">
-<h2>19. Gateway Bridge &mdash; Internet-Linked Mesh Islands</h2>
+<h2>21. Gateway Bridge &mdash; Internet-Linked Mesh Islands</h2>
 
 <p>The gateway feature connects geographically separated LoRa mesh networks over the internet. Each gateway node is a repeater connected via USB to a PC running the Python bridge server. Packets remain <strong>AES-128-CTR encrypted end-to-end</strong> &mdash; the servers never decrypt them.</p>
 
@@ -1948,7 +2032,7 @@ gateway/
 
 <!-- ═══════════════ WIFI GATEWAY ═══════════════ -->
 <section id="wifi-gateway">
-<h2>20. WiFi ESP Gateway — No PC Required</h2>
+<h2>22. WiFi ESP Gateway — No PC Required</h2>
 
 <p>The WiFi gateway firmware turns any ESP32 board into a standalone internet bridge. Unlike the PC-based gateway, it needs <strong>no computer</strong> — just power. Flash it, configure once via the Android app over BLE, mount it outside with a solar panel, and it runs forever.</p>
 
@@ -2170,35 +2254,42 @@ sudo systemctl restart tiggyopenmesh-hub</pre></div>
 
 <!-- ═══════════════ SOLAR MODE ═══════════════ -->
 <section id="solar">
-<h2>21. Solar / Low-Power Repeater Mode</h2>
+<h2>23. Solar / Low-Power Repeater Mode</h2>
 
-<p>Remote repeater nodes on hilltops or rooftops often need to run indefinitely from a small solar panel and an 18650 battery. Solar mode dramatically reduces power consumption by disabling non-essential peripherals and using the SX1262's hardware duty-cycle RX.</p>
+<p>Remote repeater nodes on hilltops or rooftops often need to run indefinitely from a small solar panel and an 18650 battery. Solar mode dramatically reduces power consumption by putting the ESP32-S3 into <strong>light sleep</strong> between radio events, while keeping the radio in continuous RX so <strong>no packets are lost</strong>.</p>
 
 <div class="info-box orange">
-  <p><strong>SX1262 only:</strong> Solar mode requires the SX1262 radio's hardware duty-cycle RX feature. It is available on <strong>Heltec V3</strong> and <strong>Heltec V4</strong> boards. The LoRa32 (SX1276) does not support this mode.</p>
+  <p><strong>SX1262 only:</strong> Solar mode is available on <strong>Heltec V3</strong> and <strong>Heltec V4</strong> boards (ESP32-S3 + SX1262 radio). The LoRa32 (SX1276 / classic ESP32) does not support this mode.</p>
 </div>
 
 <h3>Power Budget</h3>
 <table>
   <tr><th>Component</th><th>Normal Mode</th><th>Solar Mode</th></tr>
-  <tr><td>ESP32-S3 (CPU)</td><td>~80 mA (active)</td><td>~0.8 mA (light sleep)</td></tr>
-  <tr><td>SX1262 (Radio)</td><td>~10 mA (continuous RX)</td><td>~1.5 mA (duty-cycle RX)</td></tr>
-  <tr><td>OLED Display</td><td>~15 mA</td><td>0 mA (powered off)</td></tr>
+  <tr><td>ESP32-S3 (CPU)</td><td>~80 mA (active)</td><td>~0.8 mA (light sleep, wakes on DIO1)</td></tr>
+  <tr><td>SX1262 (Radio)</td><td>~10 mA (continuous RX)</td><td>~10 mA (continuous RX &mdash; no data loss)</td></tr>
+  <tr><td>OLED Display</td><td>~15 mA</td><td>0 mA (powered off via Vext)</td></tr>
   <tr><td>BLE</td><td>~15 mA</td><td>0 mA (deinitialised)</td></tr>
-  <tr><td><strong>Total average</strong></td><td><strong>~130 mA</strong></td><td><strong>~3&ndash;4 mA</strong></td></tr>
+  <tr><td><strong>Total average</strong></td><td><strong>~120 mA</strong></td><td><strong>~11 mA</strong></td></tr>
 </table>
 
 <p style="color:var(--dim); margin-top:8px;">
-  With a 3000 mAh 18650: <strong>~36 days</strong> on battery alone.<br>
+  With a 3000 mAh 18650: <strong>~11 days</strong> on battery alone.<br>
   With a 1W solar panel: <strong>indefinite operation</strong>.
 </p>
 
 <h3>How It Works</h3>
 <ul style="color:var(--dim); padding-left:20px;">
-  <li><strong>SX1262 duty-cycle RX</strong> &mdash; the radio autonomously alternates between brief RX windows and deep sleep. When a preamble is detected during an RX window, the radio wakes fully and fires DIO1 to wake the ESP32.</li>
-  <li><strong>ESP32-S3 light sleep</strong> &mdash; the CPU enters light sleep between events. All RAM is preserved, SPI bus stays configured. GPIO interrupts (DIO1, button) wake the CPU instantly.</li>
-  <li><strong>OLED &amp; BLE disabled</strong> &mdash; Vext is powered off (disabling the OLED) and BLE is fully deinitialised, saving ~30 mA and ~60 KB RAM.</li>
-  <li><strong>Reduced heartbeat</strong> &mdash; heartbeats are sent every 60 seconds (vs 30s in normal mode), with longer jitter.</li>
+  <li><strong>OLED disabled</strong> &mdash; Vext is powered off, turning off the OLED display. Press the PRG button to temporarily show status for 10 seconds.</li>
+  <li><strong>BLE deinitialised</strong> &mdash; Bluetooth is fully shut down, saving ~15 mA and freeing ~60 KB RAM. The phone app cannot connect in solar mode.</li>
+  <li><strong>ESP32-S3 light sleep</strong> &mdash; between radio events, the CPU enters light sleep (~0.8 mA). All RAM is preserved and GPIO config stays active. The CPU wakes instantly on:</li>
+  <ul style="padding-left:20px;">
+    <li><strong>DIO1 interrupt</strong> (radio packet received)</li>
+    <li><strong>PRG button</strong> press (shows OLED status temporarily)</li>
+    <li><strong>60-second timer</strong> (for heartbeat transmission)</li>
+    <li><strong>Serial input</strong> (for SOLAR OFF command)</li>
+  </ul>
+  <li><strong>Radio stays in continuous RX</strong> &mdash; <strong>no packets are lost</strong>. The SX1262 fires DIO1 when a preamble is detected, instantly waking the CPU to process the packet.</li>
+  <li><strong>Reduced heartbeat</strong> &mdash; heartbeats are sent every 60 seconds (vs 30s in normal mode), with longer jitter, reducing TX duty cycle.</li>
 </ul>
 
 <h3>Activation</h3>
@@ -2225,7 +2316,7 @@ sudo systemctl restart tiggyopenmesh-hub</pre></div>
 </pre>
 
 <div class="info-box red">
-  <p><strong>BLE disconnect warning:</strong> Sending <code>POWER,SOLAR</code> via BLE immediately deinitialises BLE on the repeater &mdash; the connection drops. The Android app shows a warning dialog before sending. To restore normal mode, connect via USB serial and send <code>SOLAR OFF</code>, or press the PRG button.</p>
+  <p><strong>BLE disabled in solar mode:</strong> Sending <code>POWER,SOLAR</code> via BLE immediately deinitialises Bluetooth after sending the response. The phone app disconnects. To exit solar mode, use <strong>serial</strong> (<code>SOLAR OFF</code>) or press the <strong>PRG button</strong>.</p>
 </div>
 
 <h4>Via Android App Settings Screen</h4>
@@ -2237,12 +2328,12 @@ sudo systemctl restart tiggyopenmesh-hub</pre></div>
 <table>
   <tr><th>Feature</th><th>Behaviour</th></tr>
   <tr><td>OLED display</td><td>Off. Press the PRG button to show status for 10 seconds.</td></tr>
-  <tr><td>BLE (phone app)</td><td>Disabled &mdash; phone app cannot connect.</td></tr>
+  <tr><td>BLE (phone app)</td><td>Disabled &mdash; phone app cannot connect. Deinitialised to save ~15 mA.</td></tr>
   <tr><td>LED</td><td>Single brief blink every heartbeat (60s) as sign-of-life.</td></tr>
-  <tr><td>Serial commands</td><td>Only <code>SOLAR OFF</code>, <code>STATUS</code>, and <code>PKT,</code> (gateway) are accepted.</td></tr>
-  <tr><td>Mesh routing</td><td>Fully functional &mdash; packets are received, forwarded, and routed normally.</td></tr>
+  <tr><td>Serial commands</td><td>All serial commands work. UART wakeup is enabled &mdash; sending any character wakes from light sleep.</td></tr>
+  <tr><td>Mesh routing</td><td>Fully functional &mdash; packets are received, forwarded, and routed normally. <strong>No data loss.</strong></td></tr>
   <tr><td>Gateway mode</td><td>Still works if previously enabled &mdash; <code>PKT,</code> forwarding over serial continues.</td></tr>
-  <tr><td>GPIO relays</td><td>Configured but CMD processing continues normally on received packets.</td></tr>
+  <tr><td>GPIO relays</td><td>Fully operational &mdash; CMD processing, timers, setpoints, and sensor polling all continue.</td></tr>
 </table>
 
 <h3>Recommended Hardware Setup</h3>
@@ -2262,7 +2353,7 @@ sudo systemctl restart tiggyopenmesh-hub</pre></div>
 
 <!-- ═══════════════ DELIVERY TRACKING ═══════════════ -->
 <section id="delivery-tracking">
-<h2>22. Message Delivery Tracking</h2>
+<h2>24. Message Delivery Tracking</h2>
 
 <p>Every message sent through the mesh now has <strong>end-to-end delivery confirmation</strong>. The sender knows exactly whether the message was transmitted, delivered, or failed &mdash; with visual status indicators on both the T-Deck and the Android app.</p>
 
@@ -2317,7 +2408,7 @@ sudo systemctl restart tiggyopenmesh-hub</pre></div>
 
 <!-- ═══════════════ SF CHANGE PROTOCOL ═══════════════ -->
 <section id="sf-change">
-<h2>23. Spreading Factor Change Protocol</h2>
+<h2>25. Spreading Factor Change Protocol</h2>
 
 <p>LoRa Spreading Factor (SF) controls the trade-off between <strong>range</strong> and <strong>speed</strong>. Changing SF requires <em>all nodes</em> to switch simultaneously &mdash; a node on SF7 cannot hear one on SF12. The two-phase CFG protocol ensures safe, coordinated changes across the entire mesh.</p>
 
@@ -2393,7 +2484,7 @@ sudo systemctl restart tiggyopenmesh-hub</pre></div>
 
 <!-- ═══════════════ COLLISION DETECTION ═══════════════ -->
 <section id="collision">
-<h2>24. Node ID Collision Detection</h2>
+<h2>26. Node ID Collision Detection</h2>
 
 <p>Node IDs are 4-hex-char values (0001&ndash;FFFE) &mdash; 65534 possible addresses. As networks grow, or when default IDs are used, collisions become likely. Two nodes with the same ID cause <strong>routing chaos</strong> &mdash; messages get misdelivered, heartbeats overwrite routes, and the mesh becomes unreliable.</p>
 
@@ -2447,7 +2538,7 @@ sudo systemctl restart tiggyopenmesh-hub</pre></div>
 
 <!-- ═══════════════ DISPLAY SLEEP ═══════════════ -->
 <section id="display-sleep">
-<h2>25. Display Auto-Sleep (T-Deck Plus)</h2>
+<h2>27. Display Auto-Sleep (T-Deck Plus)</h2>
 
 <p>The T-Deck's 2.8" TFT backlight draws significant power. Display auto-sleep turns off the backlight after a configurable idle period, extending battery life for portable use.</p>
 
@@ -2498,7 +2589,7 @@ sudo systemctl restart tiggyopenmesh-hub</pre></div>
 
 <!-- ═══════════════ GATEWAY MAP ═══════════════ -->
 <section id="gateway-map">
-<h2>26. Live Gateway Coverage Map</h2>
+<h2>28. Live Gateway Coverage Map</h2>
 
 <p>The hub server hosts a live web map showing all registered gateways, their online/offline status, and estimated coverage areas. This is a <strong>peacetime management tool</strong> for network planning &mdash; the mesh itself operates without it.</p>
 
@@ -2594,7 +2685,7 @@ https://your-machine.tail1234.ts.net/</pre>
 
 <!-- ═══════════════ TELEGRAM ═══════════════ -->
 <section id="telegram">
-<h2>27. Telegram Alerts (Android App)</h2>
+<h2>29. Telegram Alerts (Android App)</h2>
 
 <p>The Android app can forward <strong>group mesh messages</strong> and <strong>SOS emergencies</strong> to a Telegram chat via a bot. This lets family members, a base-camp coordinator, or anyone with Telegram receive real-time alerts — even if they are miles away with no LoRa hardware.</p>
 
@@ -2660,7 +2751,7 @@ https://your-machine.tail1234.ts.net/</pre>
 
 <!-- ═══════════════ THEME ═══════════════ -->
 <section id="theme">
-<h2>28. Colour Theme Reference</h2>
+<h2>30. Colour Theme Reference</h2>
 
 <p>Consistent colour palette used across the TFT display, OLED, and Android app.</p>
 
@@ -2706,7 +2797,7 @@ https://your-machine.tail1234.ts.net/</pre>
 
 <!-- ═══════════════ CAVEATS ═══════════════ -->
 <section id="caveats">
-<h2>29. Known Issues &amp; Board-Specific Caveats</h2>
+<h2>31. Known Issues &amp; Board-Specific Caveats</h2>
 
 <h3>Board-Specific Issues</h3>
 <table>
@@ -2748,7 +2839,7 @@ https://your-machine.tail1234.ts.net/</pre>
 <div style="background:var(--panel); border-top:1px solid var(--faint); padding:30px 40px; text-align:center; color:var(--faint); font-size:0.85em;">
   <p>TiggyOpenMesh v4.0 &mdash; MeshCore Architecture</p>
   <p>T-Deck Plus &bull; LoRa32 T3 V1.6.1 &bull; Heltec WiFi LoRa 32 V3 &bull; Heltec WiFi LoRa 32 V4 &bull; XIAO ESP32S3</p>
-  <p>29 sections &mdash; Hardware, Protocol, UI, BLE, Gateway, Timers, Setpoints, Sensors, Map, Solar, Delivery, SF Change, Collision Detection, Caveats</p>
+  <p>31 sections &mdash; Hardware, Protocol, UI, BLE, Gateway, Timers, Setpoints, Sensors, Pulse Counters, SOS, Map, Solar, Delivery, SF Change, Collision Detection, Caveats</p>
   <p style="margin-top:8px;">Documentation generated March 2026</p>
 </div>
 

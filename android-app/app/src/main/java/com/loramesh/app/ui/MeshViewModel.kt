@@ -1,7 +1,11 @@
 package com.loramesh.app.ui
 
+import android.Manifest
 import android.app.Application
+import android.content.pm.PackageManager
+import android.location.LocationManager
 import android.media.RingtoneManager
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.loramesh.app.ble.BleManager
@@ -127,6 +131,34 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
             isOutgoing = true
             // broadcasts don't ACK — no deliveryStatus
         )
+    }
+
+    // ─── SOS Emergency ────────────────────────────────────────
+    fun sendSOS() {
+        val ctx = getApplication<Application>()
+        var sosText = "SOS"
+        // Try to get last known GPS location
+        if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.ACCESS_FINE_LOCATION)
+            == PackageManager.PERMISSION_GRANTED) {
+            try {
+                val lm = ctx.getSystemService(android.content.Context.LOCATION_SERVICE) as LocationManager
+                val loc = lm.getLastKnownLocation(LocationManager.GPS_PROVIDER)
+                    ?: lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
+                if (loc != null) {
+                    sosText = "SOS,%.6f,%.6f".format(loc.latitude, loc.longitude)
+                }
+            } catch (_: Exception) { }
+        }
+        ble.sendBroadcast(sosText)
+        _messages.value = _messages.value + ChatMessage(
+            from = _config.value.nodeId,
+            text = sosText,
+            isOutgoing = true
+        )
+        // Also forward to Telegram immediately
+        viewModelScope.launch {
+            telegram.forward(_config.value.nodeId, sosText, 0)
+        }
     }
 
     // ─── Relay Control ───────────────────────────────────────
