@@ -327,7 +327,7 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
                 nodeListBuffer = null
             }
 
-            // Node discovered: NODE,<id>,<rssi>,<hops>[,<age>,<active>]
+            // Node discovered: NODE,<id>,<rssi>,<hops>[,<age>,<active>,<nextHop>]
             line.startsWith("NODE,") -> {
                 val parts = line.split(",")
                 if (parts.size >= 3) {
@@ -336,7 +336,8 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
                     val hops = parts.getOrElse(3) { "0" }.toIntOrNull() ?: 0
                     val age = parts.getOrElse(4) { "0" }.toIntOrNull() ?: 0
                     val active = parts.getOrElse(5) { "1" } == "1"
-                    val node = MeshNode(id, rssi, System.currentTimeMillis(), hops, age, active)
+                    val nextHop = parts.getOrElse(6) { "" }
+                    val node = MeshNode(id, rssi, System.currentTimeMillis(), hops, age, active, nextHop)
 
                     if (nodeListBuffer != null) {
                         nodeListBuffer!!.add(node)

@@ -19,9 +19,13 @@ import com.loramesh.app.ui.theme.*
 fun NodesScreen(viewModel: MeshViewModel) {
     val nodes by viewModel.nodes.collectAsState()
 
-    // Request nodes on entry and periodically
+    // Request nodes on entry and auto-refresh every 5s for site survey
     LaunchedEffect(Unit) {
         viewModel.requestNodes()
+        while (true) {
+            kotlinx.coroutines.delay(5000)
+            viewModel.requestNodes()
+        }
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -157,14 +161,20 @@ private fun NodeCard(node: MeshNode) {
                     color = if (node.active) MaterialTheme.colorScheme.onSurface else MeshGrey
                 )
                 Row {
-                    if (node.hops > 0) {
+                    if (node.hops > 1 && node.nextHop.isNotEmpty()) {
                         Text(
-                            "${node.hops} hop${if (node.hops > 1) "s" else ""}",
+                            "${node.hops} hops via ${node.nextHop}",
                             style = MaterialTheme.typography.bodySmall,
                             color = MeshGrey
                         )
-                        Spacer(Modifier.width(8.dp))
+                    } else if (node.hops > 0) {
+                        Text(
+                            "Direct",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MeshGrey
+                        )
                     }
+                    Spacer(Modifier.width(8.dp))
                     Text(
                         formatAge(node.age),
                         style = MaterialTheme.typography.bodySmall,

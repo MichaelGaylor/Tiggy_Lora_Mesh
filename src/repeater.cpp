@@ -449,10 +449,9 @@ void receiveCheck() {
     if (mesh.parseRawPacket(pkt, len, mp)) {
         mesh.processPacket(mp);
 
-        // Gateway mode: forward raw packet over serial for bridge server
+        // Gateway mode: forward raw packet + RSSI over serial for bridge server
         if (gatewayMode) {
-            Serial.print("PKT,");
-            Serial.println(mesh.toHex(pkt, len));
+            Serial.println("PKT," + mesh.toHex(pkt, len) + "," + String(mesh.lastRSSI));
         }
     }
 }
@@ -1208,7 +1207,8 @@ void handleCfgGo(const String& cfgType, const String& value, const String& chang
 // Node discovery handler
 void handleNodeDiscovered(const String& id, int rssi) {
     debugPrint("New node: " + id);
-    bleSend("NODE," + id + "," + String(rssi) + ",1");
+    // Direct discovery: 1 hop, 0 age, active, nextHop is the node itself
+    bleSend("NODE," + id + "," + String(rssi) + ",1,0,1," + id);
 }
 
 // ID conflict handler — another node is using our ID
@@ -1421,10 +1421,12 @@ void processBleCommand(const String& line) {
                 age = (millis() - it->second.lastSeen) / 1000;
             }
             bool active = (age < (STALE_TIMEOUT / 1000));
-            // Format: NODE,<id>,<rssi>,<hops>,<age_seconds>,<active>
+            String nextHop = "";
+            if (it != mesh.routingTable.end()) nextHop = it->second.nextHop;
+            // Format: NODE,<id>,<rssi>,<hops>,<age_seconds>,<active>,<nextHop>
             bleSend("NODE," + nodeId + "," + String(rssi) + "," +
                     String(hops) + "," + String(age) + "," +
-                    String(active ? "1" : "0"));
+                    String(active ? "1" : "0") + "," + nextHop);
         }
         bleSend("NODEEND");
     }
