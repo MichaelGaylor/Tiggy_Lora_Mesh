@@ -182,7 +182,8 @@ public:
     Route* bestRoute(const String& dest);
 
     // ─── Packet Building ─────────────────────────────────────
-    void transmitPacket(uint16_t dest, const String& payload);
+    void transmitPacket(uint16_t dest, const String& payload);   // Local traffic (7% budget)
+    void forwardPacket(uint16_t dest, const String& payload);    // Forwarding (full 10% budget)
 
     // ─── Smart Forwarding (with jitter + directed routing) ───
     void smartForward(const String& from, const String& to,
@@ -201,7 +202,8 @@ public:
     void sendHeartbeat();
 
     // ─── Duty Cycle Tracking ─────────────────────────────────
-    bool canTransmit();   // Returns false if duty cycle exceeded
+    bool canTransmit();          // Local traffic: throttled at 7% to reserve budget for forwarding
+    bool canForward();           // Forwarding: allowed up to full 10% — repeating is never starved
 
 private:
     // Dedup: hash ring for O(1) lookups
@@ -210,6 +212,9 @@ private:
 
     // Nonce generation for AES-GCM
     void generateNonce(byte* nonce);
+
+    // Internal TX implementation (shared by transmitPacket and forwardPacket)
+    void _doTransmit(uint16_t dest, const String& payload);
 
     // Duty cycle tracking
     unsigned long txTimeThisHour = 0;

@@ -24,6 +24,8 @@ import websockets
 
 from gui_common import (COLORS, HexPacketParser, decrypt_message,
                          detect_serial_ports, format_uptime, rssi_to_color)
+from automation_engine import AutomationEngine, BLOCK_DEFS
+from automation_canvas import AutomationCanvas, CATEGORY_BLOCKS
 
 # ─── Theme ───────────────────────────────────────────────────
 
@@ -267,11 +269,19 @@ class GatewayGUIApp:
         self.sensor_data: dict[str, list[tuple[float, int]]] = {}  # key -> [(ts, val)]
         self.max_sensor_history = 120
 
+        # Logic builder state
+        self.logic_visible = False
+
         self.build_ui()
+
+        # Automation engine (after build_ui so _send_serial exists)
+        self.engine = AutomationEngine(self.sensor_data, self._send_serial, self.topo_nodes)
+
         self.refresh_ports()
         self.root.after(50, self.poll_events)
         self.root.after(33, self.animate_topology)
         self.root.after(2000, self.redraw_sensors)
+        self.root.after(1000, self._eval_automation)
 
     # ─── UI Construction ────────────────────────────────────
 
@@ -285,6 +295,10 @@ class GatewayGUIApp:
         self.conn_label = ctk.CTkLabel(title_frame, text="Disconnected", font=("Consolas", 12),
                                         text_color=COLORS["bad"])
         self.conn_label.pack(side="right", padx=15)
+        self.logic_btn = ctk.CTkButton(title_frame, text="Logic Builder", width=110,
+                                        font=("Consolas", 11), fg_color=COLORS["faint"],
+                                        text_color=COLORS["text"], command=self.toggle_logic_builder)
+        self.logic_btn.pack(side="right", padx=5)
 
         # Connection controls
         conn_frame = ctk.CTkFrame(self.root, fg_color=COLORS["panel"], corner_radius=8)
@@ -382,72 +396,92 @@ class GatewayGUIApp:
         self.sensor_canvas = ctk.CTkCanvas(sensor_frame, bg=COLORS["bg"], highlightthickness=0, height=100)
         self.sensor_canvas.pack(fill="both", expand=True, padx=10, pady=(0, 5))
 
-        # ─── Node Control Bar ───────────────────────────────
-        ctrl_frame = ctk.CTkFrame(self.root, fg_color=COLORS["panel"], corner_radius=8)
-        ctrl_frame.pack(fill="x", padx=10, pady=5)
+        # ─── Logic Builder Panel (hidden by default) ─────────
+        self.logic_frame = ctk.CTkFrame(self.root, fg_color=COLORS["panel"], corner_radius=8)
+        # Not packed yet — toggled via Logic Builder button
 
-        ctrl_row = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
-        ctrl_row.pack(fill="x", padx=10, pady=8)
+        # Logic builder toolbar
+        lb_toolbar = ctk.CTkFrame(self.logic_frame, fg_color="transparent")
+        lb_toolbar.pack(fill="x", padx=10, pady=(5, 0))
 
-        # Poll sensors
-        ctk.CTkButton(ctrl_row, text="POLL Local", width=90, font=("Consolas", 10),
+        ctk.CTkLabel(lb_toolbar, text="Rules:", text_color=COLORS["dim"],
+                      font=("Consolas", 10)).pack(side="left", padx=(0, 4))
+        self.rule_combo = ctk.CTkComboBox(lb_toolbar, width=180, values=["(none)"],
+                                            font=("Consolas", 10),
+                                            command=self._on_rule_select)
+        self.rule_combo.pack(side="left", padx=2)
+        ctk.CTkButton(lb_toolbar, text="+ New", width=60, font=("Consolas", 10),
                         fg_color=COLORS["accent"], text_color="#000",
-                        command=self.cmd_poll_local).pack(side="left", padx=3)
-
-        ctk.CTkLabel(ctrl_row, text="Remote:", text_color=COLORS["dim"],
-                      font=("Consolas", 9)).pack(side="left", padx=(10, 2))
-        self.poll_target = ctk.CTkEntry(ctrl_row, width=60, placeholder_text="ID",
-                                         font=("Consolas", 9))
-        self.poll_target.pack(side="left", padx=2)
-        ctk.CTkButton(ctrl_row, text="POLL", width=50, font=("Consolas", 10),
-                        fg_color=COLORS["accent"], text_color="#000",
-                        command=self.cmd_poll_remote).pack(side="left", padx=3)
-
-        # Separator
-        ctk.CTkLabel(ctrl_row, text="│", text_color=COLORS["faint"]).pack(side="left", padx=5)
-
-        # Timer controls
-        ctk.CTkLabel(ctrl_row, text="Timer:", text_color=COLORS["dim"],
-                      font=("Consolas", 9)).pack(side="left", padx=2)
-        self.timer_pin = ctk.CTkEntry(ctrl_row, width=35, placeholder_text="pin",
-                                       font=("Consolas", 9))
-        self.timer_pin.pack(side="left", padx=2)
-        self.timer_action = ctk.CTkComboBox(ctrl_row, width=65, values=["ON", "OFF", "PULSE"],
-                                              font=("Consolas", 9))
-        self.timer_action.pack(side="left", padx=2)
-        self.timer_sec = ctk.CTkEntry(ctrl_row, width=40, placeholder_text="sec",
-                                       font=("Consolas", 9))
-        self.timer_sec.pack(side="left", padx=2)
-        ctk.CTkButton(ctrl_row, text="Set", width=40, font=("Consolas", 10),
-                        fg_color=COLORS["warn"], text_color="#000",
-                        command=self.cmd_timer_set).pack(side="left", padx=3)
-        ctk.CTkButton(ctrl_row, text="Clear", width=45, font=("Consolas", 10),
-                        fg_color=COLORS["faint"], text_color=COLORS["text"],
-                        command=self.cmd_timer_clear).pack(side="left", padx=2)
-
-        # Separator
-        ctk.CTkLabel(ctrl_row, text="│", text_color=COLORS["faint"]).pack(side="left", padx=5)
-
-        # Auto-poll controls
-        ctk.CTkLabel(ctrl_row, text="AutoPoll:", text_color=COLORS["dim"],
-                      font=("Consolas", 9)).pack(side="left", padx=2)
-        self.ap_target = ctk.CTkEntry(ctrl_row, width=50, placeholder_text="ID",
-                                       font=("Consolas", 9))
-        self.ap_target.pack(side="left", padx=2)
-        self.ap_interval = ctk.CTkEntry(ctrl_row, width=40, placeholder_text="sec",
-                                         font=("Consolas", 9))
-        self.ap_interval.pack(side="left", padx=2)
-        ctk.CTkButton(ctrl_row, text="Start", width=45, font=("Consolas", 10),
-                        fg_color=COLORS["good"], text_color="#000",
-                        command=self.cmd_autopoll_start).pack(side="left", padx=2)
-        ctk.CTkButton(ctrl_row, text="Stop", width=40, font=("Consolas", 10),
+                        command=self._new_rule).pack(side="left", padx=3)
+        ctk.CTkButton(lb_toolbar, text="Delete", width=55, font=("Consolas", 10),
                         fg_color=COLORS["bad"], text_color="#FFF",
-                        command=self.cmd_autopoll_stop).pack(side="left", padx=2)
+                        command=self._delete_rule).pack(side="left", padx=3)
+
+        ctk.CTkLabel(lb_toolbar, text="│", text_color=COLORS["faint"]).pack(side="left", padx=5)
+
+        self.rule_status_dot = ctk.CTkLabel(lb_toolbar, text="●", font=("Consolas", 12),
+                                              text_color=COLORS["faint"])
+        self.rule_status_dot.pack(side="left", padx=2)
+
+        ctk.CTkLabel(lb_toolbar, text="│", text_color=COLORS["faint"]).pack(side="left", padx=5)
+
+        ctk.CTkLabel(lb_toolbar, text="Check every:", text_color=COLORS["text"],
+                      font=("Consolas", 11)).pack(side="left", padx=2)
+        self.eval_combo = ctk.CTkComboBox(lb_toolbar, width=70, font=("Consolas", 11),
+                                            values=["1s", "2s", "5s", "10s", "30s", "60s"],
+                                            command=self._on_eval_change)
+        self.eval_combo.set("5s")
+        self.eval_combo.pack(side="left", padx=2)
+
+        ctk.CTkLabel(lb_toolbar, text="Min action gap:", text_color=COLORS["text"],
+                      font=("Consolas", 11)).pack(side="left", padx=(8, 2))
+        self.gap_combo = ctk.CTkComboBox(lb_toolbar, width=70, font=("Consolas", 11),
+                                          values=["5s", "10s", "30s", "60s", "300s"],
+                                          command=self._on_gap_change)
+        self.gap_combo.set("10s")
+        self.gap_combo.pack(side="left", padx=2)
+
+        self.rule_enabled_var = ctk.BooleanVar(value=True)
+        self.rule_enabled_cb = ctk.CTkCheckBox(lb_toolbar, text="Enabled", font=("Consolas", 11),
+                                                 variable=self.rule_enabled_var,
+                                                 command=self._on_enabled_toggle,
+                                                 text_color=COLORS["text"])
+        self.rule_enabled_cb.pack(side="left", padx=10)
+
+        ctk.CTkButton(lb_toolbar, text="Deploy", width=55, font=("Consolas", 10),
+                        fg_color=COLORS["warn"], text_color="#000",
+                        command=self._deploy_rule).pack(side="right", padx=3)
+
+        # Block adder toolbar
+        lb_blocks = ctk.CTkFrame(self.logic_frame, fg_color="transparent")
+        lb_blocks.pack(fill="x", padx=10, pady=2)
+
+        for cat_name, block_types in CATEGORY_BLOCKS.items():
+            menu_values = [BLOCK_DEFS[bt]["label"] for bt in block_types]
+            combo = ctk.CTkComboBox(lb_blocks, width=130, font=("Consolas", 11),
+                                     values=menu_values,
+                                     command=lambda v, bts=block_types, mvs=menu_values:
+                                         self._add_block_from_menu(v, bts, mvs))
+            combo.set(f"+ {cat_name}")
+            combo.pack(side="left", padx=3)
+
+        # Canvas area
+        canvas_frame = ctk.CTkFrame(self.logic_frame, fg_color=COLORS["bg"], corner_radius=4)
+        canvas_frame.pack(fill="both", expand=True, padx=10, pady=5)
+
+        self.auto_canvas = AutomationCanvas(canvas_frame, None, self._on_canvas_change)
+
+        # Event log
+        self.logic_log = ctk.CTkLabel(self.logic_frame, text="Event log: (none)",
+                                        font=("Consolas", 10), text_color="#B0B0B0",
+                                        anchor="w")
+        self.logic_log.pack(fill="x", padx=10, pady=(0, 5))
 
         # Packet waterfall
-        wf_frame = ctk.CTkFrame(self.root, fg_color=COLORS["panel"], corner_radius=8, height=130)
-        wf_frame.pack(fill="x", padx=10, pady=5)
-        wf_frame.pack_propagate(False)
+        self.wf_frame = ctk.CTkFrame(self.root, fg_color=COLORS["panel"], corner_radius=8, height=130)
+        self.wf_frame.pack(fill="x", padx=10, pady=5)
+        self.wf_frame.pack_propagate(False)
+        wf_frame = self.wf_frame
         ctk.CTkLabel(wf_frame, text="  Packet Waterfall (click to inspect)", font=("Consolas", 11, "bold"),
                       text_color=COLORS["accent"], anchor="w").pack(fill="x", padx=10, pady=(5, 0))
         self.wf_text = ctk.CTkTextbox(wf_frame, font=("Consolas", 9), fg_color=COLORS["bg"],
@@ -456,9 +490,10 @@ class GatewayGUIApp:
         self.wf_text.bind("<Button-1>", self.on_waterfall_click)
 
         # Packet inspector
-        insp_frame = ctk.CTkFrame(self.root, fg_color=COLORS["panel"], corner_radius=8, height=95)
-        insp_frame.pack(fill="x", padx=10, pady=(0, 10))
-        insp_frame.pack_propagate(False)
+        self.insp_frame = ctk.CTkFrame(self.root, fg_color=COLORS["panel"], corner_radius=8, height=95)
+        self.insp_frame.pack(fill="x", padx=10, pady=(0, 10))
+        self.insp_frame.pack_propagate(False)
+        insp_frame = self.insp_frame
         ctk.CTkLabel(insp_frame, text="  Packet Inspector", font=("Consolas", 11, "bold"),
                       text_color=COLORS["accent"], anchor="w").pack(fill="x", padx=10, pady=(5, 0))
 
@@ -810,35 +845,142 @@ class GatewayGUIApp:
             except Exception:
                 pass
 
-    def cmd_poll_local(self):
-        self._send_serial("POLL")
+    # ─── Logic Builder ────────────────────────────────────
 
-    def cmd_poll_remote(self):
-        target = self.poll_target.get().strip()
-        if target:
-            self._send_serial(f"POLL,{target}")
+    def toggle_logic_builder(self):
+        """Toggle between packet waterfall/inspector and logic builder."""
+        self.logic_visible = not self.logic_visible
+        if self.logic_visible:
+            self.wf_frame.pack_forget()
+            self.insp_frame.pack_forget()
+            self.logic_frame.pack(fill="both", padx=10, pady=5, expand=True)
+            self.logic_btn.configure(fg_color=COLORS["accent"], text_color="#000")
+            # Wire engine to canvas now that it exists
+            self.auto_canvas.engine = self.engine
+            self._refresh_rule_list()
+        else:
+            self.logic_frame.pack_forget()
+            self.wf_frame.pack(fill="x", padx=10, pady=5)
+            self.insp_frame.pack(fill="x", padx=10, pady=(0, 10))
+            self.logic_btn.configure(fg_color=COLORS["faint"], text_color=COLORS["text"])
 
-    def cmd_timer_set(self):
-        pin = self.timer_pin.get().strip()
-        action = self.timer_action.get().strip()
-        sec = self.timer_sec.get().strip()
-        if pin and sec:
-            if action == "PULSE":
-                self._send_serial(f"TIMER,{pin},PULSE,{sec},{sec},0")
-            else:
-                self._send_serial(f"TIMER,{pin},{action},{sec}")
+    def _refresh_rule_list(self):
+        names = [r.name for r in self.engine.rules]
+        if not names:
+            names = ["(none)"]
+        self.rule_combo.configure(values=names)
+        if self.engine.rules:
+            self.rule_combo.set(self.engine.rules[0].name)
+            self._load_rule(self.engine.rules[0])
+        else:
+            self.rule_combo.set("(none)")
+            self.auto_canvas.set_rule(None)
 
-    def cmd_timer_clear(self):
-        self._send_serial("TIMER,CLEAR")
+    def _on_rule_select(self, name: str):
+        for r in self.engine.rules:
+            if r.name == name:
+                self._load_rule(r)
+                return
 
-    def cmd_autopoll_start(self):
-        target = self.ap_target.get().strip()
-        interval = self.ap_interval.get().strip()
-        if target and interval:
-            self._send_serial(f"AUTOPOLL,{target},{interval}")
+    def _load_rule(self, rule):
+        self.auto_canvas.set_rule(rule)
+        self.eval_combo.set(f"{int(rule.eval_interval)}s")
+        self.gap_combo.set(f"{int(rule.action_gap)}s")
+        self.rule_enabled_var.set(rule.enabled)
+        status_colors = {"active": COLORS["good"], "triggered": COLORS["bad"],
+                         "disabled": COLORS["faint"], "error": COLORS["bad"],
+                         "idle": COLORS["dim"]}
+        self.rule_status_dot.configure(
+            text_color=status_colors.get(rule.status, COLORS["dim"]))
 
-    def cmd_autopoll_stop(self):
-        self._send_serial("AUTOPOLL,OFF")
+    def _new_rule(self):
+        rule = self.engine.create_rule(f"Rule {len(self.engine.rules)}")
+        self._refresh_rule_list()
+        self.rule_combo.set(rule.name)
+        self._load_rule(rule)
+
+    def _delete_rule(self):
+        rule = self.auto_canvas.current_rule
+        if rule:
+            self.engine.delete_rule(rule.id)
+            self._refresh_rule_list()
+
+    def _on_eval_change(self, val: str):
+        rule = self.auto_canvas.current_rule
+        if rule:
+            try:
+                rule.eval_interval = float(val.rstrip("s"))
+            except ValueError:
+                pass
+            self.engine.save_rules()
+
+    def _on_gap_change(self, val: str):
+        rule = self.auto_canvas.current_rule
+        if rule:
+            try:
+                rule.action_gap = float(val.rstrip("s"))
+            except ValueError:
+                pass
+            self.engine.save_rules()
+
+    def _on_enabled_toggle(self):
+        rule = self.auto_canvas.current_rule
+        if rule:
+            rule.enabled = self.rule_enabled_var.get()
+            self.engine.save_rules()
+
+    def _add_block_from_menu(self, label: str, block_types: list, menu_values: list):
+        """Add a block when selected from a category dropdown."""
+        try:
+            idx = menu_values.index(label)
+            bt = block_types[idx]
+            self.auto_canvas.add_block(bt)
+        except (ValueError, IndexError):
+            pass
+
+    def _on_canvas_change(self):
+        """Called when the canvas modifies a rule."""
+        rule = self.auto_canvas.current_rule
+        if rule:
+            # Update the combo in case rule was renamed
+            names = [r.name for r in self.engine.rules]
+            self.rule_combo.configure(values=names if names else ["(none)"])
+
+    def _deploy_rule(self):
+        rule = self.auto_canvas.current_rule
+        if not rule:
+            return
+        ok, msg = self.engine.try_deploy_as_setpoint(rule)
+        color = COLORS["good"] if ok else COLORS["bad"]
+        self.logic_log.configure(text=f"Deploy: {msg}", text_color=color)
+
+    def _eval_automation(self):
+        """Periodic automation rule evaluation."""
+        self.engine.evaluate_all()
+        # Update live values on canvas if visible
+        if self.logic_visible:
+            self.auto_canvas.update_live_values()
+            rule = self.auto_canvas.current_rule
+            if rule:
+                status_colors = {"active": COLORS["good"], "triggered": COLORS["bad"],
+                                 "queued": COLORS["warn"], "disabled": COLORS["faint"],
+                                 "error": COLORS["bad"], "idle": COLORS["dim"]}
+                self.rule_status_dot.configure(
+                    text_color=status_colors.get(rule.status, COLORS["dim"]))
+            # Update event log with queue status
+            q = self.engine.queue_depth
+            q_txt = f"  |  Queue: {q} pending" if q > 0 else ""
+            if self.engine.event_log:
+                last = self.engine.event_log[-1]
+                ts = time.strftime("%H:%M:%S", time.localtime(last[0]))
+                self.logic_log.configure(
+                    text=f"{ts} [{last[1]}] {last[2]}{q_txt}",
+                    text_color="#FFE000" if q > 5 else "#B0B0B0")
+            elif q > 0:
+                self.logic_log.configure(
+                    text=f"Queue: {q} pending",
+                    text_color="#FFE000")
+        self.root.after(1000, self._eval_automation)
 
     # ─── Sensor Dashboard ──────────────────────────────────
 
@@ -920,6 +1062,7 @@ class GatewayGUIApp:
     # ─── Lifecycle ──────────────────────────────────────────
 
     def on_close(self):
+        self.engine.save_rules()
         self.disconnect()
         self.root.destroy()
 
