@@ -588,7 +588,8 @@ bool isPinSafe(int pin) {
         RADIO_BUSY,
 #endif
         BOARD_I2C_SDA, BOARD_I2C_SCL,
-        0  // boot
+        0,  // boot
+        19, 20  // USB D-/D+ on ESP32-S3 — touching these kills native USB
     };
     for (int f : forbidden) { if (f >= 0 && pin == f) return false; }
     if (pin < 0 || pin > 48) return false;
