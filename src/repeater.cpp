@@ -495,18 +495,14 @@ void startSolarMode() {
 }
 
 void solarLightSleep() {
-#if defined(CONFIG_IDF_TARGET_ESP32S3) && ARDUINO_USB_CDC_ON_BOOT
-    // ESP32-S3 USB-CDC disconnects during light sleep — skip if gateway
-    // mode is active (needs USB serial for data). Just use delay instead.
-    if (gatewayMode) {
-        delay(100);  // Yield CPU without disconnecting USB
-        return;
-    }
+#if defined(NATIVE_USB_ONLY)
+    // Heltec V4: native USB only (no CP2102) — light sleep kills USB connection.
+    // Use delay instead. Still saves power vs busy-loop.
+    delay(100);
+    return;
 #endif
-    // Enter light sleep — CPU halts until DIO1, button, or timer wakes it
-    // All RAM preserved, GPIO config preserved, radio stays in RX
+    // Boards with external UART chip (V3, LoRa32) — light sleep is safe
     esp_light_sleep_start();
-    // Woken up — check what woke us and handle it
 }
 
 void stopSolarMode() {
