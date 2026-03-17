@@ -24,6 +24,7 @@
 #include <BLE2902.h>
 #include "Pins.h"
 #include "MeshCore.h"
+#include <TinyGPSPlus.h>
 #if defined(RADIO_SX1262)
 #include "esp_sleep.h"
 #include "driver/gpio.h"
@@ -223,6 +224,19 @@ char autoPollTarget[NODE_ID_LEN + 1] = "";
 uint16_t autoPollInterval = 300;  // default 5 min
 unsigned long nextAutoPollTime = 0;
 
+// ─── GPS (optional external module via UART) ────────────────
+#define EEPROM_GPS_ADDR 441     // 2 bytes: TX pin, RX pin (0xFF = disabled)
+#define GPS_BROADCAST_INTERVAL 60000UL  // broadcast position every 60s
+int8_t gpsTxPin = -1;
+int8_t gpsRxPin = -1;
+bool gpsEnabled = false;
+TinyGPSPlus gps;
+HardwareSerial GPSSerial(1);
+unsigned long lastGpsBroadcast = 0;
+void setupGPS();      // defined after forward declarations
+void readGPS();
+void broadcastGPS();
+
 // ─── Relay Timers (ephemeral, not persisted) ────────────────
 #define MAX_TIMERS 4
 struct RelayTimer {
@@ -363,6 +377,38 @@ void setupGPIO();
 void setupBLE();
 bool isPinSafe(int pin);
 
+// ─── GPS function implementations ────────────────────────────
+void setupGPS() {
+    if (gpsTxPin >= 0 && gpsRxPin >= 0) {
+        GPSSerial.begin(9600, SERIAL_8N1, gpsRxPin, gpsTxPin);
+        gpsEnabled = true;
+        debugPrint("GPS: enabled on TX=" + String(gpsTxPin) + " RX=" + String(gpsRxPin));
+    }
+}
+
+void readGPS() {
+    if (!gpsEnabled) return;
+    while (GPSSerial.available()) {
+        gps.encode(GPSSerial.read());
+    }
+}
+
+void broadcastGPS() {
+    if (!gpsEnabled || !gps.location.isValid()) return;
+    unsigned long now = millis();
+    if (now - lastGpsBroadcast < GPS_BROADCAST_INTERVAL) return;
+    lastGpsBroadcast = now;
+
+    String pos = "POS," + String(gps.location.lat(), 6) + "," + String(gps.location.lng(), 6);
+    String mid = mesh.generateMsgID();
+    String hex = mesh.encryptMsg(pos);
+    String payload = String(mesh.localID) + ",FFFF," + mid + "," +
+                     String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+    mesh.transmitPacket(0xFFFF, payload);
+    debugPrint("GPS: broadcast " + pos);
+    bleSend("GPS," + String(gps.location.lat(), 6) + "," + String(gps.location.lng(), 6));
+}
+
 // ═══════════════════════════════════════════════════════════════
 // SECTION: Radio bridge — connects MeshCore to physical radio
 // ═══════════════════════════════════════════════════════════════
@@ -398,7 +444,7 @@ void setupRadio() {
     for (int attempt = 0; attempt < 3; attempt++) {
         if (attempt > 0) {
             debugPrint("Radio retry " + String(attempt + 1) + "/3...");
-            delay(500);  // Let TCXO stabilize between retries
+            delay(500);
         }
 #if defined(RADIO_SX1262)
         debugPrint("Initializing SX1262...");
@@ -410,17 +456,14 @@ void setupRadio() {
                             LORA_SYNC, LORA_POWER, LORA_PREAMBLE, 0);
 #endif
         if (state == RADIOLIB_ERR_NONE) break;
-        debugPrint("Radio init failed: " + String(state));
     }
     if (state != RADIOLIB_ERR_NONE) {
-        debugPrint("Radio FAILED after 3 attempts: " + String(state));
+        debugPrint("Radio FAILED: " + String(state));
         if (BOARD_LED >= 0) {
-            // Blink LED for 5s then reboot
-            for (int i = 0; i < 25; i++) {
+            while (1) {
                 digitalWrite(BOARD_LED, HIGH); delay(100);
                 digitalWrite(BOARD_LED, LOW); delay(100);
             }
-            ESP.restart();
         }
     }
 #if defined(RADIO_SX1262)
@@ -1364,6 +1407,7 @@ void processBleCommand(const String& line) {
                 ",SF:" + String(mesh.currentSF) +
                 ",POWER:" + String(solarMode ? "SOLAR" : "NORMAL") +
                 ",AUTOPOLL:" + String(autoPollEnabled ? (String(autoPollTarget) + "/" + String(autoPollInterval) + "s").c_str() : "OFF") +
+                ",GPS:" + String(gpsEnabled ? (gps.location.isValid() ? "FIX" : "NOFIX") : "OFF") +
                 ",HEAP:" + String(ESP.getFreeHeap()));
     }
     else if (line == "SAVE") { saveConfig(); bleSend("OK,SAVED"); }
@@ -1407,6 +1451,37 @@ void processBleCommand(const String& line) {
         bleSend("OK,POWER,NORMAL");
     }
 #endif
+    else if (line == "GPSPOS") {
+        // Return current GPS position (if available)
+        if (gpsEnabled && gps.location.isValid()) {
+            bleSend("GPS," + String(gps.location.lat(), 6) + "," + String(gps.location.lng(), 6));
+        } else if (gpsEnabled) {
+            bleSend("GPS,NOFIX");
+        } else {
+            bleSend("GPS,OFF");
+        }
+    }
+    else if (line.startsWith("GPS,")) {
+        // GPS pin config via BLE: GPS,<tx>,<rx> or GPS,OFF
+        String args = line.substring(4);
+        if (args == "OFF") {
+            gpsTxPin = -1; gpsRxPin = -1; gpsEnabled = false;
+            bleSend("OK,GPS,OFF");
+        } else {
+            int comma = args.indexOf(',');
+            if (comma > 0) {
+                int tx = args.substring(0, comma).toInt();
+                int rx = args.substring(comma + 1).toInt();
+                if (isPinSafe(tx) && isPinSafe(rx)) {
+                    gpsTxPin = tx; gpsRxPin = rx;
+                    setupGPS();
+                    bleSend("OK,GPS," + String(tx) + "," + String(rx));
+                } else {
+                    bleSend("ERR,GPS,BADPIN");
+                }
+            }
+        }
+    }
     else if (line == "NODES") {
         // Send full list of known nodes with routing info
         bleSend("NODELIST," + String(mesh.knownCount));
@@ -1696,6 +1771,28 @@ void handleSerialConfig() {
             Serial.println("ERROR: Unknown mode. Use PULSE, ANALOG, or AUTO");
         }
     }
+    else if (line.startsWith("GPS ")) {
+        String args = line.substring(4); args.trim();
+        if (args == "OFF" || args == "off") {
+            gpsTxPin = -1; gpsRxPin = -1; gpsEnabled = false;
+            Serial.println("OK: GPS disabled. SAVE to persist.");
+        } else {
+            int comma = args.indexOf(',');
+            if (comma > 0) {
+                int tx = args.substring(0, comma).toInt();
+                int rx = args.substring(comma + 1).toInt();
+                if (isPinSafe(tx) && isPinSafe(rx)) {
+                    gpsTxPin = tx; gpsRxPin = rx;
+                    setupGPS();
+                    Serial.println("OK: GPS on TX=" + String(tx) + " RX=" + String(rx) + ". SAVE to persist.");
+                } else {
+                    Serial.println("ERROR: GPS pins not safe (conflict with radio/I2C/USB)");
+                }
+            } else {
+                Serial.println("Usage: GPS <tx>,<rx>  or  GPS OFF");
+            }
+        }
+    }
     else if (line == "EXPAND ON") {
 #if IO_EXPAND_TX >= 0
         IOSerial.begin(IO_EXPAND_BAUD, SERIAL_8N1, IO_EXPAND_RX, IO_EXPAND_TX);
@@ -1723,7 +1820,7 @@ void handleSerialConfig() {
              line.startsWith("SETPOINT,") || line.startsWith("AUTOPOLL,")) {
         processBleCommand(line);
     }
-    else Serial.println("Commands: ID xxxx | KEY xxx... | RELAY 2,4,12 | SENSOR 34,36 | STATUS | SAVE | RESET | GATEWAY ON/OFF | AUTOPOLL <id> <sec> | PINMODE <pin> PULSE|AUTO"
+    else Serial.println("Commands: ID xxxx | KEY xxx... | RELAY 2,4,12 | SENSOR 34,36 | GPS <tx>,<rx> | GPS OFF | STATUS | SAVE | RESET | GATEWAY ON/OFF | AUTOPOLL <id> <sec> | PINMODE <pin> PULSE|AUTO"
 #if defined(RADIO_SX1262)
         " | SOLAR ON/OFF"
 #endif
@@ -1747,6 +1844,9 @@ void saveConfig() {
     EEPROM.write(EEPROM_AUTOPOLL_ADDR, autoPollEnabled ? 1 : 0);
     EEPROM.put(EEPROM_AUTOPOLL_ADDR + 1, autoPollTarget);
     EEPROM.put(EEPROM_AUTOPOLL_ADDR + 6, autoPollInterval);
+    // GPS pins
+    EEPROM.write(EEPROM_GPS_ADDR, (uint8_t)(gpsTxPin >= 0 ? gpsTxPin : 0xFF));
+    EEPROM.write(EEPROM_GPS_ADDR + 1, (uint8_t)(gpsRxPin >= 0 ? gpsRxPin : 0xFF));
     EEPROM.write(EEPROM_MAGIC_ADDR, EEPROM_MAGIC_VAL);
     EEPROM.commit();
 }
@@ -1808,6 +1908,12 @@ void loadConfig() {
         if (!mesh.isValidNodeID(String(autoPollTarget))) autoPollEnabled = false;
         if (autoPollEnabled) nextAutoPollTime = millis() + 10000;  // Start 10s after boot
     }
+
+    // Load GPS pins
+    uint8_t gTx = EEPROM.read(EEPROM_GPS_ADDR);
+    uint8_t gRx = EEPROM.read(EEPROM_GPS_ADDR + 1);
+    gpsTxPin = (gTx != 0xFF) ? (int8_t)gTx : BOARD_GPS_TX;
+    gpsRxPin = (gRx != 0xFF) ? (int8_t)gRx : BOARD_GPS_RX;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1878,7 +1984,6 @@ void setup() {
     if (BOARD_LED >= 0) { pinMode(BOARD_LED, OUTPUT); digitalWrite(BOARD_LED, LOW); }
 #ifdef VEXT_CTRL
     pinMode(VEXT_CTRL, OUTPUT); digitalWrite(VEXT_CTRL, LOW);
-    delay(100);  // Let VEXT power stabilize before radio/OLED init
 #endif
 #ifdef ADC_CTRL
     pinMode(ADC_CTRL, OUTPUT); digitalWrite(ADC_CTRL, HIGH);  // Enable battery voltage divider
@@ -1902,7 +2007,7 @@ void setup() {
     mesh.onCfgGo = handleCfgGo;
     mesh.onIdConflict = handleIdConflict;
 
-    // SPI + Radio (retry up to 3 times — SX1262 TCXO can be slow to stabilize)
+    // SPI + Radio
     loraSPI.begin(BOARD_SPI_SCK, BOARD_SPI_MISO, BOARD_SPI_MOSI, RADIO_CS);
     setupRadio();
 
@@ -1989,6 +2094,7 @@ void setup() {
     }
 
     setupGPIO();
+    setupGPS();
 
     // ─── Solar mode boot path ──────────────────────────────────
     // BLE stays active, OLED off — full radio, no packet loss
@@ -2070,11 +2176,13 @@ void loop() {
         // Button: temporarily show OLED status
         solarCheckButton();
 
-        // Timers, IO expansion, pulse rates, setpoints, and auto-poll still run
+        // Timers, IO expansion, pulse rates, setpoints, GPS, and auto-poll still run
         processTimers();
         ioExpandPoll();
         updatePulseRates();
         checkSetpoints();
+        readGPS();
+        broadcastGPS();
         executeAutoPoll();
 
         // BLE + Serial commands — app can toggle solar mode off via BLE
@@ -2145,7 +2253,11 @@ void loop() {
     updatePulseRates();
     checkSetpoints();
 
-    // 9. Auto-poll periodic sensor reporting
+    // 9. GPS read + broadcast
+    readGPS();
+    broadcastGPS();
+
+    // 10. Auto-poll periodic sensor reporting
     executeAutoPoll();
 
     // 10. Button → manual heartbeat
