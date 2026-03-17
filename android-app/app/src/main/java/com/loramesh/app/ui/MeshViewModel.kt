@@ -77,6 +77,19 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
     private val _autoPoll = MutableStateFlow(AutoPollConfig())
     val autoPoll: StateFlow<AutoPollConfig> = _autoPoll
 
+    // ─── Node positions (from POS broadcasts) ────────────
+    private val _positions = MutableStateFlow<Map<String, NodePosition>>(emptyMap())
+    val positions: StateFlow<Map<String, NodePosition>> = _positions
+
+    // ─── Position sharing (phone GPS → mesh) ───────────
+    private val _sharePosition = MutableStateFlow(false)
+    val sharePosition: StateFlow<Boolean> = _sharePosition
+    private var positionSharingJob: kotlinx.coroutines.Job? = null
+
+    // ─── Tracking target ────────────────────────────────
+    private val _trackingTarget = MutableStateFlow<String?>(null)
+    val trackingTarget: StateFlow<String?> = _trackingTarget
+
     // ─── Status feedback line ────────────────────────────
     private val _statusLine = MutableStateFlow("")
     val statusLine: StateFlow<String> = _statusLine
@@ -268,6 +281,20 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
                         return
                     }
 
+                    // Position broadcast: POS,<lat>,<lon>
+                    if (text.startsWith("POS,")) {
+                        val posParts = text.split(",")
+                        if (posParts.size >= 3) {
+                            val lat = posParts[1].toDoubleOrNull()
+                            val lon = posParts[2].toDoubleOrNull()
+                            if (lat != null && lon != null) {
+                                _positions.value = _positions.value +
+                                    (from to NodePosition(from, lat, lon))
+                            }
+                        }
+                        return  // Don't show POS as a chat message
+                    }
+
                     _messages.value = _messages.value + ChatMessage(
                         from = from,
                         text = text,
@@ -295,6 +322,18 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
 
             // ─── Sensor data: SDATA,<nodeId>,<pin>:<val>,... ────
             line.startsWith("SDATA,") -> parseSensorData(line)
+
+            // GPS position from connected node: GPS,<lat>,<lon>
+            line.startsWith("GPS,") && line.split(",").size >= 3 -> {
+                val parts = line.split(",")
+                val lat = parts[1].toDoubleOrNull()
+                val lon = parts[2].toDoubleOrNull()
+                val nodeId = _config.value.nodeId
+                if (lat != null && lon != null && nodeId.isNotEmpty()) {
+                    _positions.value = _positions.value +
+                        (nodeId to NodePosition(nodeId, lat, lon))
+                }
+            }
 
             // Command response: CMD,RSP,<pin>,<value>
             line.startsWith("CMD,RSP,") -> {
@@ -678,7 +717,83 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
         _nodes.value = current
     }
 
+    // ─── Position Sharing ─────────────────────────────────
+
+    fun setSharePosition(enabled: Boolean) {
+        _sharePosition.value = enabled
+        if (enabled) {
+            positionSharingJob = viewModelScope.launch {
+                while (_sharePosition.value) {
+                    broadcastPhonePosition()
+                    delay(60000)  // Every 60 seconds
+                }
+            }
+        } else {
+            positionSharingJob?.cancel()
+            positionSharingJob = null
+        }
+    }
+
+    private fun broadcastPhonePosition() {
+        val ctx = getApplication<Application>()
+        if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.ACCESS_FINE_LOCATION)
+            != PackageManager.PERMISSION_GRANTED) return
+        try {
+            val lm = ctx.getSystemService(android.content.Context.LOCATION_SERVICE) as LocationManager
+            val loc = lm.getLastKnownLocation(LocationManager.GPS_PROVIDER)
+                ?: lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
+            if (loc != null) {
+                val pos = "POS,%.6f,%.6f".format(loc.latitude, loc.longitude)
+                ble.sendBroadcast(pos)
+            }
+        } catch (_: Exception) { }
+    }
+
+    // ─── Tracking ────────────────────────────────────────
+
+    fun setTrackingTarget(nodeId: String?) {
+        _trackingTarget.value = nodeId
+    }
+
+    fun getDistanceTo(nodeId: String): Float? {
+        val ctx = getApplication<Application>()
+        val target = _positions.value[nodeId] ?: return null
+        if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.ACCESS_FINE_LOCATION)
+            != PackageManager.PERMISSION_GRANTED) return null
+        try {
+            val lm = ctx.getSystemService(android.content.Context.LOCATION_SERVICE) as LocationManager
+            val loc = lm.getLastKnownLocation(LocationManager.GPS_PROVIDER)
+                ?: lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
+                ?: return null
+            val results = FloatArray(1)
+            android.location.Location.distanceBetween(
+                loc.latitude, loc.longitude, target.lat, target.lon, results)
+            return results[0]  // metres
+        } catch (_: Exception) { return null }
+    }
+
+    fun getBearingTo(nodeId: String): Float? {
+        val ctx = getApplication<Application>()
+        val target = _positions.value[nodeId] ?: return null
+        if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.ACCESS_FINE_LOCATION)
+            != PackageManager.PERMISSION_GRANTED) return null
+        try {
+            val lm = ctx.getSystemService(android.content.Context.LOCATION_SERVICE) as LocationManager
+            val loc = lm.getLastKnownLocation(LocationManager.GPS_PROVIDER)
+                ?: lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
+                ?: return null
+            val myLoc = android.location.Location("").apply {
+                latitude = loc.latitude; longitude = loc.longitude
+            }
+            val targetLoc = android.location.Location("").apply {
+                latitude = target.lat; longitude = target.lon
+            }
+            return myLoc.bearingTo(targetLoc)
+        } catch (_: Exception) { return null }
+    }
+
     override fun onCleared() {
+        positionSharingJob?.cancel()
         ble.disconnect()
         super.onCleared()
     }

@@ -112,7 +112,7 @@ fun NodesScreen(viewModel: MeshViewModel) {
                         .thenByDescending { it.rssi }
                 )
                 items(sorted) { node ->
-                    NodeCard(node)
+                    NodeCard(node, viewModel)
                 }
             }
         }
@@ -120,7 +120,8 @@ fun NodesScreen(viewModel: MeshViewModel) {
 }
 
 @Composable
-private fun NodeCard(node: MeshNode) {
+private fun NodeCard(node: MeshNode, viewModel: MeshViewModel) {
+    val positions by viewModel.positions.collectAsState()
     val statusColor = if (node.active) MeshGreen else MeshGrey
     val rssiColor = when {
         !node.active -> MeshGrey
@@ -183,15 +184,30 @@ private fun NodeCard(node: MeshNode) {
                 }
             }
 
-            // Signal strength
+            // Signal strength + track button
             Column(horizontalAlignment = Alignment.End) {
                 Text(
                     "${node.rssi} dBm",
                     style = MaterialTheme.typography.bodyMedium,
                     color = rssiColor
                 )
-                // Signal bar visual
                 SignalBars(node.rssi, node.active)
+                // Track button (only if node has a known position)
+                if (positions.containsKey(node.id)) {
+                    TextButton(
+                        onClick = { viewModel.setTrackingTarget(node.id) },
+                        contentPadding = PaddingValues(0.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.NearMe,
+                            contentDescription = "Track",
+                            tint = MeshCyan,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(Modifier.width(2.dp))
+                        Text("Track", style = MaterialTheme.typography.labelSmall, color = MeshCyan)
+                    }
+                }
             }
         }
     }

@@ -28,7 +28,18 @@ data class MeshNode(
     val hops: Int = 0,
     val age: Int = 0,       // seconds since last heard (from firmware)
     val active: Boolean = true,
-    val nextHop: String = ""  // next hop node ID for route chain
+    val nextHop: String = "",  // next hop node ID for route chain
+    val lat: Double = 0.0,
+    val lon: Double = 0.0,
+    val hasPosition: Boolean = false
+)
+
+// Position received from a mesh node (via POS broadcast)
+data class NodePosition(
+    val nodeId: String,
+    val lat: Double,
+    val lon: Double,
+    val timestamp: Long = System.currentTimeMillis()
 )
 
 data class RelayPin(

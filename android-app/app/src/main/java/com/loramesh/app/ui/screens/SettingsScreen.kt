@@ -27,6 +27,7 @@ fun SettingsScreen(viewModel: MeshViewModel) {
     val telegramConfig by viewModel.telegramConfig.collectAsState()
     val sfChange by viewModel.sfChange.collectAsState()
     val soundEnabled by viewModel.soundEnabled.collectAsState()
+    val sharePosition by viewModel.sharePosition.collectAsState()
 
     var editId by remember { mutableStateOf(config.nodeId) }
     var editKey by remember { mutableStateOf(config.aesKey) }
@@ -344,6 +345,36 @@ fun SettingsScreen(viewModel: MeshViewModel) {
                 }
             }
         }
+
+        // ── GPS Position Sharing ──────────────────────────────
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text("GPS Position", style = MaterialTheme.typography.titleMedium, color = MeshCyan)
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Share Position", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            "Broadcast your phone's GPS location to the mesh every 60 seconds.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MeshGrey
+                        )
+                    }
+                    Switch(
+                        checked = sharePosition,
+                        onCheckedChange = { viewModel.setSharePosition(it) },
+                        colors = SwitchDefaults.colors(checkedThumbColor = MeshGreen)
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
 
         // ── Power Mode (always show — don't hide based on boardName) ──
         if (config.boardName != "T-Deck") {

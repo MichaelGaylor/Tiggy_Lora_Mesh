@@ -66,6 +66,7 @@ class MainActivity : ComponentActivity() {
 enum class Screen(val label: String, val icon: ImageVector) {
     CHAT("Chat", Icons.Default.Chat),
     NODES("Nodes", Icons.Default.CellTower),
+    MAP("Map", Icons.Default.Map),
     CONTROL("Control", Icons.Default.SettingsRemote),
     SETTINGS("Settings", Icons.Default.Settings)
 }
@@ -148,6 +149,7 @@ fun MainApp(viewModel: MeshViewModel = viewModel()) {
             when (currentScreen) {
                 Screen.CHAT -> ChatScreen(viewModel)
                 Screen.NODES -> NodesScreen(viewModel)
+                Screen.MAP -> MapScreen(viewModel)
                 Screen.CONTROL -> ControlScreen(viewModel)
                 Screen.SETTINGS -> SettingsScreen(viewModel)
             }

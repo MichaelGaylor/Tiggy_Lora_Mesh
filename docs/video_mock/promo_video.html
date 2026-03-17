@@ -1,0 +1,842 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>TiggyOpenMesh — 30s Promo</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+body{width:1920px;height:1080px;overflow:hidden;background:#F5F6FA;font-family:'Segoe UI','Consolas',sans-serif;color:#1a1a2e;}
+
+.scene{position:absolute;top:0;left:0;width:100%;height:100%;opacity:0;transition:opacity 0.7s ease;pointer-events:none;}
+.scene.active{opacity:1;pointer-events:auto;}
+
+:root{
+  --bg:#F5F6FA;--panel:#FFFFFF;--header:#1a1a2e;--accent:#0088CC;
+  --text:#1a1a2e;--dim:#7a7a8e;--faint:#D0D0D8;--good:#00A86B;
+  --warn:#E8860C;--bad:#DC3545;--cyan:#0088CC;--yellow:#E8A500;
+  --card:#FFFFFF;--card-border:#E0E2EA;--soft-bg:#EDF0F7;
+}
+
+.progress{position:fixed;bottom:0;left:0;height:5px;background:linear-gradient(90deg,#0088CC,#00A86B);z-index:999;animation:prog 54s linear forwards;}
+@keyframes prog{from{width:0}to{width:100%}}
+
+.fade-in{opacity:0;animation:fi .5s ease forwards;}
+@keyframes fi{to{opacity:1}}
+.slide-up{opacity:0;transform:translateY(20px);animation:su .5s ease forwards;}
+@keyframes su{to{opacity:1;transform:translateY(0)}}
+.pop{opacity:0;transform:scale(0);animation:pop .4s ease forwards;}
+@keyframes pop{to{opacity:1;transform:scale(1)}}
+
+/* ═══ SCENE 1: TITLE ═══ */
+#s1{display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#1a1a2e 0%,#0d2137 50%,#1a1a2e 100%);}
+#s1 .left{flex:1;padding:80px;display:flex;flex-direction:column;justify-content:center;}
+#s1 .right{flex:1;position:relative;height:100%;}
+#s1 h1{font-size:72px;letter-spacing:-2px;color:#fff;text-shadow:0 0 60px rgba(0,136,204,.4);}
+#s1 .sub{font-size:28px;color:#0088CC;margin-top:14px;}
+#s1 .tagline{font-size:22px;color:#a0a0b8;margin-top:24px;line-height:1.7;}
+#s1 .badge{display:inline-block;padding:10px 20px;border-radius:10px;font-size:16px;margin:6px 8px 6px 0;border:2px solid;color:#fff;font-weight:600;}
+.mesh-canvas{position:absolute;top:0;left:0;width:100%;height:100%;}
+.mesh-canvas svg{width:100%;height:100%;}
+.mesh-line{stroke-dasharray:300;stroke-dashoffset:300;animation:drawLine 1s ease forwards;}
+@keyframes drawLine{to{stroke-dashoffset:0}}
+.mesh-dot{opacity:0;animation:pop .4s ease forwards;}
+.mesh-label{opacity:0;animation:fi .3s ease forwards;font-size:11px;fill:#a0a0b8;}
+
+/* ═══ SCENE 3: GATEWAY GUI ═══ */
+#s3{display:flex;flex-direction:column;padding:0;background:var(--soft-bg);}
+.gui-header{height:52px;background:var(--header);display:flex;align-items:center;padding:0 24px;}
+.gui-header .title{color:#fff;font-size:15px;font-weight:bold;font-family:'Consolas',monospace;}
+.gui-header .hstatus{margin-left:auto;font-size:12px;font-family:'Consolas',monospace;}
+.gui-body{flex:1;display:flex;padding:12px;gap:12px;}
+.gui-panel{background:var(--panel);border-radius:10px;border:1px solid var(--card-border);overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.06);}
+.gui-panel-title{padding:10px 14px;font-size:13px;color:var(--accent);font-weight:700;border-bottom:1px solid var(--card-border);font-family:'Consolas',monospace;}
+.topo-canvas{width:100%;height:100%;position:relative;}
+.topo-node{position:absolute;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:bold;border:3px solid;opacity:0;font-family:'Consolas',monospace;box-shadow:0 2px 8px rgba(0,0,0,.15);}
+.topo-node.show{animation:pop .4s ease forwards;}
+.topo-rssi{position:absolute;font-size:10px;font-weight:700;opacity:0;font-family:'Consolas',monospace;}
+.topo-rssi.show{animation:fi .3s ease forwards;}
+.node-card{padding:10px 14px;border-bottom:1px solid var(--card-border);display:flex;align-items:center;gap:10px;opacity:0;}
+.node-card.show{animation:su .3s ease forwards;}
+.node-dot{width:10px;height:10px;border-radius:50%;}
+.node-id{font-size:14px;font-weight:bold;flex:1;font-family:'Consolas',monospace;}
+.node-rssi{font-size:13px;font-weight:600;font-family:'Consolas',monospace;}
+.node-route{font-size:11px;color:var(--dim);}
+.signal-bars{display:flex;gap:2px;align-items:flex-end;height:16px;}
+.signal-bars .bar{width:5px;border-radius:2px;}
+.wf-line{padding:4px 12px;font-size:11px;border-bottom:1px solid var(--card-border);opacity:0;font-family:'Consolas',monospace;}
+.wf-line.show{animation:su .2s ease forwards;}
+.wf-rx{background:#EBF7F1;}
+.wf-tx{background:#E8F4FD;}
+
+/* ═══ SCENE 4: LOGIC BUILDER ═══ */
+#s4{display:flex;flex-direction:column;padding:0;background:var(--soft-bg);}
+.lb-toolbar{height:44px;background:var(--header);display:flex;align-items:center;padding:0 18px;gap:10px;font-size:13px;color:#fff;font-family:'Consolas',monospace;}
+.lb-btn{padding:5px 14px;border-radius:6px;font-size:12px;font-weight:600;}
+.lb-canvas{flex:1;background:#fff;position:relative;overflow:hidden;margin:12px;border-radius:10px;border:1px solid var(--card-border);box-shadow:0 2px 8px rgba(0,0,0,.06);}
+.lb-block{position:absolute;border-radius:12px;border:2px solid;padding:12px 16px;min-width:155px;opacity:0;box-shadow:0 3px 12px rgba(0,0,0,.1);}
+.lb-block.show{animation:pop .4s ease forwards;}
+.lb-block .name{font-size:13px;font-weight:bold;font-family:'Consolas',monospace;}
+.lb-block .cfg{font-size:11px;color:var(--dim);margin-top:2px;font-family:'Consolas',monospace;}
+.lb-wire{position:absolute;pointer-events:none;}
+.lb-wire path{fill:none;stroke-width:2.5;stroke-dasharray:200;stroke-dashoffset:200;}
+.lb-wire.show path{animation:drawLine .6s ease forwards;}
+.lb-value{position:absolute;font-size:12px;font-weight:700;opacity:0;font-family:'Consolas',monospace;background:#fff;padding:1px 6px;border-radius:4px;box-shadow:0 1px 4px rgba(0,0,0,.1);}
+.lb-value.show{animation:fi .4s ease forwards;}
+.lb-log{position:absolute;bottom:12px;left:12px;right:12px;background:var(--header);border-radius:8px;padding:12px 16px;font-size:12px;color:#a0a0b8;font-family:'Consolas',monospace;}
+.lb-log .entry{opacity:0;}
+.lb-log .entry.show{animation:su .3s ease forwards;}
+
+/* ═══ SCENE 5: ANDROID APP ═══ */
+#s5{display:flex;align-items:center;justify-content:center;gap:50px;background:var(--soft-bg);}
+.phone{width:380px;height:760px;background:#fff;border-radius:40px;border:3px solid #ccc;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 8px 40px rgba(0,0,0,.15);}
+.phone-status{height:36px;background:#fff;display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--dim);}
+.phone-nav{height:52px;background:var(--header);display:flex;}
+.phone-nav .tab{flex:1;display:flex;align-items:center;justify-content:center;font-size:12px;color:#888;border-bottom:3px solid transparent;font-weight:600;}
+.phone-nav .tab.active{color:#fff;border-bottom-color:var(--accent);}
+.phone-body{flex:1;background:#FAFBFD;overflow:hidden;padding:10px;}
+.chat-msg{max-width:78%;padding:10px 14px;border-radius:14px;margin:6px 0;font-size:13px;line-height:1.5;opacity:0;box-shadow:0 1px 3px rgba(0,0,0,.08);}
+.chat-msg.show{animation:su .3s ease forwards;}
+.chat-in{background:#E8F4FD;border-bottom-left-radius:4px;}
+.chat-out{background:#EBF7F1;border-bottom-right-radius:4px;margin-left:auto;}
+.chat-from{font-size:10px;color:var(--accent);font-weight:600;margin-bottom:3px;}
+.chat-time{font-size:9px;color:var(--dim);text-align:right;margin-top:3px;}
+.sos-btn{width:48px;height:48px;border-radius:50%;background:var(--bad);color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:bold;position:absolute;right:14px;bottom:14px;opacity:0;box-shadow:0 4px 16px rgba(220,53,69,.4);z-index:10;}
+.sos-btn.show{animation:pop .4s ease forwards;}
+.node-row{display:flex;align-items:center;padding:10px 12px;background:#fff;border-radius:10px;margin:6px 0;opacity:0;border:1px solid var(--card-border);box-shadow:0 1px 3px rgba(0,0,0,.05);}
+.node-row.show{animation:su .3s ease forwards;}
+.app-features{max-width:480px;}
+.app-features h2{font-size:42px;color:var(--accent);margin-bottom:24px;}
+.app-feature{display:flex;align-items:center;gap:16px;padding:14px 0;border-bottom:1px solid var(--card-border);opacity:0;}
+.app-feature.show{animation:su .3s ease forwards;}
+.app-feature .icon{font-size:28px;width:44px;text-align:center;}
+.app-feature .text{font-size:18px;font-weight:600;}
+.app-feature .sub{font-size:13px;color:var(--dim);}
+
+/* ═══ SCENE 6: WEB MAP + HUB ═══ */
+#s6{display:flex;flex-direction:column;padding:24px 40px;background:var(--soft-bg);}
+#s6 h2{font-size:40px;color:var(--accent);text-align:center;margin-bottom:16px;}
+.map-container{flex:1;display:flex;gap:20px;}
+.map-view{flex:2;background:#E8F0E0;border-radius:14px;border:1px solid #C8D8C0;position:relative;overflow:hidden;}
+.map-marker{position:absolute;width:22px;height:22px;border-radius:50%;border:3px solid;opacity:0;box-shadow:0 2px 8px rgba(0,0,0,.2);}
+.map-marker.show{animation:pop .4s ease forwards;}
+.map-marker::after{content:'';position:absolute;top:-6px;left:-6px;right:-6px;bottom:-6px;border-radius:50%;border:2px solid;opacity:.3;animation:ping 2s ease infinite;}
+@keyframes ping{0%{transform:scale(1);opacity:.3}100%{transform:scale(2.5);opacity:0}}
+.map-label{position:absolute;font-size:12px;font-weight:600;white-space:nowrap;opacity:0;}
+.map-label.show{animation:fi .3s ease forwards;}
+.hub-panel{flex:1;display:flex;flex-direction:column;gap:12px;}
+.hub-card{background:var(--panel);border-radius:10px;padding:16px;border:1px solid var(--card-border);opacity:0;box-shadow:0 2px 6px rgba(0,0,0,.05);}
+.hub-card.show{animation:su .4s ease forwards;}
+.hub-card .val{font-size:30px;font-weight:bold;}
+.hub-card .lbl{font-size:12px;color:var(--dim);margin-top:4px;}
+.spark-row{display:flex;gap:12px;width:100%;opacity:0;}
+.spark-row.show{animation:su .3s ease forwards;}
+.spark-card{background:#fff;border-radius:8px;padding:10px 14px;flex:1;text-align:center;border:1px solid var(--card-border);}
+.spark-card .sv{font-size:20px;font-weight:bold;}
+.spark-card .sl{font-size:11px;color:var(--dim);}
+.spark-card canvas{width:100%;height:30px;margin-top:4px;}
+
+/* ═══ SCENE 7: CTA ═══ */
+#s7{display:flex;flex-direction:column;align-items:center;justify-content:center;background:linear-gradient(135deg,#1a1a2e 0%,#0d2137 50%,#1a1a2e 100%);}
+#s7 .logo{width:140px;height:140px;border-radius:50%;border:4px solid #0088CC;color:#0088CC;display:flex;align-items:center;justify-content:center;font-size:52px;font-weight:bold;animation:pulse 1.5s ease infinite;margin-bottom:30px;}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(0,136,204,.4)}50%{box-shadow:0 0 0 30px rgba(0,136,204,0)}}
+#s7 h1{font-size:64px;color:#fff;text-shadow:0 0 40px rgba(0,136,204,.3);}
+#s7 .sub{font-size:28px;color:#0088CC;margin-top:12px;}
+#s7 .uses{font-size:20px;color:#a0a0b8;margin-top:18px;}
+#s7 .cta{display:inline-block;padding:18px 48px;background:#0088CC;color:#fff;font-size:24px;font-weight:bold;border-radius:12px;margin-top:30px;box-shadow:0 4px 20px rgba(0,136,204,.4);}
+#s7 .oss{font-size:16px;color:#666;margin-top:18px;}
+</style>
+</head>
+<body>
+
+<!-- ═══ SCENE 1: TITLE ═══ -->
+<div class="scene" id="s1">
+  <div class="left">
+    <h1>TiggyOpenMesh</h1>
+    <div class="sub">Off-Grid LoRa Mesh Network</div>
+    <div class="tagline">
+      Encrypted messaging, remote relay control,<br>
+      sensor monitoring, and visual automation<br>
+      — no internet required.
+    </div>
+    <div style="margin-top:28px;">
+      <span class="badge" style="color:#0088CC;border-color:#0088CC;">AES-128-GCM</span>
+      <span class="badge" style="color:#00A86B;border-color:#00A86B;">868 MHz LoRa</span>
+      <span class="badge" style="color:#E8860C;border-color:#E8860C;">10+ km Range</span>
+      <span class="badge" style="color:#DC3545;border-color:#DC3545;">SOS Alert</span>
+    </div>
+  </div>
+  <div class="right">
+    <div class="mesh-canvas"><svg viewBox="0 0 900 1080" id="meshSvg"></svg></div>
+  </div>
+</div>
+
+<!-- ═══ SCENE 2: MOUNTAIN SOS ═══ -->
+<div class="scene" id="s2" style="background:#000;">
+  <div style="position:absolute;top:0;left:0;width:100%;height:100%;background:url('mountain.png') center/cover;"></div>
+  <!-- Dark overlay for contrast -->
+  <div style="position:absolute;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.25);"></div>
+  <svg viewBox="0 0 1920 1080" preserveAspectRatio="xMidYMid meet" style="position:absolute;top:0;left:0;width:100%;height:100%;" id="mtnSvg">
+    <defs>
+      <style>
+        .mtn-ring{fill:none;stroke-width:2.5;opacity:0;}
+        .mtn-ring-go{animation:mtnRing 1.8s ease-out forwards;}
+        @keyframes mtnRing{0%{r:12;opacity:.9;stroke-width:3}100%{r:80;opacity:0;stroke-width:1}}
+        .mtn-path{fill:none;stroke-width:4;stroke-linecap:round;stroke-dasharray:300;stroke-dashoffset:300;filter:drop-shadow(0 0 6px rgba(255,255,255,.5));}
+        .mtn-path-go{animation:mtnDash 1.2s ease forwards;}
+        @keyframes mtnDash{to{stroke-dashoffset:0}}
+        .mtn-label{opacity:0;}
+        .mtn-label-go{animation:mtnFade .6s ease forwards;}
+        @keyframes mtnFade{to{opacity:1}}
+        .mtn-dot{opacity:0;}
+        .mtn-dot-go{animation:mtnPop .4s ease forwards;}
+        @keyframes mtnPop{to{opacity:1;}}
+        .mtn-pulse{animation:mtnPulseAnim 1.2s ease-in-out infinite;}
+        @keyframes mtnPulseAnim{0%,100%{r:10}50%{r:16}}
+      </style>
+    </defs>
+    <!-- Hiker sending SOS: far bottom-left, label below so line doesn't cross it -->
+    <g id="mtnHiker">
+      <circle cx="120" cy="940" r="14" fill="rgba(220,53,69,.8)" class="mtn-dot" id="mtnSosDot"/>
+      <g class="mtn-label" id="mtnLbl1">
+        <rect x="240" y="910" width="280" height="70" rx="14" fill="rgba(220,53,69,.88)" stroke="rgba(255,255,255,.3)" stroke-width="1"/>
+        <text x="380" y="938" text-anchor="middle" fill="#fff" font-family="Segoe UI,sans-serif" font-size="22" font-weight="bold">SOS + GPS Sent</text>
+        <text x="380" y="964" text-anchor="middle" fill="#ffaaaa" font-family="Consolas" font-size="15">Encrypted LoRa broadcast</text>
+      </g>
+    </g>
+
+    <!-- Solar repeater: on the left mountain ridge top -->
+    <g id="mtnRepeater1">
+      <circle cx="580" cy="320" r="12" fill="rgba(0,136,204,.9)" class="mtn-dot" id="mtnRep1Dot"/>
+      <g class="mtn-label" id="mtnLbl2">
+        <rect x="440" y="230" width="280" height="60" rx="12" fill="rgba(0,136,204,.88)" stroke="rgba(255,255,255,.3)" stroke-width="1"/>
+        <text x="580" y="256" text-anchor="middle" fill="#fff" font-family="Segoe UI,sans-serif" font-size="20" font-weight="bold">Solar Repeater</text>
+        <text x="580" y="278" text-anchor="middle" fill="#aaddff" font-family="Consolas" font-size="14">Relays over the ridge</text>
+      </g>
+    </g>
+
+    <!-- Alert received: right side on the grassy hillside (NOT on the river) -->
+    <g id="mtnValley">
+      <circle cx="1580" cy="520" r="12" fill="rgba(0,168,107,.9)" class="mtn-dot" id="mtnValDot"/>
+      <g class="mtn-label" id="mtnLbl3">
+        <rect x="1440" y="430" width="280" height="60" rx="12" fill="rgba(0,168,107,.88)" stroke="rgba(255,255,255,.3)" stroke-width="1"/>
+        <text x="1580" y="456" text-anchor="middle" fill="#fff" font-family="Segoe UI,sans-serif" font-size="20" font-weight="bold">Alert Received!</text>
+        <text x="1580" y="478" text-anchor="middle" fill="#aaffcc" font-family="Consolas" font-size="14">GPS location + Telegram forwarded</text>
+      </g>
+    </g>
+
+    <!-- Signal paths: long arcs across the scene -->
+    <path id="mtnPath1" class="mtn-path" d="M 120,940 C 220,650 400,380 580,320" stroke="#DC3545"/>
+    <path id="mtnPath2" class="mtn-path" d="M 580,320 C 900,250 1300,350 1580,520" stroke="#0088CC"/>
+
+    <!-- Radio wave rings (injected by JS) -->
+    <g id="mtnWaves"></g>
+
+    <!-- Title bar at bottom -->
+    <g class="mtn-label" id="mtnTitle">
+      <rect x="410" y="30" width="1100" height="120" rx="22" fill="rgba(26,26,46,.88)" stroke="rgba(255,255,255,.15)" stroke-width="1"/>
+      <text x="960" y="80" text-anchor="middle" fill="#fff" font-family="Segoe UI,sans-serif" font-size="48" font-weight="bold">No signal? No problem.</text>
+      <text x="960" y="120" text-anchor="middle" fill="#0088CC" font-family="Consolas" font-size="22">LoRa mesh relays your SOS from the ridge to the valley below.</text>
+    </g>
+  </svg>
+</div>
+
+<!-- ═══ SCENE 3: GATEWAY GUI ═══ -->
+<div class="scene" id="s3">
+  <div class="gui-header">
+    <span class="title">TiggyOpenMesh Gateway Client</span>
+    <span style="margin-left:20px;color:#00A86B;font-size:12px;font-family:'Consolas',monospace;">&#9679; COM7 Connected</span>
+    <span style="margin-left:14px;color:#0088CC;font-size:12px;font-family:'Consolas',monospace;">Hub: Online</span>
+    <span class="hstatus" style="color:#00A86B;">&#9679; AES Enabled &nbsp; SF9 &nbsp; 868MHz</span>
+  </div>
+  <div class="gui-body">
+    <div style="flex:1.2;display:flex;flex-direction:column;gap:12px;">
+      <div class="gui-panel" style="flex:1;">
+        <div class="gui-panel-title">Mesh Topology <span style="color:var(--dim);font-size:10px;font-weight:normal;" id="topoSummary"></span></div>
+        <div class="topo-canvas" id="topoCanvas"></div>
+      </div>
+      <div class="gui-panel" style="height:130px;">
+        <div class="gui-panel-title">Packet Waterfall</div>
+        <div id="waterfall" style="padding:4px;overflow:hidden;height:98px;"></div>
+      </div>
+    </div>
+    <div class="gui-panel" style="width:400px;">
+      <div class="gui-panel-title">Discovered Nodes</div>
+      <div id="nodeList"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ SCENE 4: LOGIC BUILDER ═══ -->
+<div class="scene" id="s4">
+  <div class="gui-header">
+    <span class="title">TiggyOpenMesh Gateway Client</span>
+    <span class="hstatus" style="color:#0088CC;">&#9679; Logic Builder Active</span>
+  </div>
+  <div class="lb-toolbar">
+    <span style="color:#aaa;">Rules:</span>
+    <span class="lb-btn" style="background:#2a3a4e;color:#fff;">Wind Alarm</span>
+    <span class="lb-btn" style="background:#0088CC;color:#fff;">+ New</span>
+    <span class="lb-btn" style="background:#DC3545;color:#fff;">Delete</span>
+    <span style="color:#00A86B;margin-left:14px;">&#9679;</span>
+    <span style="color:#aaa;margin-left:14px;">Check every:</span>
+    <span style="color:#fff;">5s</span>
+    <span style="color:#aaa;margin-left:14px;">Min action gap:</span>
+    <span style="color:#fff;">10s</span>
+    <span style="color:#fff;margin-left:6px;">&#9745; Enabled</span>
+    <span style="margin-left:auto;padding:5px 16px;background:#E8860C;color:#fff;border-radius:6px;font-size:12px;font-weight:600;">Deploy to Node</span>
+  </div>
+  <div style="display:flex;flex:1;padding:12px;gap:12px;">
+    <div style="flex:1;display:flex;flex-direction:column;">
+      <div style="display:flex;gap:8px;margin-bottom:8px;">
+        <span class="lb-btn" style="background:#E0F2FE;color:#0088CC;">+ Input</span>
+        <span class="lb-btn" style="background:#E8F5E9;color:#00A86B;">+ Transform</span>
+        <span class="lb-btn" style="background:#FFF8E1;color:#B8860B;">+ Condition</span>
+        <span class="lb-btn" style="background:#FFEBEE;color:#DC3545;">+ Action</span>
+      </div>
+      <div class="lb-canvas" id="lbCanvas">
+        <div class="lb-log" id="lbLog"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ SCENE 5: ANDROID APP ═══ -->
+<div class="scene" id="s5">
+  <div class="phone" id="phone1">
+    <div class="phone-status">12:47 &nbsp; &#128267; LoraMesh</div>
+    <div class="phone-nav">
+      <div class="tab active">Chat</div><div class="tab">Nodes</div><div class="tab">Control</div><div class="tab">Settings</div>
+    </div>
+    <div class="phone-body" style="display:flex;flex-direction:column;position:relative;" id="chatBody"></div>
+  </div>
+  <div class="phone" id="phone2">
+    <div class="phone-status">12:47 &nbsp; &#128267; LoraMesh</div>
+    <div class="phone-nav">
+      <div class="tab">Chat</div><div class="tab active">Nodes</div><div class="tab">Control</div><div class="tab">Settings</div>
+    </div>
+    <div class="phone-body" id="nodesBody">
+      <div style="font-size:17px;color:var(--accent);padding:8px 4px;font-weight:bold;">Mesh Nodes</div>
+      <div style="font-size:12px;padding:0 4px 8px;"><span style="color:var(--good);">5 active</span> <span style="color:var(--dim);margin-left:8px;">1 stale</span></div>
+    </div>
+  </div>
+  <div class="app-features">
+    <h2>Android App</h2>
+    <div id="appFeatures"></div>
+  </div>
+</div>
+
+<!-- ═══ SCENE 6: WEB MAP + HUB ═══ -->
+<div class="scene" id="s6">
+  <h2>Gateway Hub &amp; Live Web Map</h2>
+  <div class="map-container">
+    <div class="map-view" id="mapView">
+      <svg width="100%" height="100%" style="opacity:.12"><defs><pattern id="g" width="50" height="50" patternUnits="userSpaceOnUse"><path d="M 50 0 L 0 0 0 50" fill="none" stroke="#4a6a4a" stroke-width=".5"/></pattern></defs><rect width="100%" height="100%" fill="url(#g)"/></svg>
+    </div>
+    <div class="hub-panel" id="hubPanel"></div>
+  </div>
+  <div id="sparklines" style="display:flex;gap:12px;margin-top:14px;"></div>
+</div>
+
+<!-- ═══ SCENE 7: CTA ═══ -->
+<div class="scene" id="s7">
+  <div class="logo">TOM</div>
+  <h1>TiggyOpenMesh</h1>
+  <div class="sub">Open Source LoRa Mesh for the Real World</div>
+  <div class="uses">Farms &bull; Estates &bull; Expeditions &bull; Emergency Networks &bull; Events &bull; Remote Sites</div>
+  <div class="cta">github.com/MichaelGaylor/Tiggy_Lora_Mesh</div>
+  <div class="oss">Free &bull; Open Source &bull; Web Flasher &bull; No Soldering Required</div>
+</div>
+
+<!-- Record button — click to capture video -->
+<button id="recBtn" style="
+  position:fixed;top:20px;right:20px;z-index:9999;
+  padding:14px 32px;font-size:18px;font-weight:bold;font-family:Consolas;
+  background:#DC3545;color:#fff;border:none;border-radius:10px;
+  cursor:pointer;box-shadow:0 4px 16px rgba(220,53,69,.5);
+  transition:all .2s;
+" onmouseover="this.style.background='#c82333'" onmouseout="this.style.background='#DC3545'">
+  Click to Record Video
+</button>
+
+<div class="progress" id="progressBar"></div>
+
+<script>
+const SCENES=['s1','s2','s3','s4','s5','s6','s7'];
+const TIMINGS=[0,7000,16000,25000,34000,42000,48000];
+let cur=-1;
+function showScene(i){
+  if(cur>=0)document.getElementById(SCENES[cur]).classList.remove('active');
+  cur=i;document.getElementById(SCENES[i]).classList.add('active');
+  if(sceneFns[i])sceneFns[i]();
+}
+const sceneFns={};
+
+// ═══ SCENE 1: MESH — correct tree topology ═══
+// GW is the gateway. Routes fan out logically:
+//   GW──0041──0132
+//   GW──006A──01F0
+//   GW──00AF──0199──01B3
+//   0199──SOLAR
+sceneFns[0]=()=>{
+  const svg=document.getElementById('meshSvg');
+  svg.innerHTML='';
+  const N=[
+    {x:450,y:200,id:'GW',r:32,c:'#00A86B',delay:0},
+    {x:220,y:380,id:'0041',r:24,c:'#0088CC',delay:400},
+    {x:450,y:420,id:'006A',r:24,c:'#0088CC',delay:500},
+    {x:680,y:380,id:'00AF',r:24,c:'#0088CC',delay:600},
+    {x:120,y:580,id:'0132',r:20,c:'#E8860C',delay:900},
+    {x:380,y:620,id:'01F0',r:20,c:'#E8860C',delay:1000},
+    {x:700,y:600,id:'0199',r:20,c:'#E8860C',delay:1100},
+    {x:550,y:790,id:'01B3',r:18,c:'#DC3545',delay:1400},
+    {x:780,y:800,id:'SOLAR',r:18,c:'#B8860B',delay:1600},
+  ];
+  // Links match the tree routes above
+  const L=[[0,1],[0,2],[0,3],[1,4],[2,5],[3,6],[6,7],[6,8]];
+  L.forEach(([a,b],i)=>{
+    const l=document.createElementNS('http://www.w3.org/2000/svg','line');
+    l.setAttribute('x1',N[a].x);l.setAttribute('y1',N[a].y);
+    l.setAttribute('x2',N[b].x);l.setAttribute('y2',N[b].y);
+    l.setAttribute('stroke','rgba(0,136,204,0.5)');l.setAttribute('stroke-width','3');
+    l.setAttribute('class','mesh-line');l.style.animationDelay=(200+i*150)+'ms';
+    svg.appendChild(l);
+  });
+  N.forEach(n=>{
+    const c=document.createElementNS('http://www.w3.org/2000/svg','circle');
+    c.setAttribute('cx',n.x);c.setAttribute('cy',n.y);c.setAttribute('r',n.r);
+    c.setAttribute('fill',n.c==='#00A86B'?'#D0F5E0':'#E0F0FA');
+    c.setAttribute('stroke',n.c);c.setAttribute('stroke-width','3');
+    c.setAttribute('class','mesh-dot');c.style.animationDelay=n.delay+'ms';
+    svg.appendChild(c);
+    const t=document.createElementNS('http://www.w3.org/2000/svg','text');
+    t.setAttribute('x',n.x);t.setAttribute('y',n.y+5);
+    t.setAttribute('text-anchor','middle');t.setAttribute('fill',n.c);
+    t.setAttribute('font-family','Consolas');t.setAttribute('font-size',n.r>22?14:12);
+    t.setAttribute('font-weight','bold');t.setAttribute('class','mesh-dot');
+    t.style.animationDelay=n.delay+'ms';t.textContent=n.id;
+    svg.appendChild(t);
+  });
+  // Route labels on links
+  const RL=[
+    {a:0,b:1,rssi:'-62dBm',delay:700},{a:0,b:2,rssi:'-74dBm',delay:800},
+    {a:0,b:3,rssi:'-81dBm',delay:900},{a:3,b:6,rssi:'-88dBm',delay:1300},
+    {a:6,b:8,rssi:'-105dBm',delay:1700}
+  ];
+  RL.forEach(r=>{
+    const mx=(N[r.a].x+N[r.b].x)/2, my=(N[r.a].y+N[r.b].y)/2-12;
+    const t=document.createElementNS('http://www.w3.org/2000/svg','text');
+    t.setAttribute('x',mx);t.setAttribute('y',my);
+    t.setAttribute('text-anchor','middle');t.setAttribute('fill','#8899aa');
+    t.setAttribute('font-family','Consolas');t.setAttribute('font-size','11');
+    t.setAttribute('class','mesh-label');t.style.animationDelay=r.delay+'ms';
+    t.textContent=r.rssi;
+    svg.appendChild(t);
+  });
+};
+
+// ═══ SCENE 2: MOUNTAIN SOS ═══
+sceneFns[1]=()=>{
+  const show=(id,delay)=>setTimeout(()=>{
+    const el=document.getElementById(id);
+    if(el)el.classList.add('mtn-dot-go','mtn-label-go');
+  },delay);
+  // SOS dot pulses on the snowy ridge
+  setTimeout(()=>{
+    const d=document.getElementById('mtnSosDot');
+    if(d){d.classList.add('mtn-dot-go');d.classList.add('mtn-pulse');}
+  },600);
+  // SOS label
+  setTimeout(()=>document.getElementById('mtnLbl1')?.classList.add('mtn-label-go'),800);
+  // Radio rings at hiker position
+  const wg=document.getElementById('mtnWaves');
+  if(wg)wg.innerHTML='';
+  const ring=(cx,cy,col,delay)=>{
+    for(let i=0;i<3;i++){
+      setTimeout(()=>{
+        const c=document.createElementNS('http://www.w3.org/2000/svg','circle');
+        c.setAttribute('cx',cx);c.setAttribute('cy',cy);c.setAttribute('r','12');
+        c.setAttribute('stroke',col);c.setAttribute('class','mtn-ring mtn-ring-go');
+        wg?.appendChild(c);
+      },delay+i*500);
+    }
+  };
+  ring(120,940,'#DC3545',800);
+  // Signal path 1: hiker → repeater (long arc up to the ridge)
+  setTimeout(()=>document.getElementById('mtnPath1')?.classList.add('mtn-path-go'),1400);
+  // Repeater appears on the ridge
+  setTimeout(()=>{
+    document.getElementById('mtnRep1Dot')?.classList.add('mtn-dot-go');
+    document.getElementById('mtnLbl2')?.classList.add('mtn-label-go');
+  },2200);
+  ring(580,320,'#0088CC',2400);
+  // Signal path 2: repeater → valley receiver (long arc across to the right hillside)
+  setTimeout(()=>document.getElementById('mtnPath2')?.classList.add('mtn-path-go'),3200);
+  // Valley receives on the right hillside
+  setTimeout(()=>{
+    document.getElementById('mtnValDot')?.classList.add('mtn-dot-go');
+    document.getElementById('mtnLbl3')?.classList.add('mtn-label-go');
+  },4200);
+  ring(1580,520,'#00A86B',4400);
+  // Title bar
+  setTimeout(()=>document.getElementById('mtnTitle')?.classList.add('mtn-label-go'),5200);
+};
+
+// ═══ SCENE 3: GATEWAY GUI — matching topology ═══
+// All drawn in SVG with viewBox so lines and circles share exact coordinates
+sceneFns[2]=()=>{
+  const tc=document.getElementById('topoCanvas');
+  tc.innerHTML='';
+  const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
+  svg.setAttribute('viewBox','0 0 600 400');
+  svg.setAttribute('preserveAspectRatio','xMidYMid meet');
+  svg.style.cssText='position:absolute;top:0;left:0;width:100%;height:100%;';
+  tc.appendChild(svg);
+
+  // Same tree: GW→0041→0132, GW→006A, GW→00AF→0199
+  const TN=[
+    {x:300,y:60,id:'GW',r:22,c:'#00A86B',bg:'#D0F5E0',delay:200},
+    {x:130,y:170,id:'0041',r:18,c:'#0088CC',bg:'#E0F0FA',delay:500},
+    {x:300,y:190,id:'006A',r:18,c:'#0088CC',bg:'#E0F0FA',delay:600},
+    {x:470,y:170,id:'00AF',r:18,c:'#0088CC',bg:'#E0F0FA',delay:700},
+    {x:70,y:310,id:'0132',r:15,c:'#E8860C',bg:'#FFF3E0',delay:1000},
+    {x:490,y:310,id:'0199',r:15,c:'#E8860C',bg:'#FFF3E0',delay:1100},
+  ];
+  const TL=[
+    {a:0,b:1,rssi:-62},{a:0,b:2,rssi:-74},{a:0,b:3,rssi:-81},
+    {a:1,b:4,rssi:-88},{a:3,b:5,rssi:-105}
+  ];
+  // Draw links first (behind nodes)
+  TL.forEach((lk,i)=>{
+    const a=TN[lk.a],b=TN[lk.b];
+    const l=document.createElementNS('http://www.w3.org/2000/svg','line');
+    l.setAttribute('x1',a.x);l.setAttribute('y1',a.y);
+    l.setAttribute('x2',b.x);l.setAttribute('y2',b.y);
+    const col=lk.rssi>-75?'#00A86B':lk.rssi>-95?'#0088CC':'#E8860C';
+    l.setAttribute('stroke',col);l.setAttribute('stroke-width',lk.rssi>-80?'3':'2');
+    l.setAttribute('class','mesh-line');l.style.animationDelay=(400+i*200)+'ms';
+    svg.appendChild(l);
+    // RSSI label at midpoint
+    const mx=(a.x+b.x)/2, my=(a.y+b.y)/2-10;
+    const t=document.createElementNS('http://www.w3.org/2000/svg','text');
+    t.setAttribute('x',mx);t.setAttribute('y',my);
+    t.setAttribute('text-anchor','middle');t.setAttribute('fill',col);
+    t.setAttribute('font-family','Consolas');t.setAttribute('font-size','11');
+    t.setAttribute('font-weight','bold');
+    t.setAttribute('class','mesh-label');t.style.animationDelay=(800+i*200)+'ms';
+    t.textContent=lk.rssi+'dBm';
+    svg.appendChild(t);
+  });
+  // Draw nodes on top
+  TN.forEach(n=>{
+    const c=document.createElementNS('http://www.w3.org/2000/svg','circle');
+    c.setAttribute('cx',n.x);c.setAttribute('cy',n.y);c.setAttribute('r',n.r);
+    c.setAttribute('fill',n.bg);c.setAttribute('stroke',n.c);c.setAttribute('stroke-width','3');
+    c.setAttribute('class','mesh-dot');c.style.animationDelay=n.delay+'ms';
+    svg.appendChild(c);
+    const t=document.createElementNS('http://www.w3.org/2000/svg','text');
+    t.setAttribute('x',n.x);t.setAttribute('y',n.y+5);
+    t.setAttribute('text-anchor','middle');t.setAttribute('fill',n.c);
+    t.setAttribute('font-family','Consolas');t.setAttribute('font-size',n.r>16?13:11);
+    t.setAttribute('font-weight','bold');
+    t.setAttribute('class','mesh-dot');t.style.animationDelay=n.delay+'ms';
+    t.textContent=n.id;
+    svg.appendChild(t);
+  });
+  document.getElementById('topoSummary').textContent='| 6 nodes | Best:-62dBm | Worst:-105dBm | Avg:-82dBm';
+
+  // Node list — routes match the tree
+  const nl=document.getElementById('nodeList');nl.innerHTML='';
+  const ndata=[
+    {id:'0041',rssi:-62,route:'Direct',color:'#00A86B'},
+    {id:'006A',rssi:-74,route:'Direct',color:'#0088CC'},
+    {id:'00AF',rssi:-81,route:'Direct',color:'#0088CC'},
+    {id:'0132',rssi:-88,route:'2hop via 0041',color:'#E8860C'},
+    {id:'0199',rssi:-105,route:'2hop via 00AF',color:'#E8860C'},
+  ];
+  ndata.forEach((n,i)=>{
+    const bars=n.rssi>-60?4:n.rssi>-75?3:n.rssi>-90?2:1;
+    const bc=bars>=3?'#00A86B':bars===2?'#E8860C':'#DC3545';
+    const card=document.createElement('div');card.className='node-card';
+    card.innerHTML=`<div class="node-dot" style="background:${n.color}"></div>
+      <div class="node-id">${n.id}</div>
+      <div class="signal-bars">${[1,2,3,4].map(b=>`<div class="bar" style="height:${3+b*3}px;background:${b<=bars?bc:'#E0E0E0'}"></div>`).join('')}</div>
+      <div class="node-rssi" style="color:${n.color}">${n.rssi}dBm</div>
+      <div class="node-route">${n.route}</div>`;
+    setTimeout(()=>card.classList.add('show'),400+i*300);
+    nl.appendChild(card);
+  });
+
+  // Waterfall — routes shown correctly
+  const wf=document.getElementById('waterfall');wf.innerHTML='';
+  [
+    {dir:'RX',cls:'wf-rx',text:'0041 \u2192 FFFF  HB  TTL5  -62dBm'},
+    {dir:'TX',cls:'wf-tx',text:'GW \u2192 HUB  relay pkt seq:1842'},
+    {dir:'RX',cls:'wf-rx',text:'0132 \u2192 0041 \u2192 GW  MSG "All clear"  -88dBm (2hop)'},
+    {dir:'RX',cls:'wf-rx',text:'00AF \u2192 GW  SDATA temp:21.8 hum:47%  -81dBm'},
+    {dir:'TX',cls:'wf-tx',text:'GW \u2192 HUB  relay pkt seq:1845'},
+  ].forEach((p,i)=>{
+    const d=document.createElement('div');d.className='wf-line '+p.cls;
+    d.innerHTML=`<span style="color:var(--accent);font-weight:600">${p.dir}</span> <span style="color:var(--dim)">${p.text}</span>`;
+    setTimeout(()=>d.classList.add('show'),800+i*400);wf.appendChild(d);
+  });
+};
+
+// ═══ SCENE 4: LOGIC BUILDER ═══
+sceneFns[3]=()=>{
+  const cv=document.getElementById('lbCanvas');
+  cv.querySelectorAll('.lb-block,.lb-wire,.lb-value').forEach(e=>e.remove());
+  const B=[
+    {x:40,y:50,w:160,h:72,name:'Sensor Read',cfg:'A1B2 : pin 5',bc:'#0088CC',bg:'#E8F4FD',delay:200},
+    {x:260,y:50,w:155,h:72,name:'Scale',cfg:'\u00d70.0045 = m/s',bc:'#00A86B',bg:'#EBF7F1',delay:600},
+    {x:475,y:50,w:150,h:72,name:'Compare',cfg:'> 15.0',bc:'#B8860B',bg:'#FFF8E1',delay:1000},
+    {x:475,y:190,w:150,h:72,name:'Constant',cfg:'15.0',bc:'#0088CC',bg:'#E8F4FD',delay:800},
+    {x:690,y:50,w:165,h:72,name:'Debounce',cfg:'3000ms hold',bc:'#B8860B',bg:'#FFF8E1',delay:1400},
+    {x:920,y:50,w:165,h:72,name:'Set Relay',cfg:'0010:pin2 HIGH',bc:'#DC3545',bg:'#FFEBEE',delay:1800},
+  ];
+  B.forEach(b=>{
+    const d=document.createElement('div');d.className='lb-block';
+    d.style.cssText=`left:${b.x}px;top:${b.y}px;width:${b.w}px;height:${b.h}px;border-color:${b.bc};background:${b.bg};`;
+    d.innerHTML=`<div class="name" style="color:${b.bc}">${b.name}</div><div class="cfg">${b.cfg}</div>`;
+    setTimeout(()=>d.classList.add('show'),b.delay);cv.appendChild(d);
+  });
+  // Wires: Sensor→Scale→Compare→Debounce→SetRelay, Constant→Compare(b)
+  const W=[
+    {x1:200,y1:86,x2:260,y2:86,c:'#0088CC',delay:500,val:'470'},
+    {x1:415,y1:86,x2:475,y2:86,c:'#00A86B',delay:900,val:'2.12'},
+    {x1:550,y1:226,x2:550,y2:122,c:'#0088CC',delay:1100,val:'15.0'},
+    {x1:625,y1:86,x2:690,y2:86,c:'#B8860B',delay:1300,val:'True'},
+    {x1:855,y1:86,x2:920,y2:86,c:'#B8860B',delay:1700,val:'True'},
+  ];
+  W.forEach(w=>{
+    const s=document.createElementNS('http://www.w3.org/2000/svg','svg');
+    s.setAttribute('class','lb-wire');
+    s.style.cssText='left:0;top:0;width:100%;height:100%;position:absolute;';
+    const mx=(w.x1+w.x2)/2;
+    const p=document.createElementNS('http://www.w3.org/2000/svg','path');
+    p.setAttribute('d',`M${w.x1},${w.y1} C${mx},${w.y1} ${mx},${w.y2} ${w.x2},${w.y2}`);
+    p.setAttribute('stroke',w.c);s.appendChild(p);
+    setTimeout(()=>s.classList.add('show'),w.delay);cv.appendChild(s);
+    const v=document.createElement('div');v.className='lb-value';
+    v.style.cssText=`left:${mx-16}px;top:${Math.min(w.y1,w.y2)-20}px;color:${w.c};`;
+    v.textContent=w.val;
+    setTimeout(()=>v.classList.add('show'),w.delay+400);cv.appendChild(v);
+  });
+  // Log
+  const log=document.getElementById('lbLog');log.innerHTML='';
+  [
+    {t:'14:37:12',text:'Sensor=470 \u2192 Scaled=2.12 m/s \u2192 Compare: False',delay:2200},
+    {t:'14:37:17',text:'Sensor=3340 \u2192 Scaled=15.03 m/s \u2192 Compare: True \u2192 Debounce started',delay:3000},
+    {t:'14:37:20',text:'Debounce held 3s \u2192 SET RELAY 0010:pin2=HIGH queued',delay:3800},
+    {t:'14:37:23',text:'Command sent to mesh. Queue: 0 pending.',delay:4500},
+  ].forEach(e=>{
+    const d=document.createElement('div');d.className='entry';
+    d.innerHTML=`<span style="color:#666">${e.t}</span> ${e.text}`;
+    setTimeout(()=>d.classList.add('show'),e.delay);log.appendChild(d);
+  });
+};
+
+// ═══ SCENE 5: ANDROID APP ═══
+sceneFns[4]=()=>{
+  const cb=document.getElementById('chatBody');cb.innerHTML='';
+  [
+    {from:'0041',text:'All clear at north gate',in:true,delay:300},
+    {from:'You',text:'Copy. Checking south perimeter.',in:false,delay:800},
+    {from:'00AF',text:'Temp: 21.8\u00b0C  Humidity: 47%  Battery: 91%',in:true,delay:1400},
+    {from:'0132',text:'Gate sensor triggered \u2014 GATE OPEN',in:true,delay:2000},
+    {from:'You',text:'Acknowledged. Sending relay close.',in:false,delay:2600},
+  ].forEach(m=>{
+    const d=document.createElement('div');
+    d.className='chat-msg '+(m.in?'chat-in':'chat-out');
+    d.innerHTML=(m.in?`<div class="chat-from">${m.from}</div>`:'')+m.text+`<div class="chat-time">12:47</div>`;
+    setTimeout(()=>{d.classList.add('show');cb.appendChild(d);cb.scrollTop=cb.scrollHeight;},m.delay);
+  });
+  const sos=document.createElement('div');sos.className='sos-btn';sos.textContent='SOS';
+  setTimeout(()=>{sos.classList.add('show');cb.appendChild(sos);},500);
+
+  const nb=document.getElementById('nodesBody');
+  nb.querySelectorAll('.node-row').forEach(e=>e.remove());
+  [
+    {id:'0041',rssi:-62,hop:'Direct',c:'#00A86B'},
+    {id:'006A',rssi:-74,hop:'Direct',c:'#0088CC'},
+    {id:'00AF',rssi:-81,hop:'Direct',c:'#0088CC'},
+    {id:'0132',rssi:-88,hop:'2 hops via 0041',c:'#E8860C'},
+    {id:'0199',rssi:-105,hop:'3 hops via 00AF',c:'#E8860C'},
+  ].forEach((n,i)=>{
+    const bars=n.rssi>-60?4:n.rssi>-75?3:n.rssi>-90?2:1;
+    const bc=bars>=3?'#00A86B':bars===2?'#E8860C':'#DC3545';
+    const d=document.createElement('div');d.className='node-row';
+    d.innerHTML=`<div style="font-size:14px;font-weight:bold;flex:1;font-family:Consolas">${n.id}</div>
+      <div class="signal-bars">${[1,2,3,4].map(b=>`<div class="bar" style="height:${3+b*3}px;width:5px;border-radius:2px;background:${b<=bars?bc:'#E0E0E0'}"></div>`).join('')}</div>
+      <div style="text-align:right;margin-left:10px"><div style="color:${n.c};font-size:14px;font-weight:600;font-family:Consolas">${n.rssi}dBm</div><div style="font-size:11px;color:var(--dim)">${n.hop}</div></div>`;
+    setTimeout(()=>d.classList.add('show'),400+i*350);nb.appendChild(d);
+  });
+
+  const af=document.getElementById('appFeatures');af.innerHTML='';
+  [
+    {icon:'\u{1F4AC}',text:'Encrypted Chat',sub:'AES-128-GCM end-to-end'},
+    {icon:'\u{1F4F6}',text:'Node Discovery',sub:'RSSI, signal bars, route paths'},
+    {icon:'\u26A1',text:'Relay Control',sub:'Toggle outputs across the mesh'},
+    {icon:'\u{1F4C8}',text:'Sensor Sparklines',sub:'Live charts with min/max values'},
+    {icon:'\u{1F6A8}',text:'SOS + Telegram',sub:'One-tap emergency alert with GPS'},
+  ].forEach((f,i)=>{
+    const d=document.createElement('div');d.className='app-feature';
+    d.innerHTML=`<div class="icon">${f.icon}</div><div><div class="text">${f.text}</div><div class="sub">${f.sub}</div></div>`;
+    setTimeout(()=>d.classList.add('show'),300+i*400);af.appendChild(d);
+  });
+};
+
+// ═══ SCENE 6: WEB MAP + HUB ═══
+sceneFns[5]=()=>{
+  const mv=document.getElementById('mapView');
+  mv.querySelectorAll('.map-marker,.map-label').forEach(e=>e.remove());
+  [
+    {x:25,y:28,name:'North Ridge GW',c:'#00A86B',delay:300},
+    {x:58,y:48,name:'Harbor West GW',c:'#00A86B',delay:600},
+    {x:32,y:72,name:'Farm South GW',c:'#00A86B',delay:900},
+    {x:72,y:68,name:'Depot East GW',c:'#E8860C',delay:1200},
+  ].forEach(g=>{
+    const m=document.createElement('div');m.className='map-marker';
+    m.style.cssText=`left:${g.x}%;top:${g.y}%;border-color:${g.c};background:${g.c};`;
+    setTimeout(()=>m.classList.add('show'),g.delay);mv.appendChild(m);
+    const l=document.createElement('div');l.className='map-label';
+    l.style.cssText=`left:${g.x+2.5}%;top:${g.y-5}%;color:${g.c};`;
+    l.textContent=g.name;setTimeout(()=>l.classList.add('show'),g.delay+200);mv.appendChild(l);
+  });
+
+  const hp=document.getElementById('hubPanel');hp.innerHTML='';
+  [
+    {val:'18,442',lbl:'Packets Relayed',c:'#0088CC'},
+    {val:'4',lbl:'Gateways Online',c:'#00A86B'},
+    {val:'12',lbl:'Active Nodes',c:'#E8860C'},
+    {val:'99.7%',lbl:'Uptime',c:'#00A86B'},
+    {val:'AES-GCM',lbl:'Encryption',c:'#0088CC'},
+  ].forEach((s,i)=>{
+    const d=document.createElement('div');d.className='hub-card';
+    d.innerHTML=`<div class="val" style="color:${s.c}">${s.val}</div><div class="lbl">${s.lbl}</div>`;
+    setTimeout(()=>d.classList.add('show'),400+i*250);hp.appendChild(d);
+  });
+
+  const sp=document.getElementById('sparklines');sp.innerHTML='';
+  const row=document.createElement('div');row.className='spark-row';
+  row.style.cssText='display:flex;gap:12px;width:100%;';
+  [
+    {name:'Temperature',val:'21.8\u00b0C',c:'#0088CC'},
+    {name:'Humidity',val:'47%',c:'#00A86B'},
+    {name:'Wind Speed',val:'8.3 m/s',c:'#E8860C'},
+    {name:'Battery',val:'91%',c:'#00A86B'},
+    {name:'Gate',val:'CLOSED',c:'#00A86B'},
+    {name:'Soil',val:'62%',c:'#0088CC'},
+  ].forEach(s=>{
+    const d=document.createElement('div');d.className='spark-card';
+    d.innerHTML=`<div class="sv" style="color:${s.c}">${s.val}</div><div class="sl">${s.name}</div><canvas width="120" height="30"></canvas>`;
+    row.appendChild(d);
+  });
+  setTimeout(()=>row.classList.add('show'),800);sp.appendChild(row);
+  setTimeout(()=>{
+    row.querySelectorAll('canvas').forEach(cv=>{
+      const ctx=cv.getContext('2d');
+      ctx.strokeStyle='#0088CC';ctx.lineWidth=1.5;ctx.beginPath();
+      let y=15;for(let x=0;x<120;x+=3){
+        y=15+Math.sin(x*0.12+Math.random()*.8)*10;
+        x===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+      }ctx.stroke();
+    });
+  },1200);
+};
+
+// ═══ RECORDING + AUTO-PLAY ═══
+const TOTAL_DURATION = 56000; // total video length in ms
+
+function startShow() {
+  // Reset all scenes
+  SCENES.forEach(id => document.getElementById(id).classList.remove('active'));
+  cur = -1;
+  // Reset mountain scene animations
+  document.querySelectorAll('.mtn-dot-go,.mtn-label-go,.mtn-path-go,.mtn-pulse,.mtn-ring-go').forEach(el => {
+    el.classList.remove('mtn-dot-go','mtn-label-go','mtn-path-go','mtn-pulse','mtn-ring-go');
+  });
+  const wg = document.getElementById('mtnWaves');
+  if (wg) wg.innerHTML = '';
+  // Reset progress bar
+  const pb = document.getElementById('progressBar');
+  pb.style.animation = 'none';
+  pb.offsetHeight; // force reflow
+  pb.style.animation = `prog ${TOTAL_DURATION/1000}s linear forwards`;
+  // Schedule scenes
+  TIMINGS.forEach((t, i) => setTimeout(() => showScene(i), t));
+  showScene(0);
+}
+
+document.getElementById('recBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('recBtn');
+  btn.textContent = 'Recording...';
+  btn.style.background = '#00A86B';
+  btn.style.pointerEvents = 'none';
+
+  try {
+    // Capture the entire page as a video stream
+    const stream = await navigator.mediaDevices.getDisplayMedia({
+      video: { width: 1920, height: 1080, frameRate: 30 },
+      audio: false
+    });
+
+    const recorder = new MediaRecorder(stream, {
+      mimeType: 'video/webm;codecs=vp9',
+      videoBitsPerSecond: 8000000 // 8 Mbps for good quality
+    });
+
+    const chunks = [];
+    recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+
+    recorder.onstop = () => {
+      // Stop all tracks
+      stream.getTracks().forEach(t => t.stop());
+      // Build and download the video file
+      const blob = new Blob(chunks, { type: 'video/webm' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'TiggyOpenMesh_Promo.webm';
+      a.click();
+      URL.revokeObjectURL(url);
+      btn.style.display = 'block';
+      btn.textContent = 'Done! File downloaded.';
+      btn.style.background = '#0088CC';
+      setTimeout(() => {
+        btn.textContent = 'Click to Record Again';
+        btn.style.background = '#DC3545';
+        btn.style.pointerEvents = 'auto';
+      }, 3000);
+    };
+
+    // Hide button, wait for screen-share picker to close, then start
+    btn.style.display = 'none';
+
+    // 2 second black screen before the show starts — gives the picker time to close
+    // and provides a clean opening frame for trimming
+    document.body.style.background = '#000';
+    SCENES.forEach(id => document.getElementById(id).classList.remove('active'));
+    document.getElementById('progressBar').style.animation = 'none';
+
+    recorder.start();
+    setTimeout(() => startShow(), 2000);
+
+    // Auto-stop after the show finishes + a little buffer
+    setTimeout(() => {
+      if (recorder.state === 'recording') recorder.stop();
+    }, TOTAL_DURATION + 2000);
+
+  } catch (err) {
+    // User cancelled the screen share picker
+    btn.textContent = 'Click to Record Video';
+    btn.style.background = '#DC3545';
+    btn.style.pointerEvents = 'auto';
+    console.log('Recording cancelled:', err);
+  }
+});
+
+// Show first scene on load (no auto-play until record is clicked)
+window.onload = () => showScene(0);
+</script>
+</body>
+</html>
