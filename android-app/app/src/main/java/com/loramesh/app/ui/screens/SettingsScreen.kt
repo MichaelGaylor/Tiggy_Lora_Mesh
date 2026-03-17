@@ -345,8 +345,8 @@ fun SettingsScreen(viewModel: MeshViewModel) {
             }
         }
 
-        // ── Power Mode ───────────────────────────────────────
-        if (config.boardName.isNotEmpty() && config.boardName != "T-Deck") {
+        // ── Power Mode (always show — don't hide based on boardName) ──
+        if (config.boardName != "T-Deck") {
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)

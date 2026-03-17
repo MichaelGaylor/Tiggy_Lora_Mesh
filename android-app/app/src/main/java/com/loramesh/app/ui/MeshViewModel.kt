@@ -311,6 +311,14 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
                 parsePinList(line.substring(5))
             }
 
+            // Power mode response: OK,POWER,SOLAR or OK,POWER,NORMAL
+            line == "OK,POWER,SOLAR" -> {
+                val cfg = _config.value.copy(); cfg.powerMode = "SOLAR"; _config.value = cfg
+            }
+            line == "OK,POWER,NORMAL" -> {
+                val cfg = _config.value.copy(); cfg.powerMode = "NORMAL"; _config.value = cfg
+            }
+
             // Status response: STATUS,ID:<id>,BOARD:<name>,FREQ:<freq>,...
             line.startsWith("STATUS,") -> {
                 parseStatus(line.substring(7))
