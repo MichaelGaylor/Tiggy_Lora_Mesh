@@ -25,5 +25,9 @@ gateway/*.spec
 .DS_Store
 Thumbs.db
 
+# User data / temp files
+gateway/rules.json
+check_syntax.py
+
 # Claude
 .claude/

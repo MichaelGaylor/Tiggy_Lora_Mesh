@@ -1692,7 +1692,7 @@ SDATA,0010,34:2048,36:1200,39:4095</pre>
   <tr><th>Board</th><th>Default Sensor Pins</th><th>Notes</th></tr>
   <tr><td>LoRa32 T3</td><td>34, 36, 39</td><td>Input-only, ADC1. Best for analog sensors.</td></tr>
   <tr><td>Heltec V3</td><td>19, 20, 33</td><td>All ADC-capable on ESP32-S3.</td></tr>
-  <tr><td>Heltec V4</td><td>19, 20, 33</td><td>Same as V3. Extra pins available on headers.</td></tr>
+  <tr><td>Heltec V4</td><td>33, 34, 38</td><td>GPIO 19/20 are USB D-/D+ &mdash; <strong>do not use as GPIO</strong>. Use pins 33+ instead.</td></tr>
   <tr><td>XIAO ESP32S3</td><td>43, 44</td><td>Digital-only (UART pins). Use <code>SENSOR 2,4,5</code> for analog.</td></tr>
   <tr><td>Heltec V2</td><td>36, 39</td><td>Input-only, ADC1. Used as WiFi gateway &mdash; sensors optional.</td></tr>
   <tr><td>T-Deck Plus</td><td>None</td><td>No free GPIO &mdash; all pins used by display/keyboard/GPS.</td></tr>
@@ -3308,6 +3308,10 @@ const int RELAY_PINS[]  = {2, 4, 5, 12, 13, 14};      <span class="comment">// D
     <td>Use T-Deck as communicator only. Pair with a repeater node for sensor/relay control.</td></tr>
   <tr><td>LoRa32 T3 (repeater)</td><td>ESP32 (not S3) has different light-sleep behaviour. Solar mode uses <code>esp_light_sleep_start()</code> which works on both, but power savings vary by chip.</td>
     <td>For lowest-power solar deployments, prefer Heltec V3/V4/XIAO on ESP32-S3.</td></tr>
+  <tr><td>Heltec V4</td><td><strong>GPIO 19 and 20 are USB D-/D+.</strong> Unlike V3 (which has a CP2102 UART chip), the V4 uses the ESP32-S3's native USB. Configuring GPIO 19 or 20 as sensor/relay pins kills the USB serial connection.</td>
+    <td>Default sensor pins are set to 33, 34, 38. These pins are also blocked in <code>isPinSafe()</code>. Do not reconfigure sensors to use pins 19 or 20.</td></tr>
+  <tr><td>Heltec V4</td><td>USB serial (HWCDC) takes ~60 seconds to start outputting data after boot. The first minute of serial output may be lost.</td>
+    <td>Normal behaviour for ESP32-S3 native USB. The gateway GUI will receive data once the HWCDC connection establishes. Solar mode light sleep is disabled on V4 to keep USB alive.</td></tr>
 </table>
 
 <h3>Protocol Notes</h3>
