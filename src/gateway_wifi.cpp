@@ -39,6 +39,13 @@
 #include <BLE2902.h>
 #include "Pins.h"
 
+// ─── Native USB Serial Redirect (Heltec V4) ─────────────────
+#if defined(NATIVE_USB_ONLY)
+#include "HWCDC.h"
+extern HWCDC USBSerial;
+#define Serial USBSerial
+#endif
+
 // ─── Conditional OLED ────────────────────────────────────────
 #if HAS_OLED
 #include <Adafruit_GFX.h>

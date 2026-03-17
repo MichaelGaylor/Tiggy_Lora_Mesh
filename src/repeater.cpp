@@ -30,6 +30,16 @@
 #include "driver/uart.h"
 #endif
 
+// ─── Native USB Serial Redirect ─────────────────────────────
+// Heltec V4 has no CP2102 — UART0 (Serial) goes nowhere.
+// USBSerial (HWCDC) is the USB JTAG/serial debug interface.
+// Redirect all Serial calls to USBSerial so USB serial works.
+#if defined(NATIVE_USB_ONLY)
+#include "HWCDC.h"
+extern HWCDC USBSerial;
+#define Serial USBSerial
+#endif
+
 // Only compile for repeater boards
 #if defined(BOARD_LORA32) || defined(BOARD_HELTEC_V3) || defined(BOARD_HELTEC_V4) || defined(BOARD_XIAO_S3) || defined(BOARD_CUSTOM)
 
