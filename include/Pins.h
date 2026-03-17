@@ -283,9 +283,10 @@
 #define RADIO_DIO1          14
 #define RADIO_BUSY          13
 
-// No GPS (but has GNSS SH1.25 connector for external module)
-#define BOARD_GPS_TX        -1
-#define BOARD_GPS_RX        -1
+// GPS via GNSS SH1.25 connector (ribbon cable to external module)
+// Pins from factory test: Serial1.begin(9600, SERIAL_8N1, 39, 38)
+#define BOARD_GPS_TX        38
+#define BOARD_GPS_RX        39
 
 // I2C (for OLED display)
 #define BOARD_I2C_SDA       17

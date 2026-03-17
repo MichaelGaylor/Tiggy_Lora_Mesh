@@ -2077,7 +2077,8 @@ void loop() {
         checkSetpoints();
         executeAutoPoll();
 
-        // Serial commands — only way to exit solar mode (BLE is off)
+        // BLE + Serial commands — app can toggle solar mode off via BLE
+        processBleQueue();
         handleSerialConfig();
 
         // Enter light sleep — CPU halts until DIO1 (packet), button, or timer
