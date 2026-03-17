@@ -1860,7 +1860,18 @@ void updateOLED() {
 
 void setup() {
     Serial.begin(115200);
+#if defined(NATIVE_USB_ONLY)
+    // V4 native USB: wait for CDC connection before printing.
+    // Without this, early Serial.print goes nowhere because
+    // TinyUSB hasn't finished enumerating with the host yet.
+    unsigned long usbWait = millis();
+    while (!Serial && (millis() - usbWait < 5000)) {
+        delay(10);  // Wait up to 5s for USB host to connect
+    }
+    delay(500);  // Extra settle time after connection
+#else
     delay(1000);
+#endif
     Serial.println("\n═══════════════════════════════════");
     Serial.println("  TiggyOpenMesh Repeater v4.0");
     Serial.println("  Board: " + String(BOARD_NAME));
