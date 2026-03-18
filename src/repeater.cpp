@@ -1909,11 +1909,19 @@ void loadConfig() {
         if (autoPollEnabled) nextAutoPollTime = millis() + 10000;  // Start 10s after boot
     }
 
-    // Load GPS pins
+    // Load GPS pins — only override board default if user explicitly configured via GPS command
+    // EEPROM may contain stale data from previous firmware versions at this address
     uint8_t gTx = EEPROM.read(EEPROM_GPS_ADDR);
     uint8_t gRx = EEPROM.read(EEPROM_GPS_ADDR + 1);
-    gpsTxPin = (gTx != 0xFF) ? (int8_t)gTx : BOARD_GPS_TX;
-    gpsRxPin = (gRx != 0xFF) ? (int8_t)gRx : BOARD_GPS_RX;
+    if (gTx != 0xFF && gRx != 0xFF && gTx > 1 && gRx > 1 && gTx < 48 && gRx < 48) {
+        // Valid saved GPS pins — use them
+        gpsTxPin = (int8_t)gTx;
+        gpsRxPin = (int8_t)gRx;
+    } else {
+        // No valid saved config — use board defaults (may be -1 = disabled)
+        gpsTxPin = BOARD_GPS_TX;
+        gpsRxPin = BOARD_GPS_RX;
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
