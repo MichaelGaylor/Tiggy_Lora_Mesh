@@ -1181,6 +1181,18 @@ void handleCmd(const String& from, const String& cmdBody) {
         for (int i = 0; i < sensorCount; i++) { if (i) rsp += ","; rsp += String(sensorPins[i]); }
         bleSend(rsp);
     }
+    else if (action == "REBOOT") {
+        // Remote reboot via mesh — no EEPROM wipe, just restart
+        mesh.cmdsExecuted++;
+        String mid = mesh.generateMsgID();
+        String rsp = "CMD,RSP,REBOOTING";
+        String hex = mesh.encryptMsg(rsp);
+        String payload = String(mesh.localID) + "," + from + "," + mid + "," +
+                         String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+        mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+        delay(200);
+        ESP.restart();
+    }
     else if (action == "POLL") {
         // Read all sensor pins and return bundled SDATA response
         String sdata = "SDATA," + String(mesh.localID);
@@ -1451,6 +1463,19 @@ void processBleCommand(const String& line) {
         bleSend("OK,POWER,NORMAL");
     }
 #endif
+    else if (line == "REBOOT") {
+        bleSend("OK,REBOOT");
+        delay(200);
+        ESP.restart();
+    }
+    else if (line == "EEPROM,RESET") {
+        // Wipe all EEPROM settings back to defaults
+        for (int i = 0; i < EEPROM_SIZE; i++) EEPROM.write(i, 0xFF);
+        EEPROM.commit();
+        bleSend("OK,EEPROM,RESET");
+        delay(200);
+        ESP.restart();
+    }
     else if (line == "GPSPOS") {
         // Return current GPS position (if available)
         if (gpsEnabled && gps.location.isValid()) {

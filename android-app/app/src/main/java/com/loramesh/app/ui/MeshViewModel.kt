@@ -709,6 +709,10 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
         ble.send(if (solar) "POWER,SOLAR" else "POWER,NORMAL")
     }
 
+    fun sendCommand(cmd: String) {
+        ble.send(cmd)
+    }
+
     private fun addOrUpdateNode(id: String, rssi: Int, hops: Int) {
         val current = _nodes.value.toMutableList()
         val idx = current.indexOfFirst { it.id == id }

@@ -12,6 +12,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.loramesh.app.data.SfChangePhase
 import com.loramesh.app.data.TelegramConfig
@@ -417,6 +418,41 @@ fun SettingsScreen(viewModel: MeshViewModel) {
                         )
                     }
                 }
+            }
+        }
+
+        // ── Device Management ────────────────────────────────
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text("Device Management", style = MaterialTheme.typography.titleMedium, color = MeshCyan)
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Button(
+                        onClick = { viewModel.sendCommand("REBOOT") },
+                        colors = ButtonDefaults.buttonColors(containerColor = MeshOrange),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Reboot")
+                    }
+                    Button(
+                        onClick = { viewModel.sendCommand("EEPROM,RESET") },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.Red),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Factory Reset")
+                    }
+                }
+                Text(
+                    "Reboot restarts the node. Factory Reset wipes all settings and restarts.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MeshGrey
+                )
             }
         }
 
