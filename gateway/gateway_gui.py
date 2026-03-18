@@ -728,19 +728,19 @@ class GatewayGUIApp:
             rssi_color = COLORS["good"] if node.rssi > -80 else (COLORS["warn"] if node.rssi > -100 else COLORS["bad"])
             if not online:
                 rssi_color = COLORS["faint"]
-            # Signal bars: ▁▃▅▇
-            bars = 0 if not online else (4 if node.rssi > -60 else (3 if node.rssi > -75 else (2 if node.rssi > -90 else (1 if node.rssi > -105 else 0))))
-            bar_str = "".join("█" if i < bars else "░" for i in range(4))
-            ctk.CTkLabel(row2, text=f"{bar_str} {node.rssi}dBm", font=("Consolas", 10),
-                          text_color=rssi_color).pack(side="left")
-            ctk.CTkLabel(row2, text=f"Pkts:{node.packets}", font=("Consolas", 9),
-                          text_color=COLORS["dim"]).pack(side="left", padx=8)
+            # RSSI value
+            ctk.CTkLabel(row2, text=f"{node.rssi} dBm", font=("Consolas", 11),
+                          text_color=rssi_color, width=75, anchor="w").pack(side="left")
+            # Packets
+            ctk.CTkLabel(row2, text=f"Pkts:{node.packets}", font=("Consolas", 11),
+                          text_color=COLORS["dim"], width=80, anchor="w").pack(side="left", padx=(6, 0))
+            # Route info
             if node.hops and node.hops > 1 and node.next_hop:
-                ctk.CTkLabel(row2, text=f"{node.hops}hop via {node.next_hop}", font=("Consolas", 9),
-                              text_color=COLORS["dim"]).pack(side="left", padx=4)
+                ctk.CTkLabel(row2, text=f"{node.hops}hop via {node.next_hop}", font=("Consolas", 11),
+                              text_color=COLORS["dim"]).pack(side="left", padx=(6, 0))
             elif node.hops:
-                ctk.CTkLabel(row2, text=f"Direct", font=("Consolas", 9),
-                              text_color=COLORS["dim"]).pack(side="left", padx=4)
+                ctk.CTkLabel(row2, text="Direct", font=("Consolas", 11),
+                              text_color=COLORS["dim"]).pack(side="left", padx=(6, 0))
 
     # ─── Topology Canvas Animation ──────────────────────────
 
