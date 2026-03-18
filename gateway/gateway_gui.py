@@ -728,9 +728,19 @@ class GatewayGUIApp:
             rssi_color = COLORS["good"] if node.rssi > -80 else (COLORS["warn"] if node.rssi > -100 else COLORS["bad"])
             if not online:
                 rssi_color = COLORS["faint"]
+            # Signal bars — drawn as small coloured frames (no unicode overlap)
+            bars = 0 if not online else (4 if node.rssi > -60 else (3 if node.rssi > -75 else (2 if node.rssi > -90 else (1 if node.rssi > -105 else 0))))
+            bar_frame = ctk.CTkFrame(row2, fg_color="transparent", width=36, height=16)
+            bar_frame.pack(side="left")
+            bar_frame.pack_propagate(False)
+            for b in range(4):
+                h = 4 + b * 3  # heights: 4, 7, 10, 13
+                c = rssi_color if b < bars else COLORS["faint"]
+                bar = ctk.CTkFrame(bar_frame, width=6, height=h, fg_color=c, corner_radius=1)
+                bar.place(x=b * 9, y=16 - h)
             # RSSI value
             ctk.CTkLabel(row2, text=f"{node.rssi} dBm", font=("Consolas", 11),
-                          text_color=rssi_color, width=75, anchor="w").pack(side="left")
+                          text_color=rssi_color, width=80, anchor="w").pack(side="left", padx=(6, 0))
             # Packets
             ctk.CTkLabel(row2, text=f"Pkts:{node.packets}", font=("Consolas", 11),
                           text_color=COLORS["dim"], width=80, anchor="w").pack(side="left", padx=(6, 0))
