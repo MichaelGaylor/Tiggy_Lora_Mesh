@@ -12,6 +12,7 @@ import asyncio
 import collections
 import json
 import math
+import os
 import queue
 import secrets
 import threading
@@ -250,6 +251,8 @@ class TopoNode:
 # ─── Client GUI App ─────────────────────────────────────────
 
 class GatewayGUIApp:
+    CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gateway_gui_config.json")
+
     def __init__(self):
         self.root = ctk.CTk()
         self.root.title("TiggyOpenMesh Gateway Client")
@@ -261,6 +264,7 @@ class GatewayGUIApp:
         self.gateway: GUIGatewayServer | None = None
         self.async_thread: threading.Thread | None = None
         self.connected = False
+        self._saved_config = self._load_config()
 
         # Mesh state
         self.topo_nodes: dict[str, TopoNode] = {}
@@ -339,6 +343,17 @@ class GatewayGUIApp:
                                               text_color="#FFF", hover_color="#CC0000",
                                               command=self.disconnect, state="disabled")
         self.disconnect_btn.pack(side="left", padx=5)
+
+        # Restore saved connection settings
+        cfg = self._saved_config
+        if cfg.get("hub_url"):
+            self.hub_entry.insert(0, cfg["hub_url"])
+        if cfg.get("gw_name"):
+            self.name_entry.insert(0, cfg["gw_name"])
+        if cfg.get("hub_key"):
+            self.key_entry.insert(0, cfg["hub_key"])
+        if cfg.get("serial_port"):
+            self.port_combo.set(cfg["serial_port"])
 
         # Middle: Topology + Node Cards
         mid_frame = ctk.CTkFrame(self.root, fg_color="transparent")
@@ -544,6 +559,21 @@ class GatewayGUIApp:
 
     # ─── Connection ─────────────────────────────────────────
 
+    def _load_config(self) -> dict:
+        try:
+            with open(self.CONFIG_FILE) as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _save_config(self, port: str, hub: str, name: str, key: str):
+        try:
+            with open(self.CONFIG_FILE, "w") as f:
+                json.dump({"serial_port": port, "hub_url": hub,
+                           "gw_name": name, "hub_key": key}, f, indent=2)
+        except Exception:
+            pass
+
     def connect(self):
         port = self.get_selected_port()
         if not port:
@@ -551,6 +581,8 @@ class GatewayGUIApp:
         hub = self.hub_entry.get().strip() or None
         key = self.key_entry.get().strip() or None
         name = self.name_entry.get().strip() or "Gateway"
+        # Save settings for next launch
+        self._save_config(port, hub or "", name, key or "")
 
         self.gateway = GUIGatewayServer(port, 115200, hub, key, name, self.event_queue)
         self.connected = True
