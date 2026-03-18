@@ -745,13 +745,13 @@ class GatewayGUIApp:
             row1 = ctk.CTkFrame(card, fg_color="transparent")
             row1.pack(fill="x", padx=8, pady=(5, 0))
             dot_color = COLORS["good"] if online else COLORS["faint"]
-            ctk.CTkLabel(row1, text=f"● {node.id}", font=("Consolas", 11, "bold"),
+            ctk.CTkLabel(row1, text=f"● {node.id}", font=("Consolas", 13, "bold"),
                           text_color=dot_color).pack(side="left")
             if node.is_local:
-                ctk.CTkLabel(row1, text="(LOCAL)", font=("Consolas", 8),
+                ctk.CTkLabel(row1, text="(LOCAL)", font=("Consolas", 10),
                               text_color=COLORS["accent"]).pack(side="left", padx=5)
             status = "Online" if online else f"Last: {format_uptime(age)} ago"
-            ctk.CTkLabel(row1, text=status, font=("Consolas", 9),
+            ctk.CTkLabel(row1, text=status, font=("Consolas", 11),
                           text_color=COLORS["dim"]).pack(side="right")
 
             row2 = ctk.CTkFrame(card, fg_color="transparent")
@@ -762,27 +762,27 @@ class GatewayGUIApp:
                 rssi_color = COLORS["faint"]
             # Signal bars — drawn as small coloured frames (no unicode overlap)
             bars = 0 if not online else (4 if node.rssi > -60 else (3 if node.rssi > -75 else (2 if node.rssi > -90 else (1 if node.rssi > -105 else 0))))
-            bar_frame = ctk.CTkFrame(row2, fg_color="transparent", width=36, height=16)
-            bar_frame.pack(side="left")
+            bar_frame = ctk.CTkFrame(row2, fg_color="transparent", width=44, height=18)
+            bar_frame.pack(side="left", padx=(0, 8))
             bar_frame.pack_propagate(False)
             for b in range(4):
-                h = 4 + b * 3  # heights: 4, 7, 10, 13
+                h = 5 + b * 4  # heights: 5, 9, 13, 17
                 c = rssi_color if b < bars else COLORS["faint"]
-                bar = ctk.CTkFrame(bar_frame, width=6, height=h, fg_color=c, corner_radius=1)
-                bar.place(x=b * 9, y=16 - h)
+                bar = ctk.CTkFrame(bar_frame, width=7, height=h, fg_color=c, corner_radius=1)
+                bar.place(x=b * 10, y=18 - h)
             # RSSI value
-            ctk.CTkLabel(row2, text=f"{node.rssi} dBm", font=("Consolas", 11),
-                          text_color=rssi_color, width=80, anchor="w").pack(side="left", padx=(6, 0))
+            ctk.CTkLabel(row2, text=f"{node.rssi} dBm", font=("Consolas", 12),
+                          text_color=rssi_color, width=90, anchor="w").pack(side="left", padx=(0, 8))
             # Packets
-            ctk.CTkLabel(row2, text=f"Pkts:{node.packets}", font=("Consolas", 11),
-                          text_color=COLORS["dim"], width=80, anchor="w").pack(side="left", padx=(6, 0))
+            ctk.CTkLabel(row2, text=f"Pkts:{node.packets}", font=("Consolas", 12),
+                          text_color=COLORS["dim"], width=90, anchor="w").pack(side="left", padx=(0, 8))
             # Route info
             if node.hops and node.hops > 1 and node.next_hop:
-                ctk.CTkLabel(row2, text=f"{node.hops}hop via {node.next_hop}", font=("Consolas", 11),
-                              text_color=COLORS["dim"]).pack(side="left", padx=(6, 0))
+                ctk.CTkLabel(row2, text=f"{node.hops}hop via {node.next_hop}", font=("Consolas", 12),
+                              text_color=COLORS["dim"]).pack(side="left")
             elif node.hops:
-                ctk.CTkLabel(row2, text="Direct", font=("Consolas", 11),
-                              text_color=COLORS["dim"]).pack(side="left", padx=(6, 0))
+                ctk.CTkLabel(row2, text="Direct", font=("Consolas", 12),
+                              text_color=COLORS["dim"]).pack(side="left")
 
     # ─── Topology Canvas Animation ──────────────────────────
 

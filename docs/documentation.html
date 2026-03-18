@@ -509,6 +509,12 @@
   <a href="#gateway-map">Gateway Map</a>
   <a href="#telegram">Telegram Alerts</a>
   <a href="#theme">Theme</a>
+  <a href="#io-expansion">IO Expansion</a>
+  <a href="#caveats">Caveats</a>
+  <a href="#gps">GPS</a>
+  <a href="#device-management">Device Mgmt</a>
+  <a href="#signal-routing">Signal &amp; Routes</a>
+  <a href="#heltec-v4">Heltec V4 USB</a>
 </nav>
 
 <div class="container">
@@ -3333,13 +3339,141 @@ const int RELAY_PINS[]  = {2, 4, 5, 12, 13, 14};      <span class="comment">// D
 </ul>
 </section>
 
+<!-- ═══════════════════════════════════════════════════════════ -->
+<section id="gps">
+<h2>34. GPS Support</h2>
+
+<p>Nodes with a GPS receiver can broadcast their position over the mesh and share location data with the Android app. GPS is supported on any board with a spare UART — the GPS TX/RX pins are configurable per-board via BLE or serial command.</p>
+
+<h3>Supported Boards</h3>
+<table>
+  <tr><th>Board</th><th>Default GPS Pins (TX/RX)</th><th>Notes</th></tr>
+  <tr><td>Heltec V4</td><td>38 / 39</td><td>Ribbon connector for GPS module</td></tr>
+  <tr><td>All other boards</td><td>None (configurable)</td><td>Set via <code>GPS,&lt;tx&gt;,&lt;rx&gt;</code> BLE command</td></tr>
+</table>
+
+<h3>GPS BLE Commands</h3>
+<table>
+  <tr><th>Command</th><th>Response</th><th>Description</th></tr>
+  <tr><td><code>GPSPOS</code></td><td><code>GPS,&lt;lat&gt;,&lt;lng&gt;</code> or <code>GPS,NOFIX</code> or <code>GPS,OFF</code></td><td>Query current GPS position</td></tr>
+  <tr><td><code>GPS,&lt;tx&gt;,&lt;rx&gt;</code></td><td><code>OK,GPS,&lt;tx&gt;,&lt;rx&gt;</code></td><td>Set GPS UART pins (saved to EEPROM)</td></tr>
+  <tr><td><code>GPS,OFF</code></td><td><code>OK,GPS,OFF</code></td><td>Disable GPS</td></tr>
+</table>
+
+<h3>Position Broadcasting</h3>
+<ul style="color:var(--dim); padding-left:20px;">
+  <li>When GPS has a valid fix, the node periodically broadcasts a <code>POS,&lt;lat&gt;,&lt;lng&gt;</code> packet over the mesh.</li>
+  <li>Broadcast interval: every 60 seconds (only when position changes by &gt;10 metres).</li>
+  <li>Position data is encrypted with the mesh AES key like all other packets.</li>
+  <li>The gateway GUI and hub receive POS packets and can display node locations on the live map.</li>
+</ul>
+
+<h3>Android App — Map View</h3>
+<ul style="color:var(--dim); padding-left:20px;">
+  <li>The <strong>Map</strong> tab in the Android app shows all nodes with known GPS positions on an OpenStreetMap view.</li>
+  <li><strong>Share My Position</strong> button sends the phone's GPS coordinates to the mesh as a POS broadcast.</li>
+  <li>Tap a node marker to see its ID, last position, and distance from your phone.</li>
+  <li>Positions auto-refresh every 5 seconds — useful for site surveys and repeater placement walks.</li>
+</ul>
+
+<h3>EEPROM Storage</h3>
+<p style="color:var(--dim);">GPS pins are saved at EEPROM address 441 (2 bytes: TX pin, RX pin). Value <code>0xFF</code> means disabled. On boards without a default GPS, the pins remain disabled until explicitly configured via BLE. Pin values are validated against the <code>isPinSafe()</code> forbidden list to prevent conflicts with UART0, I2C, SPI, or USB pins.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<section id="device-management">
+<h2>35. Device Management (Reboot &amp; Factory Reset)</h2>
+
+<p>Nodes can be rebooted or factory-reset remotely via BLE or LoRa. This is useful when a node is deployed in a hard-to-reach location or when EEPROM corruption prevents serial access.</p>
+
+<h3>BLE Commands</h3>
+<table>
+  <tr><th>Command</th><th>Response</th><th>Description</th></tr>
+  <tr><td><code>REBOOT</code></td><td><code>OK,REBOOT</code></td><td>Restart the node. All settings preserved.</td></tr>
+  <tr><td><code>EEPROM,RESET</code></td><td><code>OK,EEPROM,RESET</code></td><td>Wipe all EEPROM settings to factory defaults and restart. Node ID, GPIO config, GPS pins, solar mode, setpoints — all reset.</td></tr>
+</table>
+
+<h3>LoRa Mesh Commands</h3>
+<table>
+  <tr><th>Command</th><th>Description</th></tr>
+  <tr><td><code>CMD,REBOOT</code></td><td>Remote reboot via encrypted mesh command. The node sends a <code>CMD,RSP,REBOOTING</code> acknowledgement before restarting. Requires the mesh AES key — cannot be spoofed by anyone outside your mesh.</td></tr>
+</table>
+
+<h3>Android App</h3>
+<p style="color:var(--dim);">The Settings screen has a <strong>Device Management</strong> card with two buttons:</p>
+<ul style="color:var(--dim); padding-left:20px;">
+  <li><strong>Reboot</strong> (orange) — sends <code>REBOOT</code> over BLE. The node restarts with all settings intact.</li>
+  <li><strong>Factory Reset</strong> (red) — sends <code>EEPROM,RESET</code> over BLE. Wipes all stored settings and restarts with defaults. Use this if a node is stuck due to EEPROM corruption (e.g. bad GPIO pin config killing USB/UART).</li>
+</ul>
+
+<h3>Security</h3>
+<ul style="color:var(--dim); padding-left:20px;">
+  <li><strong>BLE:</strong> Requires being within BLE range (~30m) and paired. Worst case: an attacker can only reboot your node or reset it to defaults — no data leakage, no firmware modification.</li>
+  <li><strong>LoRa:</strong> All mesh commands are AES-encrypted. Only devices with your mesh key can send a reboot command.</li>
+</ul>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<section id="signal-routing">
+<h2>36. Signal Strength &amp; Route Visibility</h2>
+
+<p>All platforms show signal strength and routing information for discovered nodes, making it easy to optimise repeater placement and diagnose connectivity issues.</p>
+
+<h3>Gateway GUI</h3>
+<ul style="color:var(--dim); padding-left:20px;">
+  <li><strong>Signal bars:</strong> Each node card shows 4 coloured bars based on RSSI — green (&gt;-60 dBm), orange (-60 to -90 dBm), red (&lt;-90 dBm), grey (offline).</li>
+  <li><strong>RSSI value:</strong> The exact dBm reading is displayed next to the bars.</li>
+  <li><strong>Route info:</strong> Shows "Direct" for single-hop nodes or "2hop via 0003" for multi-hop routes, so you can see the actual mesh path.</li>
+  <li><strong>Topology canvas:</strong> Edges between nodes are coloured and sized by RSSI. Weak links are highlighted in red with thin lines.</li>
+  <li><strong>Connection settings:</strong> Serial port, hub URL, gateway name, and hub key are saved between sessions — no need to re-enter each time.</li>
+</ul>
+
+<h3>Android App</h3>
+<ul style="color:var(--dim); padding-left:20px;">
+  <li><strong>Nodes screen:</strong> Each node card shows hop count and route path ("2 hops via 0003" or "Direct").</li>
+  <li><strong>Auto-refresh:</strong> Node list updates every 5 seconds — useful when walking a site to find optimal repeater positions.</li>
+</ul>
+
+<h3>T-Deck Plus</h3>
+<ul style="color:var(--dim); padding-left:20px;">
+  <li><strong>Known Nodes screen:</strong> Shows "via &lt;nextHop&gt;" for multi-hop nodes so you can see the routing chain.</li>
+</ul>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<section id="heltec-v4">
+<h2>37. Heltec WiFi LoRa 32 V4 — USB Notes</h2>
+
+<p>The Heltec V4 uses the ESP32-S3's <strong>native USB</strong> (HWCDC) instead of an external UART chip like the V3's CP2102. This has important implications:</p>
+
+<h3>Key Differences from V3</h3>
+<table>
+  <tr><th>Feature</th><th>V3</th><th>V4</th></tr>
+  <tr><td>USB chip</td><td>CP2102 (external)</td><td>ESP32-S3 native USB (HWCDC)</td></tr>
+  <tr><td>COM port</td><td>Always available</td><td>Appears after firmware boots (~2-5s)</td></tr>
+  <tr><td>Serial during reset</td><td>Works (CP2102 stays powered)</td><td>Drops briefly during reboot</td></tr>
+  <tr><td>GPIO 19/20</td><td>Available as GPIO</td><td><strong>USB D-/D+ — DO NOT USE</strong></td></tr>
+  <tr><td>Build flag</td><td>Default</td><td><code>ARDUINO_USB_CDC_ON_BOOT=1</code></td></tr>
+</table>
+
+<h3>Forbidden Pins</h3>
+<p style="color:var(--dim);">GPIO 19 and 20 are the USB data lines on V4. They are hardcoded into the <code>isPinSafe()</code> forbidden list and cannot be configured as sensor or relay pins. Configuring them as GPIO will kill the USB connection immediately.</p>
+
+<h3>Troubleshooting</h3>
+<ul style="color:var(--dim); padding-left:20px;">
+  <li><strong>No COM port after flashing:</strong> Hold BOOT → press RESET → release BOOT to enter download mode. Erase flash with <code>esptool.py erase_flash</code>, then reflash.</li>
+  <li><strong>COM port appears but no data:</strong> The HWCDC interface can take up to 60 seconds to fully enumerate on first use. Wait, or disconnect and reconnect the serial monitor.</li>
+  <li><strong>Port shows in Device Manager but won't open:</strong> Kill any <code>python.exe</code> processes holding the port, or reboot the PC. Windows Fast Startup can persist stale USB state — use <code>shutdown /s /t 0</code> for a full shutdown.</li>
+</ul>
+</section>
+
 </div>
 
 <!-- Footer -->
 <div style="background:var(--panel); border-top:1px solid var(--faint); padding:30px 40px; text-align:center; color:var(--faint); font-size:0.85em;">
   <p>TiggyOpenMesh v4.0 &mdash; MeshCore Architecture</p>
   <p>T-Deck Plus &bull; LoRa32 T3 V1.6.1 &bull; Heltec WiFi LoRa 32 V3 &bull; Heltec WiFi LoRa 32 V4 &bull; XIAO ESP32S3</p>
-  <p>33 sections &mdash; Hardware, Protocol, UI, BLE, Gateway, Logic Builder, Timers, Setpoints, Sensors, Pulse Counters, SOS, Map, Solar, Delivery, SF Change, Collision Detection, IO Expansion, Caveats</p>
+  <p>37 sections &mdash; Hardware, Protocol, UI, BLE, Gateway, Logic Builder, Timers, Setpoints, Sensors, Pulse Counters, SOS, Map, Solar, Delivery, SF Change, Collision Detection, IO Expansion, GPS, Device Management, Signal Routing, Heltec V4 USB, Caveats</p>
   <p style="margin-top:8px;">Documentation generated March 2026</p>
 </div>
 
