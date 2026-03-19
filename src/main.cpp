@@ -2175,6 +2175,28 @@ void setup() {
   Wire.begin(BOARD_I2C_SDA, BOARD_I2C_SCL);
   pinMode(BOARD_KB_INT, INPUT_PULLUP);
 
+  // I2C scan — show on display for debugging
+  display.setTextSize(1);
+  display.setTextColor(0xFFFF);
+  display.setCursor(10, 10);
+  display.print("I2C Scan:");
+  int foundCount = 0;
+  for (uint8_t addr = 1; addr < 127; addr++) {
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() == 0) {
+      display.setCursor(10 + (foundCount % 6) * 50, 25 + (foundCount / 6) * 12);
+      display.print("0x");
+      if (addr < 16) display.print("0");
+      display.print(addr, HEX);
+      foundCount++;
+    }
+  }
+  if (foundCount == 0) { display.setCursor(10, 25); display.print("No devices found!"); }
+  display.setCursor(10, 60);
+  display.print("KB_INT pin " + String(BOARD_KB_INT) + ": " + String(digitalRead(BOARD_KB_INT) ? "HIGH" : "LOW"));
+  delay(5000);  // Show for 5 seconds
+  display.fillScreen(COL_BG);
+
   setupTrackball();
   setupEEPROM();
   loadKeyFromEEPROM();
