@@ -53,7 +53,7 @@
 #define RADIO_RST           17
 #define RADIO_DIO1          45
 #define RADIO_BUSY          13
-#define RADIO_TCXO_VOLTAGE  1.6f  // SX1262 TCXO on DIO3
+#define RADIO_TCXO_VOLTAGE  1.8f  // SX1262 TCXO on DIO3 (same as Heltec)
 
 // GPS (UART)
 #define BOARD_GPS_TX        43

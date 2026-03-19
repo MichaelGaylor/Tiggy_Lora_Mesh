@@ -1423,7 +1423,8 @@ void drawArrow(int cx, int cy, int x1, int y1) {
 
 void handleTracking() {
   char kb = readKeyboard();
-  if (kb == 0x1B || kb == 'q') { currentMode = MENU; drawCurrentMenu(); return; }
+  char tb = readTrackball();
+  if (kb == 0x1B || kb == 'q' || tb == 'C' || tb == 'L') { currentMode = MENU; drawCurrentMenu(); return; }
   if (millis() - trackUpdateTimer < 1000) return;
   trackUpdateTimer = millis();
 
@@ -1565,15 +1566,11 @@ void handleSOS() {
   }
 
   char kb = readKeyboard();
-  if (kb == 0x1B) {
-    if (exitTimer == 0) exitTimer = millis();
-    if (millis() - exitTimer > 3000) {
-      exitTimer = 0;
-      currentMode = MENU;
-      drawCurrentMenu();
-    }
-  } else if (kb != 0) {
-    exitTimer = 0;
+  char tbs = readTrackball();
+  if (kb == 0x1B || tbs == 'C') {
+    currentMode = MENU;
+    drawCurrentMenu();
+    return;
   }
 }
 
@@ -1583,7 +1580,8 @@ void handleSOS() {
 
 void handleMeshView() {
   char kb = readKeyboard();
-  if (kb == 0x1B || kb == 'q' || readTrackball() == 'L') {
+  char tbm = readTrackball();
+  if (kb == 0x1B || kb == 'q' || tbm == 'L' || tbm == 'C') {
     currentMode = MENU;
     drawCurrentMenu();
     return;
@@ -2000,7 +1998,7 @@ void showControlPanel() {
       }
     }
 
-    if (kb == 0x1B) inMenu = false;
+    if (kb == 0x1B || tb == 'L') inMenu = false;
 
     receiveCheck();
     yield();
@@ -2174,28 +2172,6 @@ void setup() {
   Wire.begin(BOARD_I2C_SDA, BOARD_I2C_SCL);
   pinMode(BOARD_KB_INT, INPUT_PULLUP);
 
-  // I2C scan — show on display for debugging
-  display.setTextSize(1);
-  display.setTextColor(0xFFFF);
-  display.setCursor(10, 10);
-  display.print("I2C Scan:");
-  int foundCount = 0;
-  for (uint8_t addr = 1; addr < 127; addr++) {
-    Wire.beginTransmission(addr);
-    if (Wire.endTransmission() == 0) {
-      display.setCursor(10 + (foundCount % 6) * 50, 25 + (foundCount / 6) * 12);
-      display.print("0x");
-      if (addr < 16) display.print("0");
-      display.print(addr, HEX);
-      foundCount++;
-    }
-  }
-  if (foundCount == 0) { display.setCursor(10, 25); display.print("No devices found!"); }
-  display.setCursor(10, 60);
-  display.print("KB_INT pin " + String(BOARD_KB_INT) + ": " + String(digitalRead(BOARD_KB_INT) ? "HIGH" : "LOW"));
-  delay(5000);  // Show for 5 seconds
-  display.fillScreen(COL_BG);
-
   setupTrackball();
   setupEEPROM();
   loadKeyFromEEPROM();
@@ -2319,7 +2295,7 @@ void loop() {
     case MESSAGING: {
       char kb = readKeyboard();
       char tb = readTrackball();
-      if (kb == 0x1B) { currentMode = MENU; drawCurrentMenu(); break; }
+      if (kb == 0x1B || tb == 'C' || tb == 'L') { currentMode = MENU; drawCurrentMenu(); break; }
       if (kb == 'r' && lastSender.length()) {
         strncpy(targetID, lastSender.c_str(), NODE_ID_LEN);
         targetID[NODE_ID_LEN] = '\0';
@@ -2333,9 +2309,12 @@ void loop() {
       break;
     }
 
-    case TEXT_INPUT:
-      handleTextInput(readKeyboard());
+    case TEXT_INPUT: {
+      char tbi = readTrackball();
+      if (tbi == 'C' || tbi == 'L') handleTextInput(0x1B);  // trackball click/left = ESC
+      else handleTextInput(readKeyboard());
       break;
+    }
 
     case TRACKING:
       handleTracking();
