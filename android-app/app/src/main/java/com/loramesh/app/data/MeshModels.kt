@@ -62,7 +62,8 @@ data class NodeConfig(
     var frequency: Float = 868.0f,
     var boardName: String = "",
     var spreadingFactor: Int = 9,
-    var powerMode: String = "NORMAL"
+    var powerMode: String = "NORMAL",
+    var setupMode: Boolean = false
 )
 
 // Sensor reading history (for sparkline charts)

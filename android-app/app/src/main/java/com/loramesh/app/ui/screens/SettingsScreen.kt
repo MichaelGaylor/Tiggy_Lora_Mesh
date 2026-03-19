@@ -33,6 +33,13 @@ fun SettingsScreen(viewModel: MeshViewModel) {
     var editId by remember { mutableStateOf(config.nodeId) }
     var editKey by remember { mutableStateOf(config.aesKey) }
     var showKeyDialog by remember { mutableStateOf(false) }
+    var showPinDialog by remember { mutableStateOf(false) }
+    var newPin by remember { mutableStateOf("") }
+
+    // Show PIN dialog automatically if node is in setup mode
+    LaunchedEffect(config.setupMode) {
+        if (config.setupMode) showPinDialog = true
+    }
 
     // Telegram state
     var tgEnabled by remember { mutableStateOf(telegramConfig.enabled) }
@@ -63,6 +70,56 @@ fun SettingsScreen(viewModel: MeshViewModel) {
             style = MaterialTheme.typography.headlineMedium,
             color = MeshCyan
         )
+
+        // ── Setup Mode Banner ─────────────────────────────────
+        if (config.setupMode) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = Color.Red.copy(alpha = 0.15f))
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        "Setup Required",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = Color.Red,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        "Set a new BLE PIN before configuring this node. Default PIN (123456) must be changed.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MeshGrey
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = newPin,
+                        onValueChange = { if (it.length <= 6 && it.all { c -> c.isDigit() }) newPin = it },
+                        label = { Text("New 6-digit PIN") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Button(
+                        onClick = {
+                            if (newPin.length == 6 && newPin != "123456") {
+                                viewModel.sendCommand("BLEPIN,$newPin")
+                                newPin = ""
+                            }
+                        },
+                        enabled = newPin.length == 6 && newPin != "123456",
+                        colors = ButtonDefaults.buttonColors(containerColor = MeshGreen)
+                    ) {
+                        Text("Set PIN")
+                    }
+                    if (newPin == "123456") {
+                        Text(
+                            "Cannot use the default PIN",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.Red
+                        )
+                    }
+                }
+            }
+        }
 
         // ── Node Info ─────────────────────────────────────────
         Card(

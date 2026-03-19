@@ -20,6 +20,7 @@
 #include <RadioLib.h>
 #include <BLEDevice.h>
 #include <BLEServer.h>
+#include <BLESecurity.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
 #include "Pins.h"
@@ -226,6 +227,10 @@ unsigned long nextAutoPollTime = 0;
 
 // ─── GPS (optional external module via UART) ────────────────
 #define EEPROM_GPS_ADDR 441     // 2 bytes: TX pin, RX pin (0xFF = disabled)
+#define EEPROM_BLEPIN_ADDR 443  // 4 bytes: BLE PIN (uint32_t), 0xFFFFFFFF = default
+#define BLE_DEFAULT_PIN 123456
+uint32_t blePin = BLE_DEFAULT_PIN;
+bool blePinIsDefault = true;    // true = setup mode, must change PIN before saving config
 #define GPS_BROADCAST_INTERVAL 60000UL  // broadcast position every 60s
 int8_t gpsTxPin = -1;
 int8_t gpsRxPin = -1;
@@ -1341,6 +1346,11 @@ void processBleQueue() {
 void setupBLE() {
     String bleName = "TOM-" + String(mesh.localID);
     BLEDevice::init(bleName.c_str());
+
+    // Enable BLE security with static PIN
+    BLESecurity* bleSecurity = new BLESecurity();
+    bleSecurity->setStaticPIN(blePin);
+
     bleServer = BLEDevice::createServer();
     bleServer->setCallbacks(new BleServerCB());
 
@@ -1358,7 +1368,7 @@ void setupBLE() {
     adv->setScanResponse(true);
     adv->setMinPreferred(0x06);
     BLEDevice::startAdvertising();
-    debugPrint("BLE ready: " + bleName);
+    debugPrint("BLE ready: " + bleName + " (PIN protected)");
 }
 
 void bleSend(const String& line) {
@@ -1376,6 +1386,15 @@ void bleSend(const String& line) {
 
 void processBleCommand(const String& line) {
     debugPrint("BLE CMD: " + line);
+
+    // Setup mode: only allow BLEPIN, STATUS, REBOOT, and EEPROM,RESET until PIN is changed
+    if (blePinIsDefault &&
+        !line.startsWith("BLEPIN,") && line != "STATUS" &&
+        line != "REBOOT" && line != "EEPROM,RESET") {
+        bleSend("ERR,SETUP_MODE,SET_PIN_FIRST");
+        bleSend("Send BLEPIN,<6-digit-pin> to set your PIN before using other commands.");
+        return;
+    }
 
     if (line.startsWith("MSG,")) {
         int c1 = line.indexOf(',');
@@ -1420,6 +1439,7 @@ void processBleCommand(const String& line) {
                 ",POWER:" + String(solarMode ? "SOLAR" : "NORMAL") +
                 ",AUTOPOLL:" + String(autoPollEnabled ? (String(autoPollTarget) + "/" + String(autoPollInterval) + "s").c_str() : "OFF") +
                 ",GPS:" + String(gpsEnabled ? (gps.location.isValid() ? "FIX" : "NOFIX") : "OFF") +
+                ",SETUP:" + String(blePinIsDefault ? "1" : "0") +
                 ",HEAP:" + String(ESP.getFreeHeap()));
     }
     else if (line == "SAVE") { saveConfig(); bleSend("OK,SAVED"); }
@@ -1463,6 +1483,25 @@ void processBleCommand(const String& line) {
         bleSend("OK,POWER,NORMAL");
     }
 #endif
+    else if (line.startsWith("BLEPIN,")) {
+        String newPin = line.substring(7); newPin.trim();
+        uint32_t pin = newPin.toInt();
+        if (pin >= 100000 && pin <= 999999 && pin != BLE_DEFAULT_PIN) {
+            blePin = pin;
+            blePinIsDefault = false;
+            EEPROM.put(EEPROM_BLEPIN_ADDR, blePin);
+            EEPROM.commit();
+            bleSend("OK,BLEPIN,SET");
+            bleSend("PIN changed. Reconnect with new PIN.");
+            // Restart BLE with new PIN
+            delay(500);
+            ESP.restart();
+        } else if (pin == BLE_DEFAULT_PIN) {
+            bleSend("ERR,BLEPIN,CANNOT_USE_DEFAULT");
+        } else {
+            bleSend("ERR,BLEPIN,MUST_BE_6_DIGITS");
+        }
+    }
     else if (line == "REBOOT") {
         bleSend("OK,REBOOT");
         delay(200);
@@ -1947,6 +1986,17 @@ void loadConfig() {
         gpsTxPin = BOARD_GPS_TX;
         gpsRxPin = BOARD_GPS_RX;
     }
+
+    // Load BLE PIN
+    uint32_t savedPin = 0;
+    EEPROM.get(EEPROM_BLEPIN_ADDR, savedPin);
+    if (savedPin != 0xFFFFFFFF && savedPin >= 100000 && savedPin <= 999999) {
+        blePin = savedPin;
+        blePinIsDefault = false;
+    } else {
+        blePin = BLE_DEFAULT_PIN;
+        blePinIsDefault = true;
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -2296,8 +2346,26 @@ void loop() {
     // 10. Button → manual heartbeat
 #if defined(BOARD_BUTTON) && BOARD_BUTTON >= 0
     static bool lastBtn = true;
+    static unsigned long btnPressStart = 0;
     bool btn = digitalRead(BOARD_BUTTON);
-    if (!btn && lastBtn) { mesh.sendHeartbeat(); Serial.println("Manual heartbeat sent"); }
+    if (!btn && lastBtn) {
+        // Button just pressed
+        btnPressStart = millis();
+        mesh.sendHeartbeat();
+        Serial.println("Manual heartbeat sent");
+    }
+    if (!btn && btnPressStart > 0 && (millis() - btnPressStart) > 10000) {
+        // Held for 10 seconds — reset BLE PIN to default
+        blePin = BLE_DEFAULT_PIN;
+        blePinIsDefault = true;
+        uint32_t resetVal = 0xFFFFFFFF;
+        EEPROM.put(EEPROM_BLEPIN_ADDR, resetVal);
+        EEPROM.commit();
+        Serial.println("BLE PIN reset to default (123456)");
+        btnPressStart = 0;  // Prevent re-triggering
+        ESP.restart();
+    }
+    if (btn) btnPressStart = 0;
     lastBtn = btn;
 #endif
 

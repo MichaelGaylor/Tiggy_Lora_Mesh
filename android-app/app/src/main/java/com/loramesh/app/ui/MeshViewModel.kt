@@ -700,6 +700,7 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
                 "SF" -> cfg.spreadingFactor = kv[1].toIntOrNull() ?: 9
                 "POWER" -> cfg.powerMode = kv[1]
                 "AUTOPOLL" -> parseAutoPollFromStatus(kv[1])
+                "SETUP" -> cfg.setupMode = (kv[1] == "1")
             }
         }
         _config.value = cfg
