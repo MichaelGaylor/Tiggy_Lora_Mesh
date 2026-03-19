@@ -48,9 +48,11 @@ jobs:
       - name: Upload gateway build log
         if: always()
         uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: gateway-build-log
           path: /tmp/gateway-build-log.txt
+          if-no-files-found: ignore
 
       - name: Merge firmware binaries for web flasher
         run: |
