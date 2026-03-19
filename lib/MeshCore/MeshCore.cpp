@@ -566,6 +566,12 @@ void MeshCore::processPacket(const MeshPacket& pkt) {
     // For us? Decrypt and dispatch
     if (pkt.dest == myAddr || pkt.dest == 0xFFFF) {
         String plain = decryptMsg(msg.encrypted);
+        if (plain.length() == 0 && pkt.dest == myAddr) {
+            Serial.println("WARN: decrypt failed from " + msg.from + " mid=" + msg.mid +
+                " keyLen=" + String(strlen(aes_key_string)) +
+                " key[0..3]=" + String(aes_key_string[0]) + String(aes_key_string[1]) + String(aes_key_string[2]) + String(aes_key_string[3]) +
+                " encLen=" + String(msg.encrypted.length()));
+        }
         if (plain.length() > 0) {
             if (plain.startsWith("CMD,") && onCmd) {
                 onCmd(msg.from, plain.substring(4));
