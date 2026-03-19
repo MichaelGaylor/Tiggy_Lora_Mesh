@@ -1228,8 +1228,9 @@ void handleCmd(const String& from, const String& cmdBody) {
 
 // Message handler — called by MeshCore when a message arrives for us
 void handleMessage(const String& from, const String& text, int rssi) {
-    debugPrint("MSG from " + from + ": " + text);
-    bleSend("RX," + from + "," + text + "," + String(rssi));
+    String msg = text.startsWith("MSG,") ? text.substring(4) : text;
+    debugPrint("MSG from " + from + ": " + msg);
+    bleSend("RX," + from + "," + msg + "," + String(rssi));
 }
 
 // ACK handler — called by MeshCore when an ACK arrives for us
@@ -1406,7 +1407,7 @@ void processBleCommand(const String& line) {
         String mid = mesh.generateMsgID();
         String payload = String(mesh.localID) + "," + target + "," + mid + "," +
                          String(TTL_DEFAULT) + "," + String(mesh.localID) + "," +
-                         mesh.encryptMsg(text);
+                         mesh.encryptMsg("MSG," + text);
         mesh.transmitPacket(dest, payload);
         bleSend("SENT," + target + "," + mid);
     }
