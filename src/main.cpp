@@ -898,7 +898,6 @@ void drawCurrentMenu() {
 // ═══════════════════════════════════════════════════════════════
 
 char readKeyboard() {
-  if (digitalRead(BOARD_KB_INT) == HIGH) return 0;
   Wire.requestFrom((uint8_t)KB_I2C_ADDR, (uint8_t)1);
   if (Wire.available()) {
     char c = Wire.read();
