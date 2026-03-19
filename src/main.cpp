@@ -255,7 +255,7 @@ bool radioChannelFree() {
 void setupRadio() {
   debugPrint("Initializing SX1262...");
   int state = radio.begin(LORA_FREQ, LORA_BW, LORA_SF, LORA_CR,
-                          LORA_SYNC, LORA_POWER, LORA_PREAMBLE, 0, false);
+                          LORA_SYNC, LORA_POWER, LORA_PREAMBLE, RADIO_TCXO_VOLTAGE, false);
   if (state != RADIOLIB_ERR_NONE) {
     drawHeaderBar("RADIO ERROR");
     display.setFont(&FreeSans12pt7b);
@@ -2168,7 +2168,7 @@ void setup() {
   pinMode(BOARD_TFT_BL, OUTPUT);
   analogWrite(BOARD_TFT_BL, brightness);
   display.init(240, 320);
-  display.setRotation(1);
+  display.setRotation(3);
   display.fillScreen(COL_BG);
 
   // I2C keyboard
