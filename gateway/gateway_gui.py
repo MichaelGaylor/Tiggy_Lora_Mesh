@@ -283,10 +283,10 @@ class GatewayGUIApp:
         # Logic builder state
         self.logic_visible = False
 
-        self.build_ui()
-
-        # Automation engine (after build_ui so _send_serial exists)
+        # Automation engine (before build_ui — canvas needs it)
         self.engine = AutomationEngine(self.sensor_data, self._send_serial, self.topo_nodes)
+
+        self.build_ui()
 
         self.refresh_ports()
         self.root.after(50, self.poll_events)
