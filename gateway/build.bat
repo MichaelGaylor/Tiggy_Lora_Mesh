@@ -30,6 +30,8 @@ echo.
 echo [3/3] Building TiggyOpenMesh-Gateway.exe...
 %PYTHON% -m PyInstaller --noconfirm --onefile --windowed ^
     --collect-data customtkinter ^
+    --collect-all matplotlib ^
+    --hidden-import sensor_dashboard ^
     --name "TiggyOpenMesh-Gateway" ^
     gateway_gui.py
 if errorlevel 1 (
