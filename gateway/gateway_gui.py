@@ -27,6 +27,7 @@ from gui_common import (COLORS, HexPacketParser, decrypt_message,
                          detect_serial_ports, format_uptime, rssi_to_color)
 from automation_engine import AutomationEngine, BLOCK_DEFS
 from automation_canvas import AutomationCanvas, CATEGORY_BLOCKS
+from sensor_dashboard import SensorDashboard
 
 # ─── Theme ───────────────────────────────────────────────────
 
@@ -408,12 +409,14 @@ class GatewayGUIApp:
         self.nodes_frame = ctk.CTkScrollableFrame(right_frame, fg_color=COLORS["bg"], corner_radius=0)
         self.nodes_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
-        # ─── Sensor Dashboard ────────────────────────────────
+        # ─── Sensor Dashboard (full gauges + line chart) ─────
+        self.sensor_dashboard = SensorDashboard(self.root, self.sensor_data,
+                                                  max_history=self.max_sensor_history)
+        self.sensor_dashboard.pack(fill="both", expand=True, padx=10, pady=5)
+
+        # Legacy sparkline canvas (hidden, kept for minimal fallback)
         sensor_frame = ctk.CTkFrame(self.root, fg_color=COLORS["panel"], corner_radius=8, height=130)
-        sensor_frame.pack(fill="x", padx=10, pady=5)
-        sensor_frame.pack_propagate(False)
-        ctk.CTkLabel(sensor_frame, text="  Sensor Monitor", font=("Consolas", 11, "bold"),
-                      text_color=COLORS["accent"], anchor="w").pack(fill="x", padx=10, pady=(5, 0))
+        # Not packed — dashboard replaces it
         self.sensor_canvas = ctk.CTkCanvas(sensor_frame, bg=COLORS["bg"], highlightthickness=0, height=100)
         self.sensor_canvas.pack(fill="both", expand=True, padx=10, pady=(0, 5))
 
@@ -1136,57 +1139,8 @@ class GatewayGUIApp:
                 self.sensor_data[key] = self.sensor_data[key][-self.max_sensor_history:]
 
     def redraw_sensors(self):
-        """Redraw sensor sparkline canvas."""
-        c = self.sensor_canvas
-        c.delete("all")
-        w = c.winfo_width() or 400
-        h = c.winfo_height() or 100
-
-        if not self.sensor_data:
-            aes_key = self.aes_entry.get().strip()
-            hint = "Enter 16-char AES key to decode sensor data" if len(aes_key) != 16 else "Waiting for SDATA packets..."
-            c.create_text(w // 2, h // 2, text=hint,
-                           fill=COLORS["dim"], font=("Consolas", 10))
-            self.root.after(2000, self.redraw_sensors)
-            return
-
-        keys = sorted(self.sensor_data.keys())
-        n = len(keys)
-        chart_w = max(60, (w - 20) // min(n, 6))
-        chart_h = 60
-        palette = ["#00E5FF", "#00E676", "#FF9100", "#448AFF", "#FF5252", "#FFE000"]
-
-        for idx, key in enumerate(keys[:12]):
-            col = idx % 6
-            row = idx // 6
-            x0 = 10 + col * chart_w
-            y0 = 5 + row * (chart_h + 20)
-
-            readings = self.sensor_data[key]
-            values = [v for _, v in readings]
-
-            # Label + current value
-            c.create_text(x0 + chart_w // 2, y0, text=key, fill=COLORS["text"],
-                           font=("Consolas", 8), anchor="n")
-            c.create_text(x0 + chart_w - 5, y0, text=str(values[-1]),
-                           fill=palette[idx % len(palette)], font=("Consolas", 9, "bold"), anchor="ne")
-
-            # Sparkline
-            if len(values) >= 2:
-                max_v = max(values)
-                min_v = min(values)
-                vrange = max(max_v - min_v, 1)
-                step = (chart_w - 10) / (len(values) - 1)
-                sy = y0 + 12
-                points = []
-                for i, v in enumerate(values):
-                    px = x0 + 5 + i * step
-                    py = sy + chart_h - 12 - ((v - min_v) / vrange * (chart_h - 16))
-                    points.extend([px, py])
-                if len(points) >= 4:
-                    c.create_line(points, fill=palette[idx % len(palette)], width=2, smooth=True)
-
-        self.root.after(2000, self.redraw_sensors)
+        """Legacy sparkline — replaced by SensorDashboard. No-op."""
+        pass
 
     # ─── Lifecycle ──────────────────────────────────────────
 
