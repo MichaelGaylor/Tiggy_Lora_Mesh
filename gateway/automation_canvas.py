@@ -52,7 +52,8 @@ STATUS_COLORS = {
 
 # ─── Config Dialogs ───────────────────────────────────────────
 
-def show_block_config(parent, block: Block, discovered_nodes: dict):
+def show_block_config(parent, block: Block, discovered_nodes: dict,
+                      relay_pins: list[str] = None, sensor_pins: list[str] = None):
     """Show a configuration dialog for a block. Returns True if changed."""
     bt = block.block_type
     cfg = block.config
@@ -107,7 +108,11 @@ def show_block_config(parent, block: Block, discovered_nodes: dict):
     # Build fields based on block type
     if bt == BlockType.SENSOR_READ:
         add_node_combo("Node ID:", "node_id")
-        add_field("Pin:", "pin", "0")
+        pins = sensor_pins if sensor_pins else []
+        if pins:
+            add_combo("Pin:", "pin", pins, str(cfg.get("pin", pins[0] if pins else "0")))
+        else:
+            add_field("Pin:", "pin", "0")
         add_field("Label:", "label", "")
 
     elif bt == BlockType.CONSTANT:
@@ -136,12 +141,20 @@ def show_block_config(parent, block: Block, discovered_nodes: dict):
 
     elif bt == BlockType.SET_RELAY:
         add_node_combo("Node ID:", "node_id")
-        add_field("Pin:", "pin", "0")
+        pins = relay_pins if relay_pins else []
+        if pins:
+            add_combo("Pin:", "pin", pins, str(cfg.get("pin", pins[0] if pins else "0")))
+        else:
+            add_field("Pin:", "pin", "0")
         add_combo("Action:", "action", ["1", "0"], "1")
 
     elif bt == BlockType.PULSE_RELAY:
         add_node_combo("Node ID:", "node_id")
-        add_field("Pin:", "pin", "0")
+        pins = relay_pins if relay_pins else []
+        if pins:
+            add_combo("Pin:", "pin", pins, str(cfg.get("pin", pins[0] if pins else "0")))
+        else:
+            add_field("Pin:", "pin", "0")
         add_field("Duration (ms):", "duration_ms", "500")
 
     elif bt == BlockType.SEND_BROADCAST:
@@ -208,6 +221,9 @@ class AutomationCanvas:
         self.on_change = on_change
         self.parent = parent_frame
         self.current_rule: Optional[Rule] = None
+        # Pin lists from connected node (set by gateway GUI)
+        self.relay_pins: list[str] = []
+        self.sensor_pins: list[str] = []
 
         # Canvas
         self.canvas = tk.Canvas(parent_frame, bg=COLORS["bg"],
@@ -685,7 +701,9 @@ class AutomationCanvas:
             if block:
                 changed = show_block_config(
                     self.parent.winfo_toplevel(), block,
-                    self.engine.discovered_nodes)
+                    self.engine.discovered_nodes,
+                    relay_pins=self.relay_pins,
+                    sensor_pins=self.sensor_pins)
                 if changed:
                     self._notify_change()
                     self.redraw()

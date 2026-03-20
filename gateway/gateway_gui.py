@@ -82,7 +82,9 @@ class GUIGatewayServer:
             self._emit("log", text=f"Serial opened: {self.serial_port} @ {self.baud}", color=COLORS["good"])
             time.sleep(2)
             self.serial_conn.write(b"GATEWAY ON\n")
-            time.sleep(0.5)
+            time.sleep(0.3)
+            self.serial_conn.write(b"CMD,LIST\n")  # Query pin config for Logic Builder
+            time.sleep(0.3)
             while self.serial_conn.in_waiting:
                 line = self.serial_conn.readline().decode("ascii", errors="replace").strip()
                 if line:
@@ -282,6 +284,10 @@ class GatewayGUIApp:
 
         # Logic builder state
         self.logic_visible = False
+
+        # Node pin config (populated from PINS response)
+        self.node_relay_pins: list[str] = []
+        self.node_sensor_pins: list[str] = []
 
         # Automation engine (before build_ui — canvas needs it)
         self.engine = AutomationEngine(self.sensor_data, self._send_serial, self.topo_nodes)
@@ -667,6 +673,9 @@ class GatewayGUIApp:
             # Try to extract node ID from status
             if text.startswith("ID:"):
                 self.local_id = text.split()[-1].strip()
+            # Parse pin config: PINS,R:2,3,4|S:33,34
+            elif text.startswith("PINS,"):
+                self._parse_pins(text)
             # Parse direct SDATA from serial (local POLL response)
             elif text.startswith("SDATA,"):
                 self._parse_sdata(text)
@@ -1129,6 +1138,18 @@ class GatewayGUIApp:
             self.sensor_data[key].append((now, val))
             if len(self.sensor_data[key]) > self.max_sensor_history:
                 self.sensor_data[key] = self.sensor_data[key][-self.max_sensor_history:]
+
+    def _parse_pins(self, text: str):
+        """Parse PINS,R:2,3,4|S:33,34 response from node."""
+        data = text[5:]  # strip "PINS,"
+        for part in data.split("|"):
+            if part.startswith("R:"):
+                self.node_relay_pins = [p.strip() for p in part[2:].split(",") if p.strip()]
+            elif part.startswith("S:"):
+                self.node_sensor_pins = [p.strip() for p in part[2:].split(",") if p.strip()]
+        # Update Logic Builder canvas so block config dialogs show correct pins
+        self.auto_canvas.relay_pins = self.node_relay_pins
+        self.auto_canvas.sensor_pins = self.node_sensor_pins
 
     def redraw_sensors(self):
         """Legacy sparkline — replaced by SensorDashboard. No-op."""
