@@ -2203,7 +2203,7 @@ void setup() {
 
   drawBootScreen();
 
-  GPSSerial.begin(9600, SERIAL_8N1, BOARD_GPS_RX, BOARD_GPS_TX);
+  GPSSerial.begin(38400, SERIAL_8N1, BOARD_GPS_RX, BOARD_GPS_TX);  // MIA-M10Q default is 38400
   setupRadio();
 
   // Register MeshCore callbacks

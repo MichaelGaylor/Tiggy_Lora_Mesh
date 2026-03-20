@@ -559,14 +559,10 @@ void startSolarMode() {
 }
 
 void solarLightSleep() {
-#if defined(NATIVE_USB_ONLY)
-    // Heltec V4: native USB only (no CP2102) — light sleep kills USB connection.
-    // Use delay instead. Still saves power vs busy-loop.
+    // BLE runs on Core 0. esp_light_sleep_start() halts BOTH cores,
+    // which crashes the Bluetooth controller (Guru Meditation: interrupt WDT).
+    // Use delay() instead — still saves power vs busy-loop while keeping BLE alive.
     delay(100);
-    return;
-#endif
-    // Boards with external UART chip (V3, LoRa32) — light sleep is safe
-    esp_light_sleep_start();
 }
 
 void stopSolarMode() {
@@ -1448,9 +1444,11 @@ void processBleCommand(const String& line) {
         String text = line.substring(c2 + 1);
         uint16_t dest = strtol(target.c_str(), nullptr, 16);
         String mid = mesh.generateMsgID();
+        // POS and SOS are sent without MSG prefix so receivers handle them as position/emergency
+        String encText = (text.startsWith("POS,") || text.startsWith("SOS,")) ? text : "MSG," + text;
         String payload = String(mesh.localID) + "," + target + "," + mid + "," +
                          String(TTL_DEFAULT) + "," + String(mesh.localID) + "," +
-                         mesh.encryptMsg("MSG," + text);
+                         mesh.encryptMsg(encText);
         mesh.transmitPacket(dest, payload);
         bleSend("SENT," + target + "," + mid);
 
