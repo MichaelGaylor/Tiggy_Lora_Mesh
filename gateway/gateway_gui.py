@@ -919,8 +919,14 @@ class GatewayGUIApp:
         try:
             index = self.wf_text.index(f"@{event.x},{event.y}")
             line_num = int(index.split(".")[0]) - 1
-            if 0 <= line_num < len(self.packet_history):
-                self.selected_packet = self.packet_history[line_num]
+            # Waterfall text trims at 300 lines but packet_history at 500.
+            # When text lines are trimmed from the top, line numbers shift
+            # but packet_history still has the old entries. Calculate offset.
+            visible_lines = int(self.wf_text.index("end-1c").split(".")[0]) - 1
+            offset = len(self.packet_history) - visible_lines
+            actual_index = line_num + max(0, offset)
+            if 0 <= actual_index < len(self.packet_history):
+                self.selected_packet = self.packet_history[actual_index]
                 self.show_inspector(self.selected_packet)
         except Exception:
             pass

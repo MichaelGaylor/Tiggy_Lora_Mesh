@@ -182,15 +182,18 @@ def decrypt_message(encrypted_hex: str, msg_id: str, aes_key: str) -> Optional[s
     try:
         from Crypto.Cipher import AES
     except ImportError:
+        print("[DECRYPT] ERROR: pycryptodome not installed (pip install pycryptodome)")
         return None
 
     try:
         blob = bytes.fromhex(encrypted_hex)
     except ValueError:
+        print(f"[DECRYPT] ERROR: invalid hex string (len={len(encrypted_hex)})")
         return None
 
     min_len = GCM_NONCE_LEN + GCM_TAG_LEN + 1
     if len(blob) < min_len or len(aes_key) != 16:
+        print(f"[DECRYPT] ERROR: blob={len(blob)}B (min {min_len}), keyLen={len(aes_key)}")
         return None
 
     nonce = blob[:GCM_NONCE_LEN]
@@ -201,5 +204,7 @@ def decrypt_message(encrypted_hex: str, msg_id: str, aes_key: str) -> Optional[s
         cipher = AES.new(aes_key.encode("ascii"), AES.MODE_GCM, nonce=nonce)
         plaintext = cipher.decrypt_and_verify(ciphertext, tag)
         return plaintext.decode("ascii", errors="replace")
-    except (ValueError, KeyError):
+    except (ValueError, KeyError) as e:
+        print(f"[DECRYPT] FAIL: {type(e).__name__}: {e} | "
+              f"key[0:4]={aes_key[:4]} blobLen={len(blob)} ctLen={len(ciphertext)}")
         return None

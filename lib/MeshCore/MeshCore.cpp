@@ -547,6 +547,7 @@ void MeshCore::processPacket(const MeshPacket& pkt) {
             }
             addNode(hbFrom);
             updateRouting(hbFrom, hbFrom, lastRSSI);
+            if (onHeartbeat) onHeartbeat(hbFrom, lastRSSI);
         }
         return;
     }

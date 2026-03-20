@@ -50,6 +50,9 @@ class MainActivity : ComponentActivity() {
             perms.add(Manifest.permission.BLUETOOTH_SCAN)
             perms.add(Manifest.permission.BLUETOOTH_CONNECT)
         }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            perms.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
         perms.add(Manifest.permission.ACCESS_FINE_LOCATION)
 
         val needed = perms.filter {

@@ -168,7 +168,7 @@ void wakeDisplay() {
 String inputBuffer;
 String inputPrompt;
 bool inputActive = false;
-enum InputTarget { INPUT_MSG, INPUT_LOCAL_ID, INPUT_TARGET_ID, INPUT_AES_KEY };
+enum InputTarget { INPUT_MSG, INPUT_LOCAL_ID, INPUT_TARGET_ID, INPUT_AES_KEY, INPUT_TARGET_THEN_MSG };
 InputTarget inputTarget;
 
 // Last sender for quick reply
@@ -241,6 +241,12 @@ void broadcastPosition();
 void IRAM_ATTR onRadioRx() { mesh.rxFlag = true; }
 
 void radioTransmit(uint8_t* pkt, size_t len) {
+  // Rescue any pending RX before we clobber the SX1262 buffer
+  // Without this, a packet received between receiveCheck() and this TX
+  // would be permanently lost (radio.standby() discards the RX buffer)
+  if (mesh.rxFlag) {
+    receiveCheck();
+  }
   radio.standby();
   radio.transmit(pkt, len);
   mesh.rxFlag = false;  // Clear false RX flag from TX_DONE DIO1 interrupt
@@ -594,6 +600,11 @@ void handleIdConflict(const String& id, int rssi) {
   showNotification("ID CONFLICT! " + id + " in use!", 10000);
 }
 
+// Called by MeshCore on ANY heartbeat — keeps mesh map current
+void handleHeartbeat(const String& from, int rssi) {
+  updateMeshMap(from, String(mesh.localID), rssi);
+}
+
 // ═══════════════════════════════════════════════════════════════
 // SECTION: Receive
 // ═══════════════════════════════════════════════════════════════
@@ -670,16 +681,20 @@ void drawStatusBar() {
   display.print(targetID);
 
   display.setCursor(106, y + 5);
-  if (gps.location.isValid()) {
-    display.fillCircle(104, y + 9, 3, COL_GOOD);
-    display.setCursor(110, y + 5);
-    display.setTextColor(COL_GOOD, COL_PANEL);
-    display.print("GPS");
-  } else {
-    display.fillCircle(104, y + 9, 3, COL_BAD);
-    display.setCursor(110, y + 5);
-    display.setTextColor(COL_BAD, COL_PANEL);
-    display.print("GPS");
+  {
+    int gpsSats = gps.satellites.value();
+    unsigned long gpsChars = gps.charsProcessed();
+    if (gps.location.isValid()) {
+      display.fillCircle(104, y + 9, 3, COL_GOOD);
+      display.setCursor(110, y + 5);
+      display.setTextColor(COL_GOOD, COL_PANEL);
+    } else {
+      uint16_t gpsCol = (gpsChars > 0) ? COL_WARN : COL_BAD;
+      display.fillCircle(104, y + 9, 3, gpsCol);
+      display.setCursor(110, y + 5);
+      display.setTextColor(gpsCol, COL_PANEL);
+    }
+    display.print(String(gpsSats));
   }
 
   display.setTextColor(COL_DIM, COL_PANEL);
@@ -972,7 +987,7 @@ void drawTextInput() {
   display.print(targetID);
 
   int maxLen = MAX_INPUT_LEN;
-  if (inputTarget == INPUT_LOCAL_ID || inputTarget == INPUT_TARGET_ID) maxLen = NODE_ID_LEN;
+  if (inputTarget == INPUT_LOCAL_ID || inputTarget == INPUT_TARGET_ID || inputTarget == INPUT_TARGET_THEN_MSG) maxLen = NODE_ID_LEN;
   if (inputTarget == INPUT_AES_KEY) maxLen = AES_KEY_LEN;
 
   display.setTextColor(COL_DIM, COL_BG);
@@ -1016,7 +1031,7 @@ void handleTextInput(char key) {
   if (key == 0) return;
 
   int maxLen = MAX_INPUT_LEN;
-  if (inputTarget == INPUT_LOCAL_ID || inputTarget == INPUT_TARGET_ID) maxLen = NODE_ID_LEN;
+  if (inputTarget == INPUT_LOCAL_ID || inputTarget == INPUT_TARGET_ID || inputTarget == INPUT_TARGET_THEN_MSG) maxLen = NODE_ID_LEN;
   if (inputTarget == INPUT_AES_KEY) maxLen = AES_KEY_LEN;
 
   if (key == '\n' || key == '\r') {
@@ -1063,6 +1078,17 @@ void handleTextInput(char key) {
           showNotification("Key must be 16 chars!");
         }
         break;
+      case INPUT_TARGET_THEN_MSG:
+        if ((int)result.length() == NODE_ID_LEN) {
+          strncpy(targetID, result.c_str(), NODE_ID_LEN);
+          targetID[NODE_ID_LEN] = '\0';
+          saveIDsToEEPROM();
+          startTextInput("Message to " + String(targetID), INPUT_MSG);
+          return;  // Don't fall through to currentMode = MENU
+        } else {
+          showNotification("Invalid ID! Use 4 hex chars");
+        }
+        break;
     }
     currentMode = MENU;
     drawCurrentMenu();
@@ -1084,7 +1110,7 @@ void handleTextInput(char key) {
   }
 
   if ((int)inputBuffer.length() < maxLen && key >= 0x20 && key <= 0x7E) {
-    if (inputTarget == INPUT_LOCAL_ID || inputTarget == INPUT_TARGET_ID)
+    if (inputTarget == INPUT_LOCAL_ID || inputTarget == INPUT_TARGET_ID || inputTarget == INPUT_TARGET_THEN_MSG)
       key = toupper(key);
     inputBuffer += key;
     drawTextInput();
@@ -1227,17 +1253,17 @@ void handleMenu() {
   if (tb == 'C' || kb == '\r' || kb == '\n') {
     if (menuState == M_MAIN) {
       switch (menuIndex) {
-        case 0: startTextInput("New Message", INPUT_MSG); return;
+        case 0: inputBuffer = String(targetID); startTextInput("To (4 hex or FFFF)", INPUT_TARGET_THEN_MSG); return;
         case 1: {
           std::vector<int> parts = pickMultiplePhrases();
           if (parts.size() > 0) {
             String phraseMsg;
             for (int id : parts) {
               if (phraseMsg.length()) phraseMsg += "|";
-              phraseMsg += "$" + String(id, HEX);
+              phraseMsg += String(phraseLibrary[id]);
             }
             sendSmartMessage(phraseMsg);
-            addChatMessage(String(mesh.localID), decompressQuickMsg(phraseMsg), 0, true);
+            addChatMessage(String(mesh.localID), phraseMsg, 0, true);
             showNotification("Phrases sent!");
           }
           currentMode = MENU;
@@ -2063,19 +2089,17 @@ void loadKeyFromEEPROM() {
 void saveIDsToEEPROM() {
   EEPROM.put(0, mesh.localID);
   EEPROM.put(10, targetID);
-  EEPROM.put(20, mesh.knownNodes);
-  EEPROM.put(400, mesh.knownCount);
+  // knownNodes NOT persisted — discovered fresh via heartbeats each boot
+  // This prevents stale nodes from weeks ago cluttering the list
   EEPROM.commit();
 }
 
 void loadIDsFromEEPROM() {
   EEPROM.get(0, mesh.localID);
   EEPROM.get(10, targetID);
-  EEPROM.get(20, mesh.knownNodes);
-  EEPROM.get(400, mesh.knownCount);
+  // knownNodes NOT loaded — discovered fresh via heartbeats each boot
   if (!mesh.isValidNodeID(String(mesh.localID))) strncpy(mesh.localID, "0001", NODE_ID_LEN + 1);
   if (strlen(targetID) != NODE_ID_LEN) strncpy(targetID, "FFFF", NODE_ID_LEN + 1);
-  if (mesh.knownCount > MAX_NODES) { mesh.knownCount = 0; memset(mesh.knownNodes, 0, sizeof(mesh.knownNodes)); }
   uint8_t storedSleep = EEPROM.read(EEPROM_SLEEP_ADDR);
   displaySleepTimeout = (storedSleep == 0xFF) ? 60 : storedSleep;  // 0xFF = unset, default 60s
 }
@@ -2190,6 +2214,7 @@ void setup() {
   mesh.onAck = handleAck;
   mesh.onNodeDiscovered = handleNodeDiscovered;
   mesh.onIdConflict = handleIdConflict;
+  mesh.onHeartbeat = handleHeartbeat;
 
   analogReadResolution(12);
   pinMode(BOARD_BAT_ADC, INPUT);

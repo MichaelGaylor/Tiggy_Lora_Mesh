@@ -474,6 +474,27 @@ fun SettingsScreen(viewModel: MeshViewModel) {
                             colors = SwitchDefaults.colors(checkedThumbColor = MeshOrange)
                         )
                     }
+                    Spacer(Modifier.height(12.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("GPS", style = MaterialTheme.typography.bodyMedium)
+                            Text(
+                                if (config.gpsStatus == "OFF") "GPS module disabled. Enable to broadcast position."
+                                else if (config.gpsStatus == "FIX") "GPS has satellite fix."
+                                else "GPS enabled, searching for satellites...",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MeshGrey
+                            )
+                        }
+                        Switch(
+                            checked = config.gpsStatus != "OFF",
+                            onCheckedChange = { viewModel.setGpsEnabled(it) },
+                            colors = SwitchDefaults.colors(checkedThumbColor = MeshGreen)
+                        )
+                    }
                 }
             }
         }

@@ -63,7 +63,8 @@ data class NodeConfig(
     var boardName: String = "",
     var spreadingFactor: Int = 9,
     var powerMode: String = "NORMAL",
-    var setupMode: Boolean = false
+    var setupMode: Boolean = false,
+    var gpsStatus: String = "OFF"  // OFF, FIX, NOFIX
 )
 
 // Sensor reading history (for sparkline charts)

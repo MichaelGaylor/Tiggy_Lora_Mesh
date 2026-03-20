@@ -211,6 +211,14 @@ unsigned long lastOledRefresh = 0;
 // ─── Gateway Mode ───────────────────────────────────────────
 bool gatewayMode = false;
 
+// ─── BLE MSG ACK Retry (matches T-Deck's approach) ─────────
+bool bleAckReceived = false;
+String blePendingAckID = "";
+int bleAckAttempt = 0;
+unsigned long bleAckSentAt = 0;
+String bleAckPayloadCache = "";
+uint16_t bleAckDest = 0;
+
 // ─── Pending SF Change (two-phase commit) ───────────────────
 bool sfChangePending = false;
 uint8_t sfChangeTarget = LORA_SF;
@@ -418,6 +426,8 @@ void broadcastGPS() {
 // SECTION: Radio bridge — connects MeshCore to physical radio
 // ═══════════════════════════════════════════════════════════════
 
+void receiveCheck();  // Forward declaration — needed by radioTransmit()
+
 void IRAM_ATTR onRadioRx() { mesh.rxFlag = true; }
 
 // Start listening — always continuous RX (no packet loss)
@@ -427,6 +437,12 @@ void radioStartListening() {
 
 // MeshCore calls this to transmit raw packets
 void radioTransmit(uint8_t* pkt, size_t len) {
+    // Rescue any pending RX before we clobber the SX1262 buffer
+    // Without this, a packet received between receiveCheck() and this TX
+    // would be permanently lost (radio.standby() discards the RX buffer)
+    if (mesh.rxFlag) {
+        receiveCheck();
+    }
     radio.standby();
     radio.transmit(pkt, len);
     mesh.rxFlag = false;  // Clear false RX flag from TX_DONE DIO1 interrupt
@@ -1237,6 +1253,33 @@ void handleMessage(const String& from, const String& text, int rssi) {
 void handleAck(const String& from, const String& mid) {
     debugPrint("ACK from " + from + " mid=" + mid);
     bleSend("ACK," + from + "," + mid);
+    // Check if this ACK is for a pending BLE MSG send
+    if (mid == blePendingAckID) {
+        bleAckReceived = true;
+    }
+}
+
+// BLE MSG ACK retry — called from loop(), matches T-Deck's handleAckRetry()
+void handleBleAckRetry() {
+    if (blePendingAckID.length() == 0) return;
+    if (bleAckReceived) {
+        debugPrint("BLE MSG delivered!");
+        bleSend("DELIVERED," + blePendingAckID);
+        blePendingAckID = "";
+        return;
+    }
+    if (millis() - bleAckSentAt < ACK_TIMEOUT) return;
+
+    bleAckAttempt++;
+    if (bleAckAttempt > MAX_RETRIES) {
+        debugPrint("BLE MSG send failed - no ACK");
+        bleSend("FAILED," + blePendingAckID);
+        blePendingAckID = "";
+        return;
+    }
+    debugPrint("BLE MSG retry " + String(bleAckAttempt) + "/" + String(MAX_RETRIES));
+    mesh.transmitPacket(bleAckDest, bleAckPayloadCache);
+    bleAckSentAt = millis();
 }
 
 // CFG handler — a config change request arrived over the mesh
@@ -1410,6 +1453,16 @@ void processBleCommand(const String& line) {
                          mesh.encryptMsg("MSG," + text);
         mesh.transmitPacket(dest, payload);
         bleSend("SENT," + target + "," + mid);
+
+        // ACK tracking for directed messages (not broadcasts)
+        if (target != "FFFF") {
+            bleAckReceived = false;
+            blePendingAckID = mid;
+            bleAckAttempt = 0;
+            bleAckSentAt = millis();
+            bleAckPayloadCache = payload;
+            bleAckDest = dest;
+        }
     }
     else if (line.startsWith("CMD,")) {
         handleCmd("LOCAL", line.substring(4));
@@ -1527,11 +1580,22 @@ void processBleCommand(const String& line) {
         }
     }
     else if (line.startsWith("GPS,")) {
-        // GPS pin config via BLE: GPS,<tx>,<rx> or GPS,OFF
+        // GPS pin config via BLE: GPS,<tx>,<rx> or GPS,OFF or GPS,ON
         String args = line.substring(4);
         if (args == "OFF") {
             gpsTxPin = -1; gpsRxPin = -1; gpsEnabled = false;
             bleSend("OK,GPS,OFF");
+        } else if (args == "ON") {
+            // Re-enable GPS with saved EEPROM pins
+            uint8_t savedTx = EEPROM.read(EEPROM_GPS_ADDR);
+            uint8_t savedRx = EEPROM.read(EEPROM_GPS_ADDR + 1);
+            if (savedTx != 0xFF && savedRx != 0xFF) {
+                gpsTxPin = savedTx; gpsRxPin = savedRx;
+                setupGPS();
+                bleSend("OK,GPS," + String(gpsTxPin) + "," + String(gpsRxPin));
+            } else {
+                bleSend("ERR,GPS,NO_SAVED_PINS");
+            }
         } else {
             int comma = args.indexOf(',');
             if (comma > 0) {
@@ -2242,6 +2306,7 @@ void loop() {
     if (solarMode) {
         // Radio RX — process any packet that woke us
         receiveCheck();
+        handleBleAckRetry();
         mesh.processPendingForwards();
 
         // Heartbeat (60s interval in solar mode to save TX power)
@@ -2288,6 +2353,7 @@ void loop() {
 
     // 1. Radio RX — MeshCore handles routing, forwarding, decryption
     receiveCheck();
+    handleBleAckRetry();
 
     // 2. Process jittered forwards
     mesh.processPendingForwards();

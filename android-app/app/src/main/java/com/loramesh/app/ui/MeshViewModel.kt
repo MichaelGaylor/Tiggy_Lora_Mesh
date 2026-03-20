@@ -2,12 +2,15 @@ package com.loramesh.app.ui
 
 import android.Manifest
 import android.app.Application
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.location.LocationManager
 import android.media.RingtoneManager
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.loramesh.app.LoRaMeshApp
+import com.loramesh.app.ble.BleConnectionService
 import com.loramesh.app.ble.BleManager
 import com.loramesh.app.ble.ConnectionState
 import com.loramesh.app.data.*
@@ -23,7 +26,8 @@ private const val MAX_SENSOR_HISTORY = 60 // readings per sensor key
 
 class MeshViewModel(app: Application) : AndroidViewModel(app) {
 
-    val ble = BleManager(app.applicationContext)
+    // BleManager lives in Application — survives Activity recreation + backgrounding
+    val ble: BleManager = (app as LoRaMeshApp).bleManager
     val telegram = TelegramBridge(app.applicationContext)
 
     // ─── UI State ────────────────────────────────────────────
@@ -106,6 +110,45 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
                 parseLine(line)
             }
         }
+
+        // Start/stop foreground service based on BLE connection state
+        viewModelScope.launch {
+            ble.connectionState.collect { state ->
+                val ctx = getApplication<Application>()
+                when (state) {
+                    ConnectionState.CONNECTED -> {
+                        val intent = Intent(ctx, BleConnectionService::class.java).apply {
+                            putExtra(BleConnectionService.EXTRA_DEVICE_NAME,
+                                ble.connectedDeviceName.value)
+                        }
+                        ctx.startForegroundService(intent)
+                    }
+                    ConnectionState.DISCONNECTED -> {
+                        ctx.stopService(Intent(ctx, BleConnectionService::class.java))
+                        clearSessionState()
+                    }
+                    else -> { /* scanning/connecting — no action */ }
+                }
+            }
+        }
+    }
+
+    // ─── Session state — cleared on disconnect so stale data from
+    //     a previous node doesn't persist when connecting to a different one
+    private fun clearSessionState() {
+        _messages.value = emptyList()
+        _nodes.value = emptyList()
+        _relays.value = emptyList()
+        _sensors.value = emptyList()
+        _config.value = NodeConfig()
+        _positions.value = emptyMap()
+        _sensorHistory.value = emptyMap()
+        _timers.value = emptyList()
+        _setpoints.value = emptyList()
+        _autoPoll.value = AutoPollConfig()
+        _sfChange.value = SfChangeState()
+        _statusLine.value = ""
+        pendingAcks.clear()
     }
 
     // ─── Auto-reconnect ───────────────────────────────────
@@ -699,6 +742,7 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
                 "FREQ" -> cfg.frequency = kv[1].toFloatOrNull() ?: 868.0f
                 "SF" -> cfg.spreadingFactor = kv[1].toIntOrNull() ?: 9
                 "POWER" -> cfg.powerMode = kv[1]
+                "GPS" -> cfg.gpsStatus = kv[1]
                 "AUTOPOLL" -> parseAutoPollFromStatus(kv[1])
                 "SETUP" -> cfg.setupMode = (kv[1] == "1")
             }
@@ -706,7 +750,18 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
         _config.value = cfg
     }
 
+    fun setGpsEnabled(enabled: Boolean) {
+        val cfg = _config.value.copy()
+        cfg.gpsStatus = if (enabled) "NOFIX" else "OFF"
+        _config.value = cfg
+        ble.send(if (enabled) "GPS,ON" else "GPS,OFF")
+    }
+
     fun setPowerMode(solar: Boolean) {
+        // Optimistically update state so switch doesn't snap back while waiting for BLE response
+        val cfg = _config.value.copy()
+        cfg.powerMode = if (solar) "SOLAR" else "NORMAL"
+        _config.value = cfg
         ble.send(if (solar) "POWER,SOLAR" else "POWER,NORMAL")
     }
 
@@ -799,7 +854,8 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         positionSharingJob?.cancel()
-        ble.disconnect()
+        // Do NOT disconnect BLE here — the foreground service keeps it alive
+        // User explicitly disconnects via UI or notification action
         super.onCleared()
     }
 }

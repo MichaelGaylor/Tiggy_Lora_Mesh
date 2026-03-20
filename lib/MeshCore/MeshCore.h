@@ -149,6 +149,10 @@ public:
     IdConflictFunc onIdConflict = nullptr;
     bool idConflictDetected = false;
 
+    // Called when ANY heartbeat is received (not just new nodes)
+    typedef void (*HeartbeatFunc)(const String& from, int rssi);
+    HeartbeatFunc onHeartbeat = nullptr;
+
     // Runtime spreading factor (may differ from compile-time LORA_SF after a CFG change)
     uint8_t currentSF = LORA_SF;
 
