@@ -317,11 +317,13 @@
 
 // ─── User GPIO for relays & sensors ─────────────────────────
 // Free pins on Heltec V4 (40-pin header, more GPIOs than V3):
-// 2, 3, 4, 5, 6, 7, 15, 16, 33, 34, 38, 39, 40, 41, 42, 43, 44, 45, 46
-// NOTE: GPIO 19/20 are USB D-/D+ — DO NOT USE as GPIO or USB serial dies!
+// 2, 3, 4, 5, 6, 7, 15, 16, 33, 34, 40, 41, 42, 43, 44, 45, 46
+// RESERVED — DO NOT USE:
+//   GPIO 19/20 = USB D-/D+ (kills USB serial)
+//   GPIO 38/39 = GPS header connector (hardwired to GNSS SH1.25)
 #define USER_GPIO_COUNT     6
 #define DEFAULT_RELAY_PINS  { 2, 3, 4, 5, 6, 7 }
-#define DEFAULT_SENSOR_PINS { 33, 34, 38 }
+#define DEFAULT_SENSOR_PINS { 33, 34, 15 }
 #define SENSOR_PIN_COUNT    3
 
 // ═══════════════════════════════════════════════════════════════

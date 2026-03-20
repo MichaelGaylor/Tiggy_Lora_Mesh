@@ -1495,6 +1495,39 @@ void processBleCommand(const String& line) {
                 ",HEAP:" + String(ESP.getFreeHeap()));
     }
     else if (line == "SAVE") { saveConfig(); bleSend("OK,SAVED"); }
+    else if (line == "PINMAP") {
+        // Show pin assignments so customers know what's free
+        String resp = "PINMAP," + String(BOARD_NAME);
+        resp += ",RELAY:";
+        for (int i = 0; i < relayCount; i++) { if (i) resp += "/"; resp += String(relayPins[i]); }
+        resp += ",SENSOR:";
+        for (int i = 0; i < sensorCount; i++) { if (i) resp += "/"; resp += String(sensorPins[i]); }
+        resp += ",RESERVED:";
+#if defined(BOARD_HELTEC_V4)
+        resp += "19(USB)/20(USB)/38(GPS)/39(GPS)";
+#elif defined(BOARD_HELTEC_V3)
+        resp += "none";
+#elif defined(BOARD_LORA32)
+        resp += "34(IN)/36(IN)/39(IN)";
+#elif defined(BOARD_XIAO_S3)
+        resp += "1/3/8/9/10/33/34/44(radio)";
+#else
+        resp += "see docs";
+#endif
+        resp += ",FREE:";
+#if defined(BOARD_HELTEC_V4)
+        resp += "15/16/33/34/40/41/42/43/44/45/46";
+#elif defined(BOARD_HELTEC_V3)
+        resp += "19/20/33/34/38/39/40/41/42/43/44/45/46";
+#elif defined(BOARD_LORA32)
+        resp += "2/4/12/13/14/15/17/33";
+#elif defined(BOARD_XIAO_S3)
+        resp += "2/4/5/6";
+#else
+        resp += "see docs";
+#endif
+        bleSend(resp);
+    }
     else if (line.startsWith("SF,")) {
         // SF,<value> — initiate mesh-wide SF change (Phase 1: broadcast CFG)
         int newSF = line.substring(3).toInt();
