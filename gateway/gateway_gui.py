@@ -306,10 +306,7 @@ class GatewayGUIApp:
         self.conn_label = ctk.CTkLabel(title_frame, text="Disconnected", font=("Consolas", 12),
                                         text_color=COLORS["bad"])
         self.conn_label.pack(side="right", padx=15)
-        self.logic_btn = ctk.CTkButton(title_frame, text="Logic Builder", width=110,
-                                        font=("Consolas", 11), fg_color=COLORS["faint"],
-                                        text_color=COLORS["text"], command=self.toggle_logic_builder)
-        self.logic_btn.pack(side="right", padx=5)
+        # Logic Builder button removed — now a tab
 
         # Connection controls
         conn_frame = ctk.CTkFrame(self.root, fg_color=COLORS["panel"], corner_radius=8)
@@ -409,20 +406,27 @@ class GatewayGUIApp:
         self.nodes_frame = ctk.CTkScrollableFrame(right_frame, fg_color=COLORS["bg"], corner_radius=0)
         self.nodes_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
-        # ─── Sensor Dashboard (full gauges + line chart) ─────
-        self.sensor_dashboard = SensorDashboard(self.root, self.sensor_data,
+        # ─── Tabbed Content Area ─────────────────────────────
+        self.tabview = ctk.CTkTabview(self.root, fg_color=COLORS["bg"],
+                                       segmented_button_fg_color=COLORS["panel"],
+                                       segmented_button_selected_color=COLORS["accent"],
+                                       segmented_button_selected_hover_color=COLORS["accent"],
+                                       segmented_button_unselected_color=COLORS["faint"])
+        self.tabview.pack(fill="both", expand=True, padx=10, pady=5)
+
+        # Tab 1: Packets (waterfall + inspector)
+        packets_tab = self.tabview.add("Packets")
+
+        # Tab 2: Sensors (full dashboard)
+        sensors_tab = self.tabview.add("Sensors")
+        self.sensor_dashboard = SensorDashboard(sensors_tab, self.sensor_data,
                                                   max_history=self.max_sensor_history)
-        self.sensor_dashboard.pack(fill="both", expand=True, padx=10, pady=5)
+        self.sensor_dashboard.pack(fill="both", expand=True)
 
-        # Legacy sparkline canvas (hidden, kept for minimal fallback)
-        sensor_frame = ctk.CTkFrame(self.root, fg_color=COLORS["panel"], corner_radius=8, height=130)
-        # Not packed — dashboard replaces it
-        self.sensor_canvas = ctk.CTkCanvas(sensor_frame, bg=COLORS["bg"], highlightthickness=0, height=100)
-        self.sensor_canvas.pack(fill="both", expand=True, padx=10, pady=(0, 5))
-
-        # ─── Logic Builder Panel (hidden by default) ─────────
-        self.logic_frame = ctk.CTkFrame(self.root, fg_color=COLORS["panel"], corner_radius=8)
-        # Not packed yet — toggled via Logic Builder button
+        # Tab 3: Logic Builder
+        logic_tab = self.tabview.add("Logic")
+        self.logic_frame = ctk.CTkFrame(logic_tab, fg_color=COLORS["panel"], corner_radius=8)
+        self.logic_frame.pack(fill="both", expand=True)
 
         # Logic builder toolbar
         lb_toolbar = ctk.CTkFrame(self.logic_frame, fg_color="transparent")
@@ -501,10 +505,9 @@ class GatewayGUIApp:
                                         anchor="w")
         self.logic_log.pack(fill="x", padx=10, pady=(0, 5))
 
-        # Packet waterfall
-        self.wf_frame = ctk.CTkFrame(self.root, fg_color=COLORS["panel"], corner_radius=8, height=130)
-        self.wf_frame.pack(fill="x", padx=10, pady=5)
-        self.wf_frame.pack_propagate(False)
+        # Packet waterfall (inside Packets tab)
+        self.wf_frame = ctk.CTkFrame(packets_tab, fg_color=COLORS["panel"], corner_radius=8)
+        self.wf_frame.pack(fill="both", expand=True, padx=5, pady=5)
         wf_frame = self.wf_frame
         ctk.CTkLabel(wf_frame, text="  Packet Waterfall (click to inspect)", font=("Consolas", 11, "bold"),
                       text_color=COLORS["accent"], anchor="w").pack(fill="x", padx=10, pady=(5, 0))
@@ -513,9 +516,9 @@ class GatewayGUIApp:
         self.wf_text.pack(fill="both", expand=True, padx=10, pady=(0, 5))
         self.wf_text.bind("<Button-1>", self.on_waterfall_click)
 
-        # Packet inspector
-        self.insp_frame = ctk.CTkFrame(self.root, fg_color=COLORS["panel"], corner_radius=8, height=95)
-        self.insp_frame.pack(fill="x", padx=10, pady=(0, 10))
+        # Packet inspector (inside Packets tab)
+        self.insp_frame = ctk.CTkFrame(packets_tab, fg_color=COLORS["panel"], corner_radius=8, height=95)
+        self.insp_frame.pack(fill="x", padx=5, pady=(0, 5))
         self.insp_frame.pack_propagate(False)
         insp_frame = self.insp_frame
         ctk.CTkLabel(insp_frame, text="  Packet Inspector", font=("Consolas", 11, "bold"),
@@ -980,21 +983,10 @@ class GatewayGUIApp:
     # ─── Logic Builder ────────────────────────────────────
 
     def toggle_logic_builder(self):
-        """Toggle between packet waterfall/inspector and logic builder."""
-        self.logic_visible = not self.logic_visible
-        if self.logic_visible:
-            self.wf_frame.pack_forget()
-            self.insp_frame.pack_forget()
-            self.logic_frame.pack(fill="both", padx=10, pady=5, expand=True)
-            self.logic_btn.configure(fg_color=COLORS["accent"], text_color="#000")
-            # Wire engine to canvas now that it exists
-            self.auto_canvas.engine = self.engine
-            self._refresh_rule_list()
-        else:
-            self.logic_frame.pack_forget()
-            self.wf_frame.pack(fill="x", padx=10, pady=5)
-            self.insp_frame.pack(fill="x", padx=10, pady=(0, 10))
-            self.logic_btn.configure(fg_color=COLORS["faint"], text_color=COLORS["text"])
+        """Switch to Logic tab."""
+        self.tabview.set("Logic")
+        self.auto_canvas.engine = self.engine
+        self._refresh_rule_list()
 
     def _refresh_rule_list(self):
         names = [r.name for r in self.engine.rules]
@@ -1090,7 +1082,7 @@ class GatewayGUIApp:
         """Periodic automation rule evaluation."""
         self.engine.evaluate_all()
         # Update live values on canvas if visible
-        if self.logic_visible:
+        if self.tabview.get() == "Logic":
             self.auto_canvas.update_live_values()
             rule = self.auto_canvas.current_rule
             if rule:
