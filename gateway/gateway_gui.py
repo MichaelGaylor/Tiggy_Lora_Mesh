@@ -497,7 +497,7 @@ class GatewayGUIApp:
         canvas_frame = ctk.CTkFrame(self.logic_frame, fg_color=COLORS["bg"], corner_radius=4)
         canvas_frame.pack(fill="both", expand=True, padx=10, pady=5)
 
-        self.auto_canvas = AutomationCanvas(canvas_frame, None, self._on_canvas_change)
+        self.auto_canvas = AutomationCanvas(canvas_frame, self.engine, self._on_canvas_change)
 
         # Event log
         self.logic_log = ctk.CTkLabel(self.logic_frame, text="Event log: (none)",

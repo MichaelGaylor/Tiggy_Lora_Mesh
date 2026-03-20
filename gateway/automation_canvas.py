@@ -61,7 +61,9 @@ def show_block_config(parent, block: Block, discovered_nodes: dict):
     dialog.geometry("340x300")
     dialog.configure(fg_color=COLORS["panel"])
     dialog.transient(parent)
-    dialog.grab_set()
+    dialog.after(50, lambda: dialog.grab_set())  # Delay grab to avoid focus race
+    dialog.after(100, dialog.lift)                # Ensure dialog is on top
+    dialog.focus_force()
 
     entries = {}
     row = 0
