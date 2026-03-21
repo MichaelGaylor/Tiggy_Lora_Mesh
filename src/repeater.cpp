@@ -1990,6 +1990,12 @@ void handleSerialConfig() {
         } else {
             Serial.println("AutoPoll: OFF");
         }
+        // Output PINS directly (gateway GUI parses this for Logic Builder pin dropdowns)
+        String pins = "PINS,R:";
+        for (int i = 0; i < relayCount; i++) { if (i) pins += ","; pins += String(relayPins[i]); }
+        pins += "|S:";
+        for (int i = 0; i < sensorCount; i++) { if (i) pins += ","; pins += String(sensorPins[i]); }
+        Serial.println(pins);
     }
     else if (line == "SAVE") { saveConfig(); Serial.println("OK: Saved"); }
     else if (line == "RESET") {
