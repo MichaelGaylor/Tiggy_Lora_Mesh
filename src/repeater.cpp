@@ -1197,6 +1197,15 @@ void handleCmd(const String& from, const String& cmdBody) {
         rsp += "|S:";
         for (int i = 0; i < sensorCount; i++) { if (i) rsp += ","; rsp += String(sensorPins[i]); }
         bleSend(rsp);
+        // Also respond over mesh so remote nodes can query our pin config
+        if (from != "LOCAL") {
+            mesh.cmdsExecuted++;
+            String mid = mesh.generateMsgID();
+            String hex = mesh.encryptMsg(rsp);
+            String payload = String(mesh.localID) + "," + from + "," + mid + "," +
+                             String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+            mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+        }
     }
     else if (action == "REBOOT") {
         // Remote reboot via mesh — no EEPROM wipe, just restart

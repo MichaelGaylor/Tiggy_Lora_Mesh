@@ -269,6 +269,16 @@ class BleManager(private val context: Context) {
     fun pollSensors() = send("POLL")
     fun pollRemote(targetId: String) = send("POLL,$targetId")
 
+    // ─── Remote node control (via mesh) ─────────────────────
+    fun setRemoteRelay(nodeId: String, pin: Int, state: Boolean) =
+        send("MSG,$nodeId,CMD,SET,$pin,${if (state) 1 else 0}")
+    fun pulseRemoteRelay(nodeId: String, pin: Int, ms: Int) =
+        send("MSG,$nodeId,CMD,PULSE,$pin,$ms")
+    fun getRemotePin(nodeId: String, pin: Int) =
+        send("MSG,$nodeId,CMD,GET,$pin")
+    fun listRemotePins(nodeId: String) =
+        send("MSG,$nodeId,CMD,LIST")
+
     // ─── Timers ───────────────────────────────────────────────
     fun timerSet(pin: Int, action: String, seconds: Int) = send("TIMER,$pin,$action,$seconds")
     fun timerPulse(pin: Int, onSec: Int, offSec: Int, repeats: Int) =

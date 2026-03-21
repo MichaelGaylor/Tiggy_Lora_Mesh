@@ -98,6 +98,15 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
     private val _statusLine = MutableStateFlow("")
     val statusLine: StateFlow<String> = _statusLine
 
+    // ─── Remote control target ────────────────────────────
+    // Empty string = local (BLE-connected) node
+    private val _controlTarget = MutableStateFlow("")
+    val controlTarget: StateFlow<String> = _controlTarget
+
+    // Pin configs for remote nodes: nodeId → (relayPins, sensorPins)
+    private val _remotePinConfigs = MutableStateFlow<Map<String, Pair<List<Int>, List<Int>>>>(emptyMap())
+    val remotePinConfigs: StateFlow<Map<String, Pair<List<Int>, List<Int>>>> = _remotePinConfigs
+
     val connectionState = ble.connectionState
     val connectedDeviceName = ble.connectedDeviceName
     val discoveredDevices = ble.discoveredDevices
@@ -217,19 +226,52 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    // ─── Relay Control ───────────────────────────────────────
+    // ─── Relay Control (local or remote) ─────────────────────
+    private fun isRemote(): Boolean {
+        val target = _controlTarget.value
+        return target.isNotEmpty() && target != _config.value.nodeId
+    }
+
+    fun setControlTarget(nodeId: String) {
+        _controlTarget.value = nodeId
+        if (isRemote()) {
+            // Query remote node's pin config
+            ble.listRemotePins(nodeId)
+        } else {
+            ble.listPins()
+        }
+    }
+
     fun toggleRelay(pin: Int) {
         val current = _relays.value.find { it.pin == pin }
         val newState = !(current?.state ?: false)
-        ble.setRelay(pin, newState)
+        if (isRemote()) {
+            ble.setRemoteRelay(_controlTarget.value, pin, newState)
+        } else {
+            ble.setRelay(pin, newState)
+        }
     }
 
-    fun pulseRelay(pin: Int, ms: Int = 1000) = ble.pulseRelay(pin, ms)
-    fun refreshPins() = ble.listPins()
-    fun readSensor(pin: Int) = ble.getPin(pin)
+    fun pulseRelay(pin: Int, ms: Int = 1000) {
+        if (isRemote()) ble.pulseRemoteRelay(_controlTarget.value, pin, ms)
+        else ble.pulseRelay(pin, ms)
+    }
+
+    fun refreshPins() {
+        if (isRemote()) ble.listRemotePins(_controlTarget.value)
+        else ble.listPins()
+    }
+
+    fun readSensor(pin: Int) {
+        if (isRemote()) ble.getRemotePin(_controlTarget.value, pin)
+        else ble.getPin(pin)
+    }
 
     // ─── Sensor polling ──────────────────────────────────────
-    fun pollSensors() = ble.pollSensors()
+    fun pollSensors() {
+        if (isRemote()) ble.pollRemote(_controlTarget.value)
+        else ble.pollSensors()
+    }
     fun pollRemote(targetId: String) = ble.pollRemote(targetId)
 
     // ─── Timers ──────────────────────────────────────────────
@@ -321,6 +363,23 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
                     // Check if this is an SDATA response from a remote POLL
                     if (text.startsWith("SDATA,")) {
                         parseSensorData(text)
+                        return
+                    }
+
+                    // Remote PINS response: PINS,R:2,3,4|S:33,34
+                    if (text.startsWith("PINS,")) {
+                        parseRemotePins(from, text)
+                        return
+                    }
+
+                    // Remote CMD response: CMD,RSP,<pin>,<value>
+                    if (text.startsWith("CMD,RSP,")) {
+                        val rspParts = text.split(",")
+                        if (rspParts.size >= 4) {
+                            val pin = rspParts[2].toIntOrNull() ?: return
+                            val value = rspParts[3].toIntOrNull() ?: return
+                            updatePinState(pin, value)
+                        }
                         return
                     }
 
@@ -714,6 +773,25 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
                 sensors[sIdx] = sensors[sIdx].copy(value = value)
                 _sensors.value = sensors
             }
+        }
+    }
+
+    private fun parseRemotePins(nodeId: String, text: String) {
+        val data = text.substring(5) // strip "PINS,"
+        val relays = mutableListOf<Int>()
+        val sensors = mutableListOf<Int>()
+        for (part in data.split("|")) {
+            if (part.startsWith("R:")) {
+                relays.addAll(part.substring(2).split(",").mapNotNull { it.trim().toIntOrNull() })
+            } else if (part.startsWith("S:")) {
+                sensors.addAll(part.substring(2).split(",").mapNotNull { it.trim().toIntOrNull() })
+            }
+        }
+        _remotePinConfigs.value = _remotePinConfigs.value + (nodeId to Pair(relays, sensors))
+        // If this is the currently selected control target, update the relay/sensor lists
+        if (_controlTarget.value == nodeId) {
+            _relays.value = relays.map { RelayPin(it) }
+            _sensors.value = sensors.map { SensorPin(it) }
         }
     }
 

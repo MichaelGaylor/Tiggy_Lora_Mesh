@@ -65,6 +65,50 @@ fun ControlScreen(viewModel: MeshViewModel) {
             }
         }
 
+        // ─── Node Selector ───────────────────────────────
+        item {
+            val controlTarget by viewModel.controlTarget.collectAsState()
+            var expanded by remember { mutableStateOf(false) }
+            val nodeOptions = listOf("Local") + nodes.map { it.id }
+            val displayTarget = if (controlTarget.isEmpty()) "Local" else controlTarget
+
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.CellTower, contentDescription = null, tint = MeshCyan,
+                         modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Control Node:", style = MaterialTheme.typography.bodyMedium)
+                    Spacer(Modifier.width(8.dp))
+                    Box {
+                        TextButton(onClick = { expanded = true }) {
+                            Text(displayTarget, color = MeshCyan)
+                            Icon(Icons.Default.ArrowDropDown, contentDescription = null, tint = MeshCyan)
+                        }
+                        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                            nodeOptions.forEach { option ->
+                                DropdownMenuItem(
+                                    text = { Text(option) },
+                                    onClick = {
+                                        viewModel.setControlTarget(if (option == "Local") "" else option)
+                                        expanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                    if (controlTarget.isNotEmpty()) {
+                        Spacer(Modifier.weight(1f))
+                        Text("via mesh", style = MaterialTheme.typography.bodySmall, color = MeshOrange)
+                    }
+                }
+            }
+        }
+
         // ─── Relay Header ─────────────────────────────────
         item {
             Row(
