@@ -548,7 +548,15 @@ class AutomationCanvas:
         return None
 
     def _find_port_at(self, x: float, y: float) -> Optional[tuple[str, str, str]]:
-        """Returns (block_id, port_name, "in"|"out") or None."""
+        """Returns (block_id, port_name, "in"|"out") or None.
+        When drawing a wire (from output), prioritise input ports so overlapping
+        blocks don't prevent connections."""
+        # If drawing a wire, check input ports first (we need to land on an input)
+        if self._drawing_wire:
+            for (bid, pname, direction), (px, py) in self._port_pos.items():
+                if direction == "in" and abs(x - px) <= PORT_R + 4 and abs(y - py) <= PORT_R + 4:
+                    return (bid, pname, direction)
+        # Then check all ports
         for (bid, pname, direction), (px, py) in self._port_pos.items():
             if abs(x - px) <= PORT_R + 3 and abs(y - py) <= PORT_R + 3:
                 return (bid, pname, direction)
@@ -790,8 +798,11 @@ class AutomationCanvas:
         if not self.current_rule:
             return
         # Place near center, offset by existing block count
-        cx = 80 + (len(self.current_rule.blocks) % 4) * 200
-        cy = 40 + (len(self.current_rule.blocks) // 4) * 140
+        # Place blocks in a grid with enough spacing to prevent overlap
+        # Block size is ~160x86, so 200x120 grid gives clear gaps
+        n = len(self.current_rule.blocks)
+        cx = 20 + (n % 3) * 220
+        cy = 20 + (n // 3) * 130
         block = self.current_rule.add_block(block_type, cx, cy)
         self._notify_change()
         self.redraw()
