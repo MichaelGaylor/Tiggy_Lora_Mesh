@@ -295,6 +295,7 @@ class GatewayGUIApp:
         self.engine = AutomationEngine(self.sensor_data, self._send_serial, self.topo_nodes)
 
         self.build_ui()
+        self._refresh_rule_list()  # Load saved rules into combo box
 
         self.refresh_ports()
         self.root.after(50, self.poll_events)
