@@ -790,8 +790,8 @@ class AutomationCanvas:
         if not self.current_rule:
             return
         # Place near center, offset by existing block count
-        cx = 80 + (len(self.current_rule.blocks) % 4) * 190
-        cy = 40 + (len(self.current_rule.blocks) // 4) * 110
+        cx = 80 + (len(self.current_rule.blocks) % 4) * 200
+        cy = 40 + (len(self.current_rule.blocks) // 4) * 140
         block = self.current_rule.add_block(block_type, cx, cy)
         self._notify_change()
         self.redraw()
