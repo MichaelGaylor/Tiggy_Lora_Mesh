@@ -82,12 +82,16 @@ class GUIGatewayServer:
             self._emit("log", text=f"Serial opened: {self.serial_port} @ {self.baud}", color=COLORS["good"])
             time.sleep(2)
             self.serial_conn.write(b"GATEWAY ON\n")
-            time.sleep(0.3)
+            time.sleep(0.5)
             self.serial_conn.write(b"STATUS\n")    # Get node ID for Logic Builder
-            time.sleep(0.3)
+            time.sleep(0.5)
             self.serial_conn.write(b"CMD,LIST\n")  # Query pin config for Logic Builder
-            time.sleep(0.3)
-            while self.serial_conn.in_waiting:
+            time.sleep(0.5)
+            # Read all responses (STATUS multi-line + PINS)
+            for _ in range(20):
+                if not self.serial_conn.in_waiting:
+                    time.sleep(0.1)
+                    continue
                 line = self.serial_conn.readline().decode("ascii", errors="replace").strip()
                 if line:
                     self._emit("serial_line", text=line)
