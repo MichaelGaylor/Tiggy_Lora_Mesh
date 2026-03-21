@@ -679,15 +679,24 @@ class GatewayGUIApp:
         elif etype == "serial_line":
             text = event.get("text", "")
             # Extract node ID from STATUS response or standalone ID line
+            # Serial format: "ID:       6CB5" (with spaces)
+            # BLE format: "STATUS,ID:6CB5,BOARD:..." (no spaces)
             if text.startswith("STATUS,") or text.startswith("ID:"):
-                # Parse ID from STATUS,ID:xxxx,... or standalone ID: xxxx
-                for field in text.replace(",", " ").split():
-                    if field.startswith("ID:"):
-                        self.local_id = field[3:].strip()
-                        self.engine.local_node_id = self.local_id
-                        if self.local_id not in self.topo_nodes:
-                            self.topo_nodes[self.local_id] = TopoNode(self.local_id, is_local=True)
-                        break
+                node_id = ""
+                if text.startswith("STATUS,"):
+                    # BLE format: STATUS,ID:6CB5,...
+                    for field in text.split(","):
+                        if field.startswith("ID:"):
+                            node_id = field[3:].strip()
+                            break
+                elif text.startswith("ID:"):
+                    # Serial format: "ID:       6CB5" — take last word
+                    node_id = text.split()[-1].strip()
+                if node_id and len(node_id) == 4:
+                    self.local_id = node_id
+                    self.engine.local_node_id = self.local_id
+                    if self.local_id not in self.topo_nodes:
+                        self.topo_nodes[self.local_id] = TopoNode(self.local_id, is_local=True)
             # Parse pin config: PINS,R:2,3,4|S:33,34
             elif text.startswith("PINS,"):
                 self._parse_pins(text)
