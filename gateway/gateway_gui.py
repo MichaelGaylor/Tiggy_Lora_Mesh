@@ -83,6 +83,8 @@ class GUIGatewayServer:
             time.sleep(2)
             self.serial_conn.write(b"GATEWAY ON\n")
             time.sleep(0.3)
+            self.serial_conn.write(b"STATUS\n")    # Get node ID for Logic Builder
+            time.sleep(0.3)
             self.serial_conn.write(b"CMD,LIST\n")  # Query pin config for Logic Builder
             time.sleep(0.3)
             while self.serial_conn.in_waiting:
@@ -675,13 +677,16 @@ class GatewayGUIApp:
 
         elif etype == "serial_line":
             text = event.get("text", "")
-            # Try to extract node ID from status
-            if text.startswith("ID:"):
-                self.local_id = text.split()[-1].strip()
-                self.engine.local_node_id = self.local_id
-                # Ensure local node appears in Logic Builder node picker
-                if self.local_id not in self.topo_nodes:
-                    self.topo_nodes[self.local_id] = TopoNode(self.local_id, is_local=True)
+            # Extract node ID from STATUS response or standalone ID line
+            if text.startswith("STATUS,") or text.startswith("ID:"):
+                # Parse ID from STATUS,ID:xxxx,... or standalone ID: xxxx
+                for field in text.replace(",", " ").split():
+                    if field.startswith("ID:"):
+                        self.local_id = field[3:].strip()
+                        self.engine.local_node_id = self.local_id
+                        if self.local_id not in self.topo_nodes:
+                            self.topo_nodes[self.local_id] = TopoNode(self.local_id, is_local=True)
+                        break
             # Parse pin config: PINS,R:2,3,4|S:33,34
             elif text.startswith("PINS,"):
                 self._parse_pins(text)
@@ -693,6 +698,22 @@ class GatewayGUIApp:
             # Parse direct SDATA from serial (local POLL response)
             elif text.startswith("SDATA,"):
                 self._parse_sdata(text)
+            # Parse remote node responses that arrive wrapped in RX,<from>,<content>,<rssi>
+            elif text.startswith("RX,"):
+                # Extract content between from and trailing RSSI
+                parts = text.split(",", 2)
+                if len(parts) >= 3:
+                    content = parts[2]
+                    # Strip trailing RSSI (last field, negative int)
+                    last_comma = content.rfind(",")
+                    if last_comma > 0:
+                        maybe_rssi = content[last_comma + 1:]
+                        if maybe_rssi.lstrip("-").isdigit():
+                            content = content[:last_comma]
+                    if content.startswith("SDATA,"):
+                        self._parse_sdata(content)
+                    elif content.startswith("PINS,"):
+                        self._parse_pins(content)
 
         elif etype == "log":
             pass  # Could add a log panel later
