@@ -23,6 +23,8 @@
 #include <BLESecurity.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
+#include <BLEScan.h>
+#include <BLEAdvertisedDevice.h>
 #include "Pins.h"
 #include "MeshCore.h"
 #include <TinyGPSPlus.h>
@@ -250,6 +252,43 @@ void setupGPS();      // defined after forward declarations
 void readGPS();
 void broadcastGPS();
 
+// ─── iBeacon Scanner ─────────────────────────────────────────
+#define MAX_BEACON_RULES 8
+#define EEPROM_BEACON_ADDR 512  // After magic byte at 508
+#define BEACON_SCAN_DURATION 1  // seconds per scan
+#define BEACON_SCAN_INTERVAL 5000  // ms between scans
+
+struct BeaconRule {
+    bool active;
+    char uuid[37];       // iBeacon UUID (empty = match by MAC only)
+    char mac[18];        // MAC address (empty = match by UUID only)
+    char name[16];       // Human label
+    int8_t rssiThresh;   // Min RSSI to trigger (e.g. -70)
+    uint8_t actionType;  // 0=relay, 1=message
+    uint8_t relayPin;    // For relay action
+    uint8_t relayState;  // 0=OFF, 1=ON
+    char message[32];    // For message action
+    uint16_t cooldownMs; // Min time between triggers
+    uint16_t revertMs;   // 0=one-shot, >0=auto-revert after tag gone for X ms
+    // Runtime only (not saved)
+    unsigned long lastTrigger;
+    unsigned long lastSeen;
+    bool triggered;
+};
+
+BeaconRule beaconRules[MAX_BEACON_RULES];
+BLEScan* pBLEScan = nullptr;
+static volatile bool beaconScanDone = false;
+static bool beaconScanActive = false;  // Track scan state (BLEScan has no isScanning)
+bool beaconScanEnabled = true;  // Can be disabled to save power
+
+void checkBeacons();  // Forward declaration
+
+static void onScanComplete(BLEScanResults results) {
+    beaconScanDone = true;
+    beaconScanActive = false;
+}
+
 // ─── Relay Timers (ephemeral, not persisted) ────────────────
 #define MAX_TIMERS 4
 struct RelayTimer {
@@ -421,6 +460,121 @@ void broadcastGPS() {
     debugPrint("GPS: broadcast " + pos);
     bleSend("GPS," + String(gps.location.lat(), 6) + "," + String(gps.location.lng(), 6));
 }
+
+// ═══════════════════════════════════════════════════════════════
+// SECTION: iBeacon Scanner
+// ═══════════════════════════════════════════════════════════════
+
+void executeBeaconAction(BeaconRule& r) {
+    if (r.actionType == 0) {
+        // Relay action
+        digitalWrite(r.relayPin, r.relayState ? HIGH : LOW);
+        r.triggered = true;
+        debugPrint("BEACON: " + String(r.name) + " -> pin " + String(r.relayPin) + "=" + String(r.relayState));
+        bleSend("BEACON,TRIGGERED," + String(r.name) + ",RELAY," + String(r.relayPin));
+    } else {
+        // Broadcast message over mesh
+        String mid = mesh.generateMsgID();
+        String hex = mesh.encryptMsg("MSG," + String(r.message));
+        String payload = String(mesh.localID) + ",FFFF," + mid + "," +
+                         String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+        mesh.transmitPacket(0xFFFF, payload);
+        r.triggered = true;
+        debugPrint("BEACON: " + String(r.name) + " -> broadcast: " + String(r.message));
+        bleSend("BEACON,TRIGGERED," + String(r.name) + ",MSG," + String(r.message));
+    }
+}
+
+void matchBeacon(BLEAdvertisedDevice& dev) {
+    String mac = String(dev.getAddress().toString().c_str());
+    String uuid = "";
+
+    // Extract iBeacon UUID from manufacturer data
+    if (dev.haveManufacturerData()) {
+        std::string mData = dev.getManufacturerData();
+        if (mData.length() >= 25) {
+            char buf[37];
+            sprintf(buf, "%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X",
+                    (uint8_t)mData[4],  (uint8_t)mData[5],  (uint8_t)mData[6],  (uint8_t)mData[7],
+                    (uint8_t)mData[8],  (uint8_t)mData[9],
+                    (uint8_t)mData[10], (uint8_t)mData[11],
+                    (uint8_t)mData[12], (uint8_t)mData[13],
+                    (uint8_t)mData[14], (uint8_t)mData[15], (uint8_t)mData[16], (uint8_t)mData[17],
+                    (uint8_t)mData[18], (uint8_t)mData[19]);
+            uuid = String(buf);
+        }
+    }
+
+    int rssi = dev.getRSSI();
+    unsigned long now = millis();
+
+    for (int i = 0; i < MAX_BEACON_RULES; i++) {
+        BeaconRule& r = beaconRules[i];
+        if (!r.active) continue;
+        if (rssi < r.rssiThresh) continue;
+
+        bool match = false;
+        if (r.uuid[0] && uuid.equalsIgnoreCase(String(r.uuid))) match = true;
+        if (r.mac[0] && mac.equalsIgnoreCase(String(r.mac))) match = true;
+        if (!match) continue;
+
+        r.lastSeen = now;
+
+        // Cooldown check — don't re-trigger too fast
+        if (r.triggered && r.revertMs > 0) continue;  // Auto-revert mode: stay active
+        if (now - r.lastTrigger < r.cooldownMs) continue;
+
+        r.lastTrigger = now;
+        executeBeaconAction(r);
+    }
+}
+
+void checkBeaconReverts() {
+    unsigned long now = millis();
+    for (int i = 0; i < MAX_BEACON_RULES; i++) {
+        BeaconRule& r = beaconRules[i];
+        if (!r.active || !r.triggered || r.revertMs == 0) continue;
+        if (r.actionType != 0) continue;  // Only relay actions revert
+
+        // Tag gone for longer than revertMs → revert relay
+        if (now - r.lastSeen > r.revertMs) {
+            digitalWrite(r.relayPin, r.relayState ? LOW : HIGH);  // Opposite state
+            r.triggered = false;
+            debugPrint("BEACON: " + String(r.name) + " -> REVERTED pin " + String(r.relayPin));
+            bleSend("BEACON,REVERTED," + String(r.name));
+        }
+    }
+}
+
+void checkBeacons() {
+    if (solarMode || !beaconScanEnabled || !pBLEScan) return;
+
+    static unsigned long lastScanStart = 0;
+    unsigned long now = millis();
+
+    // Start a new scan periodically
+    if (!beaconScanActive && now - lastScanStart > BEACON_SCAN_INTERVAL) {
+        beaconScanActive = true;
+        pBLEScan->start(BEACON_SCAN_DURATION, onScanComplete, false);
+        lastScanStart = now;
+    }
+
+    // Process completed scan results
+    if (beaconScanDone) {
+        beaconScanDone = false;
+        BLEScanResults results = pBLEScan->getResults();
+        for (int i = 0; i < results.getCount(); i++) {
+            BLEAdvertisedDevice dev = results.getDevice(i);
+            matchBeacon(dev);
+        }
+        pBLEScan->clearResults();
+    }
+
+    // Check for auto-reverts
+    checkBeaconReverts();
+}
+
+String processBeaconCommand(const String& args);  // Forward declaration
 
 // ═══════════════════════════════════════════════════════════════
 // SECTION: Radio bridge — connects MeshCore to physical radio
@@ -1418,6 +1572,13 @@ void setupBLE() {
     adv->setMinPreferred(0x06);
     BLEDevice::startAdvertising();
     debugPrint("BLE ready: " + bleName + " (PIN protected)");
+
+    // iBeacon scanner — runs alongside GATT server
+    pBLEScan = BLEDevice::getScan();
+    pBLEScan->setActiveScan(false);   // Passive scan = less interference with GATT
+    pBLEScan->setInterval(100);       // 100ms scan interval
+    pBLEScan->setWindow(50);          // 50ms scan window (50% duty)
+    debugPrint("BLE beacon scanner ready");
 }
 
 void bleSend(const String& line) {
@@ -1650,6 +1811,10 @@ void processBleCommand(const String& line) {
                 }
             }
         }
+    }
+    else if (line.startsWith("BEACON,")) {
+        String result = processBeaconCommand(line.substring(7));
+        bleSend(result);
     }
     else if (line == "NODES") {
         // Send full list of known nodes with routing info
@@ -1986,7 +2151,8 @@ void handleSerialConfig() {
     // Route BLE-format comma commands received over serial (gateway GUI uses this format)
     else if (line.startsWith("POLL") || line.startsWith("TIMER,") ||
              line.startsWith("CMD,") || line.startsWith("MSG,") ||
-             line.startsWith("SETPOINT,") || line.startsWith("AUTOPOLL,")) {
+             line.startsWith("SETPOINT,") || line.startsWith("AUTOPOLL,") ||
+             line.startsWith("BEACON,")) {
         processBleCommand(line);
     }
     else Serial.println("Commands: ID xxxx | KEY xxx... | RELAY 2,4,12 | SENSOR 34,36 | GPS <tx>,<rx> | GPS OFF | STATUS | SAVE | RESET | GATEWAY ON/OFF | AUTOPOLL <id> <sec> | PINMODE <pin> PULSE|AUTO"
@@ -1994,6 +2160,201 @@ void handleSerialConfig() {
         " | SOLAR ON/OFF"
 #endif
     );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SECTION: Beacon Commands & EEPROM
+// ═══════════════════════════════════════════════════════════════
+
+void saveBeaconRules() {
+    for (int i = 0; i < MAX_BEACON_RULES; i++) {
+        int addr = EEPROM_BEACON_ADDR + i * 128;
+        EEPROM.write(addr, beaconRules[i].active ? 1 : 0);
+        EEPROM.put(addr + 1, beaconRules[i].uuid);
+        EEPROM.put(addr + 38, beaconRules[i].mac);
+        EEPROM.put(addr + 56, beaconRules[i].name);
+        EEPROM.write(addr + 72, (uint8_t)beaconRules[i].rssiThresh);
+        EEPROM.write(addr + 73, beaconRules[i].actionType);
+        EEPROM.write(addr + 74, beaconRules[i].relayPin);
+        EEPROM.write(addr + 75, beaconRules[i].relayState);
+        EEPROM.put(addr + 76, beaconRules[i].message);
+        EEPROM.put(addr + 108, beaconRules[i].cooldownMs);
+        EEPROM.put(addr + 110, beaconRules[i].revertMs);
+    }
+    EEPROM.commit();
+}
+
+void loadBeaconRules() {
+    for (int i = 0; i < MAX_BEACON_RULES; i++) {
+        int addr = EEPROM_BEACON_ADDR + i * 128;
+        uint8_t active = EEPROM.read(addr);
+        beaconRules[i].active = (active == 1);
+        if (!beaconRules[i].active) continue;
+        EEPROM.get(addr + 1, beaconRules[i].uuid);
+        EEPROM.get(addr + 38, beaconRules[i].mac);
+        EEPROM.get(addr + 56, beaconRules[i].name);
+        beaconRules[i].rssiThresh = (int8_t)EEPROM.read(addr + 72);
+        beaconRules[i].actionType = EEPROM.read(addr + 73);
+        beaconRules[i].relayPin = EEPROM.read(addr + 74);
+        beaconRules[i].relayState = EEPROM.read(addr + 75);
+        EEPROM.get(addr + 76, beaconRules[i].message);
+        EEPROM.get(addr + 108, beaconRules[i].cooldownMs);
+        EEPROM.get(addr + 110, beaconRules[i].revertMs);
+        beaconRules[i].lastTrigger = 0;
+        beaconRules[i].lastSeen = 0;
+        beaconRules[i].triggered = false;
+    }
+}
+
+String processBeaconCommand(const String& args) {
+    if (args == "LIST") {
+        String resp = "BEACONS";
+        int count = 0;
+        for (int i = 0; i < MAX_BEACON_RULES; i++) {
+            if (!beaconRules[i].active) continue;
+            count++;
+            resp += "," + String(i) + ":" + String(beaconRules[i].name) + ":";
+            if (beaconRules[i].uuid[0]) resp += String(beaconRules[i].uuid);
+            else resp += String(beaconRules[i].mac);
+            resp += ":" + String(beaconRules[i].rssiThresh) + "dBm";
+            if (beaconRules[i].actionType == 0)
+                resp += ":RELAY" + String(beaconRules[i].relayPin);
+            else
+                resp += ":MSG";
+            if (beaconRules[i].revertMs > 0)
+                resp += ":REVERT" + String(beaconRules[i].revertMs) + "ms";
+        }
+        if (count == 0) resp += ",NONE";
+        return resp;
+    }
+
+    if (args == "CLEAR") {
+        for (int i = 0; i < MAX_BEACON_RULES; i++) beaconRules[i].active = false;
+        saveBeaconRules();
+        return "OK,BEACON,CLEAR";
+    }
+
+    if (args == "SCAN") {
+        // One-off scan — report all visible beacons
+        if (!pBLEScan) return "ERR,BEACON,NO_SCANNER";
+        BLEScanResults results = pBLEScan->start(2, false);
+        String resp = "BEACONSCAN," + String(results.getCount());
+        for (int i = 0; i < results.getCount(); i++) {
+            BLEAdvertisedDevice dev = results.getDevice(i);
+            String mac = String(dev.getAddress().toString().c_str());
+            String devName = dev.haveName() ? String(dev.getName().c_str()) : "";
+            int rssi = dev.getRSSI();
+            String uuid = "";
+            if (dev.haveManufacturerData()) {
+                std::string mData = dev.getManufacturerData();
+                if (mData.length() >= 25) {
+                    char buf[37];
+                    sprintf(buf, "%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X",
+                        (uint8_t)mData[4],  (uint8_t)mData[5],  (uint8_t)mData[6],  (uint8_t)mData[7],
+                        (uint8_t)mData[8],  (uint8_t)mData[9],  (uint8_t)mData[10], (uint8_t)mData[11],
+                        (uint8_t)mData[12], (uint8_t)mData[13], (uint8_t)mData[14], (uint8_t)mData[15],
+                        (uint8_t)mData[16], (uint8_t)mData[17], (uint8_t)mData[18], (uint8_t)mData[19]);
+                    uuid = String(buf);
+                }
+            }
+            resp += "," + mac + ":" + String(rssi) + "dBm";
+            if (uuid.length()) resp += ":" + uuid;
+            if (devName.length()) resp += ":" + devName;
+        }
+        pBLEScan->clearResults();
+        return resp;
+    }
+
+    if (args.startsWith("DELETE,")) {
+        int idx = args.substring(7).toInt();
+        if (idx >= 0 && idx < MAX_BEACON_RULES) {
+            beaconRules[idx].active = false;
+            saveBeaconRules();
+            return "OK,BEACON,DELETE," + String(idx);
+        }
+        return "ERR,BEACON,BADINDEX";
+    }
+
+    if (args.startsWith("ADD,")) {
+        // BEACON,ADD,<uuid_or_mac>,<name>,<rssi>,RELAY,<pin>,<state>[,<cooldown>][,REVERT,<ms>]
+        // BEACON,ADD,<uuid_or_mac>,<name>,<rssi>,MSG,<text>[,<cooldown>]
+        int slot = -1;
+        for (int i = 0; i < MAX_BEACON_RULES; i++) {
+            if (!beaconRules[i].active) { slot = i; break; }
+        }
+        if (slot < 0) return "ERR,BEACON,FULL";
+
+        String rest = args.substring(4);
+        int c1 = rest.indexOf(',');
+        if (c1 < 0) return "ERR,BEACON,FORMAT";
+        int c2 = rest.indexOf(',', c1 + 1);
+        if (c2 < 0) return "ERR,BEACON,FORMAT";
+        int c3 = rest.indexOf(',', c2 + 1);
+        if (c3 < 0) return "ERR,BEACON,FORMAT";
+        int c4 = rest.indexOf(',', c3 + 1);
+        if (c4 < 0) return "ERR,BEACON,FORMAT";
+
+        String idStr = rest.substring(0, c1);
+        String nameStr = rest.substring(c1 + 1, c2);
+        int rssi = rest.substring(c2 + 1, c3).toInt();
+        String actionStr = rest.substring(c3 + 1, c4);
+        String actionArgs = rest.substring(c4 + 1);
+
+        BeaconRule& r = beaconRules[slot];
+        memset(&r, 0, sizeof(BeaconRule));
+        r.active = true;
+        r.rssiThresh = rssi;
+        r.cooldownMs = 10000;  // Default 10s cooldown
+        r.revertMs = 0;        // Default: one-shot
+
+        // Determine if idStr is UUID (has dashes) or MAC (has colons)
+        if (idStr.indexOf('-') >= 0) {
+            strncpy(r.uuid, idStr.c_str(), 36); r.uuid[36] = '\0';
+        } else {
+            strncpy(r.mac, idStr.c_str(), 17); r.mac[17] = '\0';
+        }
+        strncpy(r.name, nameStr.c_str(), 15); r.name[15] = '\0';
+
+        if (actionStr == "RELAY") {
+            r.actionType = 0;
+            int c5 = actionArgs.indexOf(',');
+            if (c5 < 0) return "ERR,BEACON,FORMAT";
+            r.relayPin = actionArgs.substring(0, c5).toInt();
+            String remainder = actionArgs.substring(c5 + 1);
+            // Parse state and optional cooldown/revert
+            int c6 = remainder.indexOf(',');
+            if (c6 < 0) {
+                r.relayState = remainder.toInt();
+            } else {
+                r.relayState = remainder.substring(0, c6).toInt();
+                String extra = remainder.substring(c6 + 1);
+                // Check for REVERT
+                int revertIdx = extra.indexOf("REVERT,");
+                if (revertIdx >= 0) {
+                    r.revertMs = extra.substring(revertIdx + 7).toInt();
+                    if (revertIdx > 0) r.cooldownMs = extra.substring(0, revertIdx - 1).toInt();
+                } else {
+                    r.cooldownMs = extra.toInt();
+                }
+            }
+        } else if (actionStr == "MSG") {
+            r.actionType = 1;
+            int c5 = actionArgs.indexOf(',');
+            if (c5 < 0) {
+                strncpy(r.message, actionArgs.c_str(), 31); r.message[31] = '\0';
+            } else {
+                strncpy(r.message, actionArgs.substring(0, c5).c_str(), 31); r.message[31] = '\0';
+                r.cooldownMs = actionArgs.substring(c5 + 1).toInt();
+            }
+        } else {
+            return "ERR,BEACON,BADACTION";
+        }
+
+        saveBeaconRules();
+        return "OK,BEACON,ADD," + String(slot) + "," + nameStr;
+    }
+
+    return "ERR,BEACON,UNKNOWN";
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -2182,6 +2543,7 @@ void setup() {
 
     EEPROM.begin(EEPROM_SIZE);
     loadConfig();
+    loadBeaconRules();
 
     // Wire up MeshCore callbacks
     mesh.onTransmitRaw = radioTransmit;
@@ -2450,7 +2812,10 @@ void loop() {
     // 10. Auto-poll periodic sensor reporting
     executeAutoPoll();
 
-    // 10. Button → manual heartbeat
+    // 11. iBeacon scanner
+    checkBeacons();
+
+    // 12. Button → manual heartbeat
 #if defined(BOARD_BUTTON) && BOARD_BUTTON >= 0
     static bool lastBtn = true;
     static unsigned long btnPressStart = 0;
