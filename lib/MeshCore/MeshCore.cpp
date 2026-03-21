@@ -439,10 +439,15 @@ void MeshCore::processPacket(const MeshPacket& pkt) {
                 onAck(ackFrom, ackMid);
             }
         } else if (pkt.dest != myAddr && pkt.dest != 0xFFFF && pkt.ttl > 1) {
-            // Forward ACK — uses forwarding budget, never blocked by local traffic
-            String payload = pkt.payload;
-            forwardPacket(pkt.dest, payload);
-            packetsForwarded++;
+            // Forward ACK — dedup to prevent infinite forwarding loops
+            // ACK payload "ACK,from,mid" is unique per original message
+            String ackKey = pkt.payload;
+            if (!isDuplicate(ackKey)) {
+                markSeen(ackKey);
+                String payload = pkt.payload;
+                forwardPacket(pkt.dest, payload);
+                packetsForwarded++;
+            }
         }
         return;
     }
