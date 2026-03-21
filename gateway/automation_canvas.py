@@ -22,7 +22,7 @@ from automation_engine import (
 BLOCK_W = 160
 BLOCK_H_BASE = 64
 PORT_R = 6
-PORT_SPACING = 22
+PORT_SPACING = 90  # Enough vertical gap that two single-port blocks can sit beside each input
 GRID = 10
 
 CATEGORY_COLORS = {
@@ -802,7 +802,7 @@ class AutomationCanvas:
         # Block size is ~160x86, so 200x120 grid gives clear gaps
         n = len(self.current_rule.blocks)
         cx = 20 + (n % 3) * 220
-        cy = 20 + (n // 3) * 130
+        cy = 20 + (n // 3) * 180
         block = self.current_rule.add_block(block_type, cx, cy)
         self._notify_change()
         self.redraw()
