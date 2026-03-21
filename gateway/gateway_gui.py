@@ -651,8 +651,13 @@ class GatewayGUIApp:
                     msg_id = parsed.get("msg_id", "")
                     if len(aes_key) == 16 and encrypted:
                         plain = decrypt_message(encrypted, msg_id, aes_key)
-                        if plain and plain.startswith("SDATA,"):
-                            self._parse_sdata(plain)
+                        if plain:
+                            if plain.startswith("SDATA,"):
+                                self._parse_sdata(plain)
+                            elif plain.startswith("PINS,"):
+                                self._parse_pins(plain)
+                            elif plain.startswith("CMD,RSP,"):
+                                pass  # Relay state updates (future)
 
         elif etype == "stats":
             for key in ("radio_rx", "radio_tx", "peer_rx", "peer_tx"):
@@ -673,9 +678,18 @@ class GatewayGUIApp:
             # Try to extract node ID from status
             if text.startswith("ID:"):
                 self.local_id = text.split()[-1].strip()
+                self.engine.local_node_id = self.local_id
+                # Ensure local node appears in Logic Builder node picker
+                if self.local_id not in self.topo_nodes:
+                    self.topo_nodes[self.local_id] = TopoNode(self.local_id, is_local=True)
             # Parse pin config: PINS,R:2,3,4|S:33,34
             elif text.startswith("PINS,"):
                 self._parse_pins(text)
+            # Parse beacon events
+            elif text.startswith("BEACON,TRIGGERED,"):
+                self._parse_beacon_event(text, True)
+            elif text.startswith("BEACON,REVERTED,"):
+                self._parse_beacon_event(text, False)
             # Parse direct SDATA from serial (local POLL response)
             elif text.startswith("SDATA,"):
                 self._parse_sdata(text)
@@ -1138,6 +1152,23 @@ class GatewayGUIApp:
             self.sensor_data[key].append((now, val))
             if len(self.sensor_data[key]) > self.max_sensor_history:
                 self.sensor_data[key] = self.sensor_data[key][-self.max_sensor_history:]
+
+    def _parse_beacon_event(self, text: str, triggered: bool):
+        """Parse BEACON,TRIGGERED,<name>,... or BEACON,REVERTED,<name> from serial."""
+        parts = text.split(",")
+        if len(parts) >= 3:
+            name = parts[2]
+            if triggered:
+                self.engine.beacon_data[name] = {
+                    "timestamp": time.time(),
+                    "triggered": True,
+                    "type": parts[3] if len(parts) > 3 else "",
+                    "arg": parts[4] if len(parts) > 4 else "",
+                }
+            else:
+                if name in self.engine.beacon_data:
+                    self.engine.beacon_data[name]["triggered"] = False
+                    self.engine.beacon_data[name]["timestamp"] = time.time()
 
     def _parse_pins(self, text: str):
         """Parse PINS,R:2,3,4|S:33,34 response from node."""

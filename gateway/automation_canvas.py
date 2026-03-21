@@ -35,7 +35,7 @@ CATEGORY_COLORS = {
 PORT_COLORS = {"number": "#00E5FF", "bool": "#FFE000", "string": "#FFFFFF"}
 
 CATEGORY_BLOCKS = {
-    "Input": [BlockType.SENSOR_READ, BlockType.CONSTANT],
+    "Input": [BlockType.SENSOR_READ, BlockType.BEACON_DETECT, BlockType.CONSTANT],
     "Transform": [BlockType.SCALE, BlockType.MOVING_AVG, BlockType.DELTA_RATE],
     "Condition": [BlockType.COMPARE, BlockType.AND_GATE, BlockType.OR_GATE,
                   BlockType.NOT_GATE, BlockType.DEBOUNCE, BlockType.LATCH],
@@ -115,6 +115,58 @@ def show_block_config(parent, block: Block, discovered_nodes: dict,
             add_field("Pin:", "pin", "0")
         add_field("Label:", "label", "")
 
+    elif bt == BlockType.BEACON_DETECT:
+        add_field("Beacon ID:", "beacon_id", "")
+        add_field("Name:", "name", "")
+        add_field("RSSI Thresh:", "rssi_thresh", "-70")
+
+        # Scan button — sends BEACON,SCAN and shows results
+        scan_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        scan_frame.grid(row=row, column=0, columnspan=2, pady=4, padx=10, sticky="ew")
+        scan_result = ctk.CTkTextbox(scan_frame, height=80, font=("Consolas", 9),
+                                      fg_color=COLORS["bg"], text_color=COLORS["text"])
+        scan_result.pack(fill="x", pady=(0, 4))
+
+        def do_scan():
+            scan_result.delete("1.0", "end")
+            scan_result.insert("end", "Scanning... (2 seconds)\n")
+            # Get the gateway app reference to send serial command
+            try:
+                top = parent
+                while top and not hasattr(top, 'gateway'):
+                    top = top.master
+                if top and hasattr(top, 'gateway') and top.gateway and top.gateway.serial_conn:
+                    top.gateway.serial_conn.write(b"BEACON,SCAN\n")
+                    import time as _time
+                    _time.sleep(2.5)
+                    response = b""
+                    while top.gateway.serial_conn.in_waiting:
+                        response += top.gateway.serial_conn.read(top.gateway.serial_conn.in_waiting)
+                    lines = response.decode("ascii", errors="replace").strip().split("\n")
+                    scan_result.delete("1.0", "end")
+                    found = False
+                    for line in lines:
+                        if line.startswith("BEACONSCAN,"):
+                            parts = line.split(",")
+                            count = int(parts[1]) if len(parts) > 1 else 0
+                            if count == 0:
+                                scan_result.insert("end", "No beacons found\n")
+                            for entry in parts[2:]:
+                                scan_result.insert("end", entry + "\n")
+                            found = True
+                    if not found:
+                        scan_result.insert("end", "No scan response received\n")
+                else:
+                    scan_result.insert("end", "Not connected to node\n")
+            except Exception as e:
+                scan_result.insert("end", f"Error: {e}\n")
+
+        ctk.CTkButton(scan_frame, text="Scan for Beacons", width=140,
+                       font=("Consolas", 9), fg_color=COLORS["accent"],
+                       text_color="#000", command=do_scan).pack()
+        scan_result.insert("end", "Click Scan to find nearby beacons.\nCopy MAC or UUID into Beacon ID field.")
+        row += 1
+
     elif bt == BlockType.CONSTANT:
         add_field("Value:", "value", "0")
 
@@ -173,7 +225,7 @@ def show_block_config(parent, block: Block, discovered_nodes: dict,
         for key, widget in entries.items():
             val = widget.get() if hasattr(widget, "get") else ""
             # Type conversion
-            if key in ("pin", "duration_ms", "window"):
+            if key in ("pin", "duration_ms", "window", "rssi_thresh"):
                 try:
                     val = int(val)
                 except ValueError:
@@ -339,7 +391,7 @@ class AutomationCanvas:
         ins = bdef.get("inputs", [])
         outs = bdef.get("outputs", [])
         n_ports = max(len(ins), len(outs), 1)
-        h = BLOCK_H_BASE + max(0, n_ports - 2) * PORT_SPACING
+        h = BLOCK_H_BASE + max(0, n_ports - 1) * PORT_SPACING
 
         x, y = block.x, block.y
         items = []
@@ -452,6 +504,12 @@ class AutomationCanvas:
             pin = cfg.get("pin", "?")
             lbl = cfg.get("label", "")
             return f"{nid}:pin{pin}" + (f' "{lbl}"' if lbl else "")
+        if bt == BlockType.BEACON_DETECT:
+            bid = cfg.get("beacon_id", "?")
+            name = cfg.get("name", "")
+            thresh = cfg.get("rssi_thresh", -70)
+            label = name if name else (bid[:12] + "..." if len(bid) > 12 else bid)
+            return f"{label} {thresh}dBm"
         if bt == BlockType.CONSTANT:
             return str(cfg.get("value", 0))
         if bt == BlockType.SCALE:
@@ -484,7 +542,7 @@ class AutomationCanvas:
         for block in reversed(self.current_rule.blocks):
             bdef = BLOCK_DEFS.get(block.block_type, {})
             n_ports = max(len(bdef.get("inputs", [])), len(bdef.get("outputs", [])), 1)
-            h = BLOCK_H_BASE + max(0, n_ports - 2) * PORT_SPACING
+            h = BLOCK_H_BASE + max(0, n_ports - 1) * PORT_SPACING
             if block.x <= x <= block.x + BLOCK_W and block.y <= y <= block.y + h:
                 return block.id
         return None

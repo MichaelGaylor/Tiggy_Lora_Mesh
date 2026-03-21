@@ -21,6 +21,7 @@ from typing import Any, Callable, Optional
 class BlockType(str, Enum):
     # Inputs
     SENSOR_READ = "sensor_read"
+    BEACON_DETECT = "beacon_detect"
     CONSTANT = "constant"
     # Transforms
     SCALE = "scale"
@@ -48,6 +49,13 @@ BLOCK_DEFS = {
         "inputs": [],
         "outputs": [("value", "number")],
         "defaults": {"node_id": "", "pin": 0, "label": ""},
+    },
+    BlockType.BEACON_DETECT: {
+        "category": "input",
+        "label": "Beacon Detect",
+        "inputs": [],
+        "outputs": [("detected", "bool"), ("rssi", "number")],
+        "defaults": {"beacon_id": "", "name": "", "rssi_thresh": -70},
     },
     BlockType.CONSTANT: {
         "category": "input",
@@ -289,6 +297,8 @@ class AutomationEngine:
         self.sensor_data = sensor_data
         self.send_serial = send_serial
         self.discovered_nodes = discovered_nodes
+        self.local_node_id = ""  # Set by gateway GUI after connecting
+        self.beacon_data: dict[str, dict] = {}  # beacon_name → {timestamp, rssi, triggered}
         self.rules: list[Rule] = []
         self.rules_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rules.json")
 
@@ -460,6 +470,24 @@ class AutomationEngine:
             block.error = "No data"
             block.status = "stale"
             return {"value": None}
+
+        if bt == BlockType.BEACON_DETECT:
+            beacon_id = cfg.get("beacon_id", "")
+            rssi_thresh = cfg.get("rssi_thresh", -70)
+            if not beacon_id:
+                block.error = "No beacon configured"
+                return {"detected": False, "rssi": 0}
+            entry = self.beacon_data.get(beacon_id, {})
+            ts = entry.get("timestamp", 0)
+            triggered = entry.get("triggered", False)
+            age = now - ts if ts else 999
+            if triggered and age < 15:  # Seen within last 15 seconds
+                block.error = ""
+                block.status = "triggered"
+                return {"detected": True, "rssi": entry.get("rssi", 0)}
+            block.error = "Not seen" if age > 15 else ""
+            block.status = "active"
+            return {"detected": False, "rssi": 0}
 
         if bt == BlockType.CONSTANT:
             block.status = "active"
@@ -692,7 +720,10 @@ class AutomationEngine:
 
             last_poll = self._last_poll_time.get(node_id, 0)
             if (freshest == 0 or now - freshest > 60) and (now - last_poll > self.POLL_MIN_INTERVAL):
-                self.send_serial(f"POLL,{node_id}")
+                if node_id == self.local_node_id:
+                    self.send_serial("POLL")  # Local node — direct serial response
+                else:
+                    self.send_serial(f"POLL,{node_id}")  # Remote — via mesh
                 self._last_poll_time[node_id] = now
 
     def _log(self, rule_name: str, message: str):
