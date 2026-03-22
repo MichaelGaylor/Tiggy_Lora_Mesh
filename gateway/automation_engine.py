@@ -721,10 +721,17 @@ class AutomationEngine:
             last_poll = self._last_poll_time.get(node_id, 0)
             if (freshest == 0 or now - freshest > 60) and (now - last_poll > self.POLL_MIN_INTERVAL):
                 if node_id == self.local_node_id:
-                    self.send_serial("POLL")  # Local node — direct serial response
+                    print(f"[ENGINE] Sending POLL for LOCAL node {node_id}")
+                    self.send_serial("POLL")
                 else:
-                    self.send_serial(f"POLL,{node_id}")  # Remote — via mesh
+                    print(f"[ENGINE] Sending POLL,{node_id} for REMOTE node")
+                    self.send_serial(f"POLL,{node_id}")
                 self._last_poll_time[node_id] = now
+            elif not needed:
+                print(f"[ENGINE] No nodes need polling (needed={needed})")
+
+        if not needed:
+            print(f"[ENGINE] No sensor blocks with node_id found. local_node_id={self.local_node_id}")
 
     def _log(self, rule_name: str, message: str):
         self.event_log.append((time.time(), rule_name, message))

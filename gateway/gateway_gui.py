@@ -725,6 +725,7 @@ class GatewayGUIApp:
                 self._parse_beacon_event(text, False)
             # Parse direct SDATA from serial (local POLL response)
             elif text.startswith("SDATA,"):
+                print(f"[SDATA] Received: {text[:60]}")
                 self._parse_sdata(text)
             # Parse remote node responses that arrive wrapped in RX,<from>,<content>,<rssi>
             elif text.startswith("RX,"):
