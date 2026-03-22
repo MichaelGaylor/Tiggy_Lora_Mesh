@@ -55,6 +55,7 @@ STATUS_COLORS = {
 def show_block_config(parent, block: Block, discovered_nodes: dict,
                       relay_pins: list[str] = None, sensor_pins: list[str] = None):
     """Show a configuration dialog for a block. Returns True if changed."""
+    print(f"[DEBUG] show_block_config: relay_pins={relay_pins}, sensor_pins={sensor_pins}")
     bt = block.block_type
     cfg = block.config
     dialog = ctk.CTkToplevel(parent)
@@ -768,11 +769,14 @@ class AutomationCanvas:
             block = self.current_rule.get_block(block_id)
             if block:
                 # Look up pins for the node selected in this block's config
-                r_pins = self.relay_pins
-                s_pins = self.sensor_pins
+                r_pins = list(self.relay_pins)  # Copy to avoid reference issues
+                s_pins = list(self.sensor_pins)
                 node_id = block.config.get("node_id", "")
                 if node_id and node_id in self.node_pin_configs:
                     r_pins, s_pins = self.node_pin_configs[node_id]
+                    r_pins = list(r_pins)
+                    s_pins = list(s_pins)
+                print(f"[DEBUG] Configure block: node={node_id}, relay_pins={r_pins}, sensor_pins={s_pins}")
                 changed = show_block_config(
                     self.parent.winfo_toplevel(), block,
                     self.engine.discovered_nodes,
