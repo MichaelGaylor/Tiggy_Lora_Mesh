@@ -530,15 +530,21 @@ class AutomationEngine:
         # ── Conditions ────────────────────────────────────────
         if bt == BlockType.COMPARE:
             a, b = inputs.get("a"), inputs.get("b")
+            print(f"[COMPARE] a={a} b={b} inputs_keys={list(inputs.keys())}")
             if a is None or b is None:
+                block.status = "idle"
+                block.error = f"Missing: {'a' if a is None else ''} {'b' if b is None else ''}"
                 return {"result": None}
             op = cfg.get("operator", "GT")
             ops = {
                 "GT": a > b, "LT": a < b, "EQ": a == b,
                 "NE": a != b, "GE": a >= b, "LE": a <= b,
             }
-            block.status = "active"
-            return {"result": ops.get(op, False)}
+            result = ops.get(op, False)
+            block.status = "triggered" if result else "active"
+            block.error = ""
+            print(f"[COMPARE] {a} {op} {b} = {result}")
+            return {"result": result}
 
         if bt == BlockType.AND_GATE:
             vals = [inputs.get(k) for k in ("in1", "in2", "in3", "in4") if k in inputs]
