@@ -589,9 +589,6 @@ void radioStartListening() {
 #if defined(RADIO_RXEN)
     digitalWrite(RADIO_RXEN, HIGH);
 #endif
-#if defined(RADIO_FEM_TXEN)
-    digitalWrite(RADIO_FEM_TXEN, LOW);   // RX/LNA mode
-#endif
     radio.startReceive();
 }
 
@@ -606,13 +603,10 @@ void radioTransmit(uint8_t* pkt, size_t len) {
 #if defined(RADIO_RXEN)
     digitalWrite(RADIO_RXEN, LOW);
 #endif
-#if defined(RADIO_FEM_TXEN)
-    digitalWrite(RADIO_FEM_TXEN, HIGH);  // TX/PA mode
-#endif
     radio.standby();
     radio.transmit(pkt, len);
     mesh.rxFlag = false;  // Clear false RX flag from TX_DONE DIO1 interrupt
-    radioStartListening();  // Switches back to RX/LNA mode
+    radioStartListening();
 }
 
 // MeshCore calls this to check if channel is free
@@ -637,7 +631,7 @@ void setupRadio() {
 #endif
 #if defined(RADIO_FEM_TXEN)
     pinMode(RADIO_FEM_TXEN, OUTPUT);
-    digitalWrite(RADIO_FEM_TXEN, LOW);  // Start in RX/LNA mode
+    digitalWrite(RADIO_FEM_TXEN, HIGH);  // Power enable (stays HIGH permanently)
 #endif
     int state = RADIOLIB_ERR_UNKNOWN;
     for (int attempt = 0; attempt < 3; attempt++) {
@@ -2192,7 +2186,7 @@ void handleSerialConfig() {
     else if (line.startsWith("POLL") || line.startsWith("TIMER,") ||
              line.startsWith("CMD,") || line.startsWith("MSG,") ||
              line.startsWith("SETPOINT,") || line.startsWith("AUTOPOLL,") ||
-             line.startsWith("BEACON,")) {
+             line.startsWith("BEACON,") || line.startsWith("BLEPIN,")) {
         processBleCommand(line);
     }
     else Serial.println("Commands: ID xxxx | KEY xxx... | RELAY 2,4,12 | SENSOR 34,36 | GPS <tx>,<rx> | GPS OFF | STATUS | SAVE | RESET | GATEWAY ON/OFF | AUTOPOLL <id> <sec> | PINMODE <pin> PULSE|AUTO"
