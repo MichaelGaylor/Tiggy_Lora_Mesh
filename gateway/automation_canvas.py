@@ -714,7 +714,9 @@ class AutomationCanvas:
             if block:
                 changed = show_block_config(
                     self.parent.winfo_toplevel(), block,
-                    self.engine.discovered_nodes)
+                    self.engine.discovered_nodes,
+                    relay_pins=list(self.relay_pins),
+                    sensor_pins=list(self.sensor_pins))
                 if changed:
                     self._notify_change()
                     self.redraw()
@@ -821,9 +823,11 @@ class AutomationCanvas:
         # Open config immediately for blocks that need it
         if block_type in (BlockType.SENSOR_READ, BlockType.SET_RELAY,
                           BlockType.PULSE_RELAY, BlockType.SEND_BROADCAST,
-                          BlockType.SEND_DIRECT):
+                          BlockType.SEND_DIRECT, BlockType.BEACON_DETECT):
             show_block_config(
                 self.parent.winfo_toplevel(), block,
-                self.engine.discovered_nodes)
+                self.engine.discovered_nodes,
+                relay_pins=list(self.relay_pins),
+                sensor_pins=list(self.sensor_pins))
             self._notify_change()
             self.redraw()
