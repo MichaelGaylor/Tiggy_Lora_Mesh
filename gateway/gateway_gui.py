@@ -1042,6 +1042,9 @@ class GatewayGUIApp:
             return
         encrypted = self.selected_packet.get("encrypted", "")
         msg_id = self.selected_packet.get("msg_id", "")
+        print(f"[DECRYPT] selected_packet type={self.selected_packet.get('type')} "
+              f"src={self.selected_packet.get('src')} encrypted_len={len(encrypted)} "
+              f"encrypted[:20]={encrypted[:20]} key={key}")
         if not encrypted or not msg_id:
             self.decrypt_result.configure(text="Not an encrypted MSG packet", text_color=COLORS["bad"])
             return

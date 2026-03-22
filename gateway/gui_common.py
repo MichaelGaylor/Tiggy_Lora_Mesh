@@ -207,4 +207,5 @@ def decrypt_message(encrypted_hex: str, msg_id: str, aes_key: str) -> Optional[s
     except (ValueError, KeyError) as e:
         print(f"[DECRYPT] FAIL: {type(e).__name__}: {e} | "
               f"key[0:4]={aes_key[:4]} blobLen={len(blob)} ctLen={len(ciphertext)}")
+        print(f"[DECRYPT] hex={encrypted_hex[:40]}... nonce={nonce.hex()[:12]}...")
         return None
