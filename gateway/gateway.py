@@ -261,12 +261,21 @@ class GatewayServer:
                     self.hub_ws = ws
 
                     # Authenticate with hub
-                    auth_msg = json.dumps({
+                    auth_data = {
                         "type": "auth",
                         "gateway_id": self.gateway_id,
                         "name": self.name,
                         "key": self.hub_key or "",
-                    })
+                    }
+                    # Only send location if actually configured
+                    lat = getattr(self, "lat", 0.0)
+                    lon = getattr(self, "lon", 0.0)
+                    if lat != 0.0 or lon != 0.0:
+                        auth_data["lat"] = lat
+                        auth_data["lon"] = lon
+                        auth_data["height"] = getattr(self, "antenna_height", 2.0)
+                        auth_data["antenna"] = getattr(self, "antenna_type", 0)
+                    auth_msg = json.dumps(auth_data)
                     await ws.send(auth_msg)
 
                     # Wait for auth result
@@ -423,6 +432,10 @@ Examples:
     parser.add_argument("--hub", type=str, default=None, help="Hub server URL (e.g., ws://myserver.com:9000)")
     parser.add_argument("--hub-key", type=str, default=None, help="Hub authentication key")
     parser.add_argument("--name", "-n", type=str, default=None, help="Friendly name for this gateway")
+    parser.add_argument("--lat", type=float, default=0.0, help="Gateway latitude (for hub map)")
+    parser.add_argument("--lon", type=float, default=0.0, help="Gateway longitude (for hub map)")
+    parser.add_argument("--height", type=float, default=2.0, help="Antenna height in metres (for hub map)")
+    parser.add_argument("--antenna", type=int, default=0, help="Antenna type: 0=omni, 1=directional")
     parser.add_argument("--peers", nargs="*", default=[], help="Direct peer gateway URLs (advanced)")
     parser.add_argument("--list-ports", action="store_true", help="List available serial ports and exit")
     args = parser.parse_args()
@@ -439,6 +452,10 @@ Examples:
         args.port, args.baud, args.listen, args.peers,
         hub_url=args.hub, hub_key=args.hub_key, name=args.name,
     )
+    server.lat = args.lat
+    server.lon = args.lon
+    server.antenna_type = args.antenna
+    server.antenna_height = args.height
 
     # Handle Ctrl+C gracefully
     def on_signal(*_):

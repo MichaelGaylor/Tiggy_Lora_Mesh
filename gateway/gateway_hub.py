@@ -181,10 +181,20 @@ class GatewayHub:
         if msg_type == "auth":
             gw.gateway_id = msg.get("id", msg.get("gateway_id", "unknown"))
             gw.name = msg.get("name", gw.gateway_id)
-            gw.lat = float(msg.get("lat", 0.0))
-            gw.lon = float(msg.get("lon", 0.0))
-            gw.antenna_type = int(msg.get("antenna", 0))
-            gw.antenna_height = float(msg.get("height", 2.0))
+            # Only update location if non-zero values sent (preserve saved registry)
+            new_lat = float(msg.get("lat", 0.0))
+            new_lon = float(msg.get("lon", 0.0))
+            if new_lat != 0.0 or new_lon != 0.0:
+                gw.lat = new_lat
+                gw.lon = new_lon
+            elif gw.gateway_id in self.registry:
+                # Restore from saved registry
+                gw.lat = self.registry[gw.gateway_id].get("lat", 0.0)
+                gw.lon = self.registry[gw.gateway_id].get("lon", 0.0)
+            new_height = float(msg.get("height", 0))
+            if new_height > 0:
+                gw.antenna_height = new_height
+            gw.antenna_type = int(msg.get("antenna", gw.antenna_type))
             key = msg.get("key", "")
 
             if self.auth_key and key != self.auth_key:

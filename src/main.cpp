@@ -279,10 +279,10 @@ void setupRadio() {
 #if defined(RADIO_DIO2_RF_SWITCH)
   radio.setDio2AsRfSwitch(true);
 #endif
-  radio.setCurrentLimit(140.0);
+  radio.setCurrentLimit(RADIO_CURRENT_LIMIT);
   radio.setDio1Action(onRadioRx);
   radio.startReceive();
-  debugPrint("Radio OK: " + String(LORA_FREQ, 1) + " MHz");
+  debugPrint("Radio OK: " + String(LORA_FREQ, 1) + " MHz " + String(LORA_POWER) + "dBm");
 }
 
 // ═══════════════════════════════════════════════════════════════

@@ -279,9 +279,21 @@ class AutomationCanvas:
         # Per-node pin configs: nodeId → (relay_pins, sensor_pins)
         self.node_pin_configs: dict[str, tuple[list[str], list[str]]] = {}
 
-        # Canvas
-        self.canvas = tk.Canvas(parent_frame, bg=COLORS["bg"],
-                                highlightthickness=0, cursor="crosshair")
+        # Canvas with scrolling
+        self._canvas_frame = tk.Frame(parent_frame, bg=COLORS["bg"])
+        self._canvas_frame.pack(fill="both", expand=True)
+
+        self.canvas = tk.Canvas(self._canvas_frame, bg=COLORS["bg"],
+                                highlightthickness=0, cursor="crosshair",
+                                scrollregion=(0, 0, 2000, 2000))
+        self._vscroll = tk.Scrollbar(self._canvas_frame, orient="vertical",
+                                      command=self.canvas.yview)
+        self._hscroll = tk.Scrollbar(self._canvas_frame, orient="horizontal",
+                                      command=self.canvas.xview)
+        self.canvas.configure(xscrollcommand=self._hscroll.set,
+                              yscrollcommand=self._vscroll.set)
+        self._vscroll.pack(side="right", fill="y")
+        self._hscroll.pack(side="bottom", fill="x")
         self.canvas.pack(fill="both", expand=True)
 
         # Interaction state
@@ -316,6 +328,8 @@ class AutomationCanvas:
         self.canvas.bind("<Button-3>", self._on_right_click)
         self.canvas.bind("<Delete>", self._on_delete_key)
         self.canvas.bind("<BackSpace>", self._on_delete_key)
+        self.canvas.bind("<MouseWheel>", self._on_mousewheel)
+        self.canvas.bind("<Shift-MouseWheel>", self._on_shift_mousewheel)
         self.canvas.focus_set()
 
     # ─── Public API ───────────────────────────────────────────
@@ -351,6 +365,20 @@ class AutomationCanvas:
             self._draw_wire(wire)
         # Push wires behind blocks visually
         self.canvas.tag_lower("wire")
+
+        # Update scroll region to fit all blocks
+        self._update_scrollregion()
+
+    def _update_scrollregion(self):
+        """Expand scroll region to encompass all blocks with padding."""
+        if not self.current_rule or not self.current_rule.blocks:
+            self.canvas.configure(scrollregion=(0, 0, 2000, 2000))
+            return
+        max_x = max(b.x + BLOCK_W + 40 for b in self.current_rule.blocks)
+        max_y = max(b.y + 200 for b in self.current_rule.blocks)
+        cw = self.canvas.winfo_width() or 800
+        ch = self.canvas.winfo_height() or 600
+        self.canvas.configure(scrollregion=(0, 0, max(cw, max_x), max(ch, max_y)))
 
     def update_live_values(self):
         """Update live value labels on wires (called periodically)."""
@@ -577,7 +605,7 @@ class AutomationCanvas:
 
     def _on_click(self, event):
         self.canvas.focus_set()
-        x, y = event.x, event.y
+        x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
 
         # Check if clicking a port
         port = self._find_port_at(x, y)
@@ -637,12 +665,13 @@ class AutomationCanvas:
         self.redraw()
 
     def _on_drag(self, event):
+        x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
         if self._dragging and self._selected and self.current_rule:
             block = self.current_rule.get_block(self._selected)
             if block:
                 # Snap to grid
-                new_x = round((event.x - self._drag_off[0]) / GRID) * GRID
-                new_y = round((event.y - self._drag_off[1]) / GRID) * GRID
+                new_x = round((x - self._drag_off[0]) / GRID) * GRID
+                new_y = round((y - self._drag_off[1]) / GRID) * GRID
                 block.x = max(0, new_x)
                 block.y = max(0, new_y)
                 self.redraw()
@@ -655,9 +684,9 @@ class AutomationCanvas:
             if src:
                 if self._wire_line_id:
                     self.canvas.delete(self._wire_line_id)
-                mx = (src[0] + event.x) / 2
+                mx = (src[0] + x) / 2
                 self._wire_line_id = self.canvas.create_line(
-                    src[0], src[1], mx, src[1], mx, event.y, event.x, event.y,
+                    src[0], src[1], mx, src[1], mx, y, x, y,
                     fill=PORT_COLORS.get(self._drawing_wire["type"], "#FFF"),
                     width=2, smooth=True, dash=(4, 4))
 
@@ -665,6 +694,12 @@ class AutomationCanvas:
         if self._dragging:
             self._dragging = False
             self._notify_change()
+
+    def _on_mousewheel(self, event):
+        self.canvas.yview_scroll(-1 * (event.delta // 120), "units")
+
+    def _on_shift_mousewheel(self, event):
+        self.canvas.xview_scroll(-1 * (event.delta // 120), "units")
 
     def _finish_wire(self, to_block: str, to_port: str, direction: str):
         """Complete a wire connection."""
@@ -690,13 +725,15 @@ class AutomationCanvas:
             self._drawing_wire = None
             return
 
-        # Type check
+        # Type check — allow number→bool (non-zero = true) and bool→number (true=1, false=0)
         to_block_obj = self.current_rule.get_block(to_block)
         if to_block_obj:
             bdef = BLOCK_DEFS.get(to_block_obj.block_type, {})
             ins = dict(bdef.get("inputs", []))
             to_type = ins.get(to_port, "number")
-            if from_type != to_type:
+            compatible = (from_type == to_type or
+                          {from_type, to_type} == {"number", "bool"})
+            if not compatible:
                 self._drawing_wire = None
                 return
 
@@ -709,7 +746,7 @@ class AutomationCanvas:
 
     def _on_double_click(self, event):
         """Open config dialog for the block under cursor."""
-        bid = self._find_block_at(event.x, event.y)
+        bid = self._find_block_at(self.canvas.canvasx(event.x), self.canvas.canvasy(event.y))
         if bid and self.current_rule:
             block = self.current_rule.get_block(bid)
             if block:
@@ -727,7 +764,8 @@ class AutomationCanvas:
         self._ctx_menu.delete(0, "end")
 
         # Check port first (to disconnect)
-        port = self._find_port_at(event.x, event.y)
+        cx, cy = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
+        port = self._find_port_at(cx, cy)
         if port and self.current_rule:
             bid, pname, direction = port
             if direction == "in":
@@ -740,7 +778,7 @@ class AutomationCanvas:
                         return
 
         # Check block
-        bid = self._find_block_at(event.x, event.y)
+        bid = self._find_block_at(cx, cy)
         if bid and self.current_rule:
             block = self.current_rule.get_block(bid)
             if block:

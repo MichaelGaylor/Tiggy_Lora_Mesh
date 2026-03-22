@@ -16,14 +16,20 @@
 #include <vector>
 #include <deque>
 
-// ─── Configuration ───────────────────────────────────────────
+// ─── Configuration (defaults — override per board in Pins.h) ─
 #define LORA_FREQ       868.0
 #define LORA_BW         125.0
 #define LORA_SF         9
 #define LORA_CR         5
-#define LORA_POWER      20
+#ifndef RADIO_POWER
+#define RADIO_POWER     20
+#endif
+#define LORA_POWER      RADIO_POWER
 #define LORA_PREAMBLE   8
 #define LORA_SYNC       0x12
+#ifndef RADIO_CURRENT_LIMIT
+#define RADIO_CURRENT_LIMIT 140.0
+#endif
 
 #define EEPROM_SIZE     2048  // Expanded for beacon rules (was 512)
 #define MAX_NODES       50      // Each node tracks up to 50 peers (was 20)

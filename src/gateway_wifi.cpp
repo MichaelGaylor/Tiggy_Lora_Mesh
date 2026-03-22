@@ -243,6 +243,9 @@ static int fromHex(const String& hex, uint8_t* out, size_t maxLen) {
 #ifndef RADIO_TCXO_VOLTAGE
 #define RADIO_TCXO_VOLTAGE 0
 #endif
+#ifndef RADIO_CURRENT_LIMIT
+#define RADIO_CURRENT_LIMIT 140.0
+#endif
 
 void setupRadio() {
     dbg("Initializing radio...");
@@ -266,13 +269,13 @@ void setupRadio() {
   #if defined(RADIO_DIO2_RF_SWITCH)
     radio.setDio2AsRfSwitch(true);
   #endif
-    radio.setCurrentLimit(140.0);
+    radio.setCurrentLimit(RADIO_CURRENT_LIMIT);
     radio.setDio1Action(onRadioRx);
 #elif defined(RADIO_SX1276)
     radio.setDio0Action(onRadioRx, RISING);
 #endif
     radioStartListening();
-    dbgf("Radio OK: %.1f MHz\n", LORA_FREQ);
+    dbgf("Radio OK: %.1f MHz %ddBm\n", LORA_FREQ, LORA_POWER);
 }
 
 // ─── WebSocket ───────────────────────────────────────────────

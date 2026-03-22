@@ -11,7 +11,7 @@
 // ═══════════════════════════════════════════════════════════════
 #pragma once
 
-// ─── Board capabilities (set automatically) ─────────────────
+// ─── Board capabilities (set per board below) ───────────────
 // HAS_DISPLAY          - has a graphical TFT display
 // HAS_KEYBOARD         - has I2C keyboard
 // HAS_TRACKBALL        - has trackball input
@@ -21,6 +21,8 @@
 // RADIO_SX1276         - uses SX1276 (RadioLib)
 // RADIO_DIO2_RF_SWITCH - SX1262 DIO2 controls the RF antenna switch (Heltec, T-Deck, etc.)
 // RADIO_RXEN           - External RF switch pin (XIAO Wio-SX1262, set to GPIO number)
+// RADIO_POWER          - TX power in dBm (default 20, max 22 for SX1262, 20 for SX1276)
+// RADIO_CURRENT_LIMIT  - PA over-current protection in mA (default 140 for SX1262)
 
 // ═══════════════════════════════════════════════════════════════
 #if defined(BOARD_TDECK_PLUS)

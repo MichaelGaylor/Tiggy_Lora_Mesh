@@ -60,8 +60,13 @@ class GUIGatewayServer:
         self.baud = baud
         self.hub_url = hub_url if hub_url else None
         self.hub_key = hub_key if hub_key else None
-        self.gateway_id = secrets.token_hex(4)
-        self.name = name or f"gw-{self.gateway_id[:6]}"
+        # Use a stable gateway ID based on the name so the hub recognises reconnections
+        self.name = name or "gateway"
+        self.gateway_id = name or secrets.token_hex(4)
+        self.lat = 0.0
+        self.lon = 0.0
+        self.antenna_type = 0
+        self.antenna_height = 2.0
         self.eq = eq
         self.dedup = PacketDedup()
         self.serial_conn: serial.Serial | None = None
@@ -87,6 +92,8 @@ class GUIGatewayServer:
             time.sleep(0.5)
             self.serial_conn.write(b"CMD,LIST\n")  # Query pin config for Logic Builder
             time.sleep(0.5)
+            self.serial_conn.write(b"POLL\n")      # Get initial sensor data immediately
+            time.sleep(0.3)
             # Read all responses (STATUS multi-line + PINS)
             for _ in range(20):
                 if not self.serial_conn.in_waiting:
@@ -164,10 +171,16 @@ class GUIGatewayServer:
                 self._emit("log", text=f"Connecting to hub: {self.hub_url}", color=COLORS["dim"])
                 async with websockets.connect(self.hub_url) as ws:
                     self.hub_ws = ws
-                    auth_msg = json.dumps({
+                    auth_data = {
                         "type": "auth", "gateway_id": self.gateway_id,
                         "name": self.name, "key": self.hub_key or "",
-                    })
+                    }
+                    if self.lat != 0.0 or self.lon != 0.0:
+                        auth_data["lat"] = self.lat
+                        auth_data["lon"] = self.lon
+                        auth_data["height"] = self.antenna_height
+                        auth_data["antenna"] = self.antenna_type
+                    auth_msg = json.dumps(auth_data)
                     await ws.send(auth_msg)
                     response = await ws.recv()
                     result = json.loads(response)
@@ -354,6 +367,16 @@ class GatewayGUIApp:
         self.key_entry = ctk.CTkEntry(row2, width=140, placeholder_text="(optional)")
         self.key_entry.pack(side="left", padx=5)
 
+        ctk.CTkLabel(row2, text="Lat:", text_color=COLORS["dim"]).pack(side="left", padx=(15, 0))
+        self.lat_entry = ctk.CTkEntry(row2, width=80, placeholder_text="53.123")
+        self.lat_entry.pack(side="left", padx=2)
+        ctk.CTkLabel(row2, text="Lon:", text_color=COLORS["dim"]).pack(side="left", padx=(5, 0))
+        self.lon_entry = ctk.CTkEntry(row2, width=80, placeholder_text="-1.456")
+        self.lon_entry.pack(side="left", padx=2)
+        ctk.CTkLabel(row2, text="Ant H:", text_color=COLORS["dim"]).pack(side="left", padx=(5, 0))
+        self.ant_height_entry = ctk.CTkEntry(row2, width=40, placeholder_text="2")
+        self.ant_height_entry.pack(side="left", padx=2)
+
         self.connect_btn = ctk.CTkButton(row2, text="CONNECT", width=100, fg_color=COLORS["good"],
                                            text_color="#000", hover_color="#00CC00", command=self.connect)
         self.connect_btn.pack(side="left", padx=(15, 5))
@@ -370,6 +393,12 @@ class GatewayGUIApp:
             self.name_entry.insert(0, cfg["gw_name"])
         if cfg.get("hub_key"):
             self.key_entry.insert(0, cfg["hub_key"])
+        if cfg.get("lat"):
+            self.lat_entry.insert(0, cfg["lat"])
+        if cfg.get("lon"):
+            self.lon_entry.insert(0, cfg["lon"])
+        if cfg.get("ant_height"):
+            self.ant_height_entry.insert(0, cfg["ant_height"])
         if cfg.get("serial_port"):
             self.port_combo.set(cfg["serial_port"])
 
@@ -504,14 +533,16 @@ class GatewayGUIApp:
         lb_blocks = ctk.CTkFrame(self.logic_frame, fg_color="transparent")
         lb_blocks.pack(fill="x", padx=10, pady=2)
 
+        self._block_combos: list[tuple[ctk.CTkComboBox, str]] = []
         for cat_name, block_types in CATEGORY_BLOCKS.items():
             menu_values = [BLOCK_DEFS[bt]["label"] for bt in block_types]
             combo = ctk.CTkComboBox(lb_blocks, width=130, font=("Consolas", 11),
                                      values=menu_values,
-                                     command=lambda v, bts=block_types, mvs=menu_values:
-                                         self._add_block_from_menu(v, bts, mvs))
+                                     command=lambda v, bts=block_types, mvs=menu_values, cn=cat_name:
+                                         self._add_block_from_menu(v, bts, mvs, cn))
             combo.set(f"+ {cat_name}")
             combo.pack(side="left", padx=3)
+            self._block_combos.append((combo, cat_name))
 
         # Canvas area
         canvas_frame = ctk.CTkFrame(self.logic_frame, fg_color=COLORS["bg"], corner_radius=4)
@@ -592,11 +623,14 @@ class GatewayGUIApp:
         except Exception:
             return {}
 
-    def _save_config(self, port: str, hub: str, name: str, key: str):
+    def _save_config(self, port: str, hub: str, name: str, key: str,
+                     lat: str = "", lon: str = "", ant_height: str = ""):
         try:
             with open(self.CONFIG_FILE, "w") as f:
                 json.dump({"serial_port": port, "hub_url": hub,
-                           "gw_name": name, "hub_key": key}, f, indent=2)
+                           "gw_name": name, "hub_key": key,
+                           "lat": lat, "lon": lon, "ant_height": ant_height},
+                          f, indent=2)
         except Exception:
             pass
 
@@ -607,10 +641,22 @@ class GatewayGUIApp:
         hub = self.hub_entry.get().strip() or None
         key = self.key_entry.get().strip() or None
         name = self.name_entry.get().strip() or "Gateway"
+        lat_str = self.lat_entry.get().strip()
+        lon_str = self.lon_entry.get().strip()
+        ant_h_str = self.ant_height_entry.get().strip()
         # Save settings for next launch
-        self._save_config(port, hub or "", name, key or "")
+        self._save_config(port, hub or "", name, key or "",
+                          lat_str, lon_str, ant_h_str)
 
         self.gateway = GUIGatewayServer(port, 115200, hub, key, name, self.event_queue)
+        # Pass location info for hub auth
+        try:
+            self.gateway.lat = float(lat_str) if lat_str else 0.0
+            self.gateway.lon = float(lon_str) if lon_str else 0.0
+            self.gateway.antenna_height = float(ant_h_str) if ant_h_str else 2.0
+        except ValueError:
+            pass
+        self.gateway.antenna_type = 0  # Default: omnidirectional
         self.connected = True
 
         def run_async():
@@ -677,9 +723,6 @@ class GatewayGUIApp:
             for key in ("radio_rx", "radio_tx", "peer_rx", "peer_tx"):
                 if key in event and key in self.stat_labels:
                     self.stat_labels[key].configure(text=str(event[key]))
-            if "hub_connected" in event:
-                color = COLORS["good"] if event["hub_connected"] else COLORS["bad"]
-                self.hub_status_dot.configure(text_color=color)
 
         elif etype == "hub_connected":
             self.hub_status_dot.configure(text_color=COLORS["good"])
@@ -726,6 +769,7 @@ class GatewayGUIApp:
             # Parse direct SDATA from serial (local POLL response)
             elif text.startswith("SDATA,"):
                 self._parse_sdata(text)
+                self.engine._log("Engine", f"SDATA received: {text[:50]}")
             # Parse remote node responses that arrive wrapped in RX,<from>,<content>,<rssi>
             elif text.startswith("RX,"):
                 # Extract content between from and trailing RSSI
@@ -741,8 +785,12 @@ class GatewayGUIApp:
                             content = content[:last_comma]
                     if content.startswith("SDATA,"):
                         self._parse_sdata(content)
+                        self.engine._log("Engine", f"RX SDATA from {from_node}: {content[:50]}")
                     elif content.startswith("PINS,"):
                         self._parse_pins(content, from_node)
+            # Log ALL unhandled serial lines so we can see what's coming back
+            else:
+                self.engine._log("Serial", text[:60])
 
         elif etype == "log":
             pass  # Could add a log panel later
@@ -816,6 +864,15 @@ class GatewayGUIApp:
         self.update_node_cards()
 
     def update_node_cards(self):
+        # Build a snapshot to detect changes — only rebuild if something changed
+        snapshot = tuple((n.id, n.rssi, n.packets, n.is_local or n.last_seen > time.time() - 120,
+                         int(n.last_seen) // 30)  # Update every 30s for age display
+                         for n in sorted(self.topo_nodes.values(),
+                                         key=lambda n: n.last_seen, reverse=True)[:15])
+        if hasattr(self, '_node_snapshot') and self._node_snapshot == snapshot:
+            return  # Nothing changed, skip rebuild
+        self._node_snapshot = snapshot
+
         for widget in self.nodes_frame.winfo_children():
             widget.destroy()
 
@@ -823,8 +880,13 @@ class GatewayGUIApp:
         sorted_nodes = sorted(self.topo_nodes.values(), key=lambda n: n.last_seen, reverse=True)
 
         for node in sorted_nodes[:15]:  # Show top 15
-            age = now - node.last_seen if node.last_seen else 9999
-            online = age < 120
+            # Local node is always online (connected via USB)
+            if node.is_local:
+                online = True
+                node.last_seen = now  # Keep it fresh
+            else:
+                age = now - node.last_seen if node.last_seen else 9999
+                online = age < 120
 
             card = ctk.CTkFrame(self.nodes_frame, fg_color=COLORS["panel"], corner_radius=6)
             card.pack(fill="x", pady=2)
@@ -837,39 +899,49 @@ class GatewayGUIApp:
             if node.is_local:
                 ctk.CTkLabel(row1, text="(LOCAL)", font=("Consolas", 10),
                               text_color=COLORS["accent"]).pack(side="left", padx=5)
-            status = "Online" if online else f"Last: {format_uptime(age)} ago"
+            if node.is_local:
+                status = "Online"
+            else:
+                age = now - node.last_seen if node.last_seen else 9999
+                status = "Online" if online else f"Last: {format_uptime(age)} ago"
             ctk.CTkLabel(row1, text=status, font=("Consolas", 11),
                           text_color=COLORS["dim"]).pack(side="right")
 
             row2 = ctk.CTkFrame(card, fg_color="transparent")
             row2.pack(fill="x", padx=8, pady=(0, 5))
-            # RSSI with colour
-            rssi_color = COLORS["good"] if node.rssi > -80 else (COLORS["warn"] if node.rssi > -100 else COLORS["bad"])
-            if not online:
-                rssi_color = COLORS["faint"]
-            # Signal bars — drawn as small coloured frames (no unicode overlap)
-            bars = 0 if not online else (4 if node.rssi > -60 else (3 if node.rssi > -75 else (2 if node.rssi > -90 else (1 if node.rssi > -105 else 0))))
-            bar_frame = ctk.CTkFrame(row2, fg_color="transparent", width=44, height=18)
-            bar_frame.pack(side="left", padx=(0, 8))
-            bar_frame.pack_propagate(False)
-            for b in range(4):
-                h = 5 + b * 4  # heights: 5, 9, 13, 17
-                c = rssi_color if b < bars else COLORS["faint"]
-                bar = ctk.CTkFrame(bar_frame, width=7, height=h, fg_color=c, corner_radius=1)
-                bar.place(x=b * 10, y=18 - h)
-            # RSSI value
-            ctk.CTkLabel(row2, text=f"{node.rssi} dBm", font=("Consolas", 12),
-                          text_color=rssi_color, width=90, anchor="w").pack(side="left", padx=(0, 8))
-            # Packets
-            ctk.CTkLabel(row2, text=f"Pkts:{node.packets}", font=("Consolas", 12),
-                          text_color=COLORS["dim"], width=90, anchor="w").pack(side="left", padx=(0, 8))
-            # Route info
-            if node.hops and node.hops > 1 and node.next_hop:
-                ctk.CTkLabel(row2, text=f"{node.hops}hop via {node.next_hop}", font=("Consolas", 12),
-                              text_color=COLORS["dim"]).pack(side="left")
-            elif node.hops:
+
+            if node.is_local:
+                # Local node: show USB connection, not fake RSSI
+                ctk.CTkLabel(row2, text="USB Serial", font=("Consolas", 12),
+                              text_color=COLORS["accent"], width=90, anchor="w").pack(side="left", padx=(0, 8))
+                ctk.CTkLabel(row2, text=f"Pkts:{node.packets}", font=("Consolas", 12),
+                              text_color=COLORS["dim"], width=90, anchor="w").pack(side="left", padx=(0, 8))
                 ctk.CTkLabel(row2, text="Direct", font=("Consolas", 12),
                               text_color=COLORS["dim"]).pack(side="left")
+            else:
+                # Remote node: show RSSI, signal bars, route
+                rssi_color = COLORS["good"] if node.rssi > -80 else (COLORS["warn"] if node.rssi > -100 else COLORS["bad"])
+                if not online:
+                    rssi_color = COLORS["faint"]
+                bars = 0 if not online else (4 if node.rssi > -60 else (3 if node.rssi > -75 else (2 if node.rssi > -90 else (1 if node.rssi > -105 else 0))))
+                bar_frame = ctk.CTkFrame(row2, fg_color="transparent", width=44, height=18)
+                bar_frame.pack(side="left", padx=(0, 8))
+                bar_frame.pack_propagate(False)
+                for b in range(4):
+                    h = 5 + b * 4
+                    c = rssi_color if b < bars else COLORS["faint"]
+                    bar = ctk.CTkFrame(bar_frame, width=7, height=h, fg_color=c, corner_radius=1)
+                    bar.place(x=b * 10, y=18 - h)
+                ctk.CTkLabel(row2, text=f"{node.rssi} dBm", font=("Consolas", 12),
+                              text_color=rssi_color, width=90, anchor="w").pack(side="left", padx=(0, 8))
+                ctk.CTkLabel(row2, text=f"Pkts:{node.packets}", font=("Consolas", 12),
+                              text_color=COLORS["dim"], width=90, anchor="w").pack(side="left", padx=(0, 8))
+                if node.hops and node.hops > 1 and node.next_hop:
+                    ctk.CTkLabel(row2, text=f"{node.hops}hop via {node.next_hop}", font=("Consolas", 12),
+                                  text_color=COLORS["dim"]).pack(side="left")
+                elif node.hops:
+                    ctk.CTkLabel(row2, text="Direct", font=("Consolas", 12),
+                                  text_color=COLORS["dim"]).pack(side="left")
 
     # ─── Topology Canvas Animation ──────────────────────────
 
@@ -1134,7 +1206,8 @@ class GatewayGUIApp:
             rule.enabled = self.rule_enabled_var.get()
             self.engine.save_rules()
 
-    def _add_block_from_menu(self, label: str, block_types: list, menu_values: list):
+    def _add_block_from_menu(self, label: str, block_types: list,
+                             menu_values: list, cat_name: str):
         """Add a block when selected from a category dropdown."""
         try:
             idx = menu_values.index(label)
@@ -1142,6 +1215,12 @@ class GatewayGUIApp:
             self.auto_canvas.add_block(bt)
         except (ValueError, IndexError):
             pass
+        # Reset dropdown so same block type can be added again
+        # (CTkComboBox only fires on value CHANGE, not re-selection)
+        for combo, cn in self._block_combos:
+            if cn == cat_name:
+                combo.set(f"+ {cat_name}")
+                break
 
     def _on_canvas_change(self):
         """Called when the canvas modifies a rule."""
@@ -1161,30 +1240,33 @@ class GatewayGUIApp:
 
     def _eval_automation(self):
         """Periodic automation rule evaluation."""
-        self.engine.evaluate_all()
-        # Update live values on canvas if visible
-        if self.tabview.get() == "Logic":
-            self.auto_canvas.update_live_values()
-            rule = self.auto_canvas.current_rule
-            if rule:
-                status_colors = {"active": COLORS["good"], "triggered": COLORS["bad"],
-                                 "queued": COLORS["warn"], "disabled": COLORS["faint"],
-                                 "error": COLORS["bad"], "idle": COLORS["dim"]}
-                self.rule_status_dot.configure(
-                    text_color=status_colors.get(rule.status, COLORS["dim"]))
-            # Update event log with queue status
-            q = self.engine.queue_depth
-            q_txt = f"  |  Queue: {q} pending" if q > 0 else ""
-            if self.engine.event_log:
-                last = self.engine.event_log[-1]
-                ts = time.strftime("%H:%M:%S", time.localtime(last[0]))
-                self.logic_log.configure(
-                    text=f"{ts} [{last[1]}] {last[2]}{q_txt}",
-                    text_color="#FFE000" if q > 5 else "#B0B0B0")
-            elif q > 0:
-                self.logic_log.configure(
-                    text=f"Queue: {q} pending",
-                    text_color="#FFE000")
+        try:
+            self.engine.evaluate_all()
+            # Update live values on canvas if visible
+            if self.tabview.get() == "Logic":
+                self.auto_canvas.update_live_values()
+                rule = self.auto_canvas.current_rule
+                if rule:
+                    status_colors = {"active": COLORS["good"], "triggered": COLORS["bad"],
+                                     "queued": COLORS["warn"], "disabled": COLORS["faint"],
+                                     "error": COLORS["bad"], "idle": COLORS["dim"]}
+                    self.rule_status_dot.configure(
+                        text_color=status_colors.get(rule.status, COLORS["dim"]))
+                # Update event log with queue status
+                q = self.engine.queue_depth
+                q_txt = f"  |  Queue: {q} pending" if q > 0 else ""
+                if self.engine.event_log:
+                    last = self.engine.event_log[-1]
+                    ts = time.strftime("%H:%M:%S", time.localtime(last[0]))
+                    self.logic_log.configure(
+                        text=f"{ts} [{last[1]}] {last[2]}{q_txt}",
+                        text_color="#FFE000" if q > 5 else "#B0B0B0")
+                elif q > 0:
+                    self.logic_log.configure(
+                        text=f"Queue: {q} pending",
+                        text_color="#FFE000")
+        except Exception as e:
+            print(f"[ENGINE TICK ERROR] {type(e).__name__}: {e}")
         self.root.after(1000, self._eval_automation)
 
     # ─── Sensor Dashboard ──────────────────────────────────

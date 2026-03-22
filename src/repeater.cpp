@@ -655,13 +655,18 @@ void setupRadio() {
   #if defined(RADIO_DIO2_RF_SWITCH)
     radio.setDio2AsRfSwitch(true);
   #endif
-    radio.setCurrentLimit(140.0);
+    radio.setCurrentLimit(RADIO_CURRENT_LIMIT);
     radio.setDio1Action(onRadioRx);
+    // Diagnostic: read back actual radio config
+    float ocp = radio.getCurrentLimit();
+    debugPrint("Radio PA: OCP=" + String(ocp, 1) + "mA requested=" +
+               String(LORA_POWER) + "dBm TCXO=" + String(RADIO_TCXO_VOLTAGE, 1) + "V");
 #elif defined(RADIO_SX1276)
     radio.setDio0Action(onRadioRx, RISING);
 #endif
     radioStartListening();
-    debugPrint("Radio OK: " + String(LORA_FREQ, 1) + " MHz");
+    debugPrint("Radio OK: " + String(LORA_FREQ, 1) + " MHz SF" + String(mesh.currentSF) +
+               " " + String(LORA_POWER) + "dBm");
 }
 
 void receiveCheck() {

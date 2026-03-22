@@ -290,7 +290,6 @@ class AutomationEngine:
     CMD_QUEUE_MAX = 20        # Max pending commands — oldest dropped if full
     MAX_CMDS_PER_MINUTE = 12  # Hard safety cap per minute
     STALE_THRESHOLD = 300.0   # 5 minutes
-    POLL_MIN_INTERVAL = 30.0
 
     def __init__(self, sensor_data: dict, send_serial: Callable[[str], None],
                  discovered_nodes: dict):
@@ -704,8 +703,9 @@ class AutomationEngine:
         return len(self._cmd_queue)
 
     def _ensure_data_freshness(self, now: float):
-        """Auto-poll nodes referenced by active rules if data is stale."""
-        needed = set()
+        """Auto-poll nodes referenced by active rules at the rule's eval_interval."""
+        # Find the fastest eval_interval for each node across all enabled rules
+        needed: dict[str, float] = {}  # node_id -> shortest eval_interval
         for rule in self.rules:
             if not rule.enabled:
                 continue
@@ -713,20 +713,17 @@ class AutomationEngine:
                 if block.block_type == BlockType.SENSOR_READ:
                     nid = block.config.get("node_id", "")
                     if nid:
-                        needed.add(nid)
+                        current = needed.get(nid, 999.0)
+                        needed[nid] = min(current, rule.eval_interval)
 
-        for node_id in needed:
-            # Check freshest reading for this node
-            freshest = 0.0
-            for key, readings in self.sensor_data.items():
-                if key.startswith(f"{node_id}:") and readings:
-                    freshest = max(freshest, readings[-1][0])
-
+        for node_id, interval in needed.items():
             last_poll = self._last_poll_time.get(node_id, 0)
-            if (freshest == 0 or now - freshest > 60) and (now - last_poll > self.POLL_MIN_INTERVAL):
+            if now - last_poll > interval:
                 if node_id == self.local_node_id:
+                    self._log("Engine", f"POLL local {node_id}")
                     self.send_serial("POLL")
                 else:
+                    self._log("Engine", f"POLL remote {node_id}")
                     self.send_serial(f"POLL,{node_id}")
                 self._last_poll_time[node_id] = now
 
