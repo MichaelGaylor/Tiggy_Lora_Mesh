@@ -1614,8 +1614,9 @@ void processBleCommand(const String& line) {
         String text = line.substring(c2 + 1);
         uint16_t dest = strtol(target.c_str(), nullptr, 16);
         String mid = mesh.generateMsgID();
-        // POS and SOS are sent without MSG prefix so receivers handle them as position/emergency
-        String encText = (text.startsWith("POS,") || text.startsWith("SOS,")) ? text : "MSG," + text;
+        // POS, SOS, and CMD are sent without MSG prefix so receivers handle them correctly
+        // Without this, CMD,SET etc. would arrive as "MSG,CMD,SET" and go to chat, not command handler
+        String encText = (text.startsWith("POS,") || text.startsWith("SOS,") || text.startsWith("CMD,")) ? text : "MSG," + text;
         String payload = String(mesh.localID) + "," + target + "," + mid + "," +
                          String(TTL_DEFAULT) + "," + String(mesh.localID) + "," +
                          mesh.encryptMsg(encText);

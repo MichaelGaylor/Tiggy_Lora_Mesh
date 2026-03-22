@@ -276,6 +276,8 @@ class AutomationCanvas:
         # Pin lists from connected node (set by gateway GUI)
         self.relay_pins: list[str] = []
         self.sensor_pins: list[str] = []
+        # Per-node pin configs: nodeId → (relay_pins, sensor_pins)
+        self.node_pin_configs: dict[str, tuple[list[str], list[str]]] = {}
 
         # Canvas
         self.canvas = tk.Canvas(parent_frame, bg=COLORS["bg"],
@@ -765,11 +767,17 @@ class AutomationCanvas:
         if self.current_rule:
             block = self.current_rule.get_block(block_id)
             if block:
+                # Look up pins for the node selected in this block's config
+                r_pins = self.relay_pins
+                s_pins = self.sensor_pins
+                node_id = block.config.get("node_id", "")
+                if node_id and node_id in self.node_pin_configs:
+                    r_pins, s_pins = self.node_pin_configs[node_id]
                 changed = show_block_config(
                     self.parent.winfo_toplevel(), block,
                     self.engine.discovered_nodes,
-                    relay_pins=self.relay_pins,
-                    sensor_pins=self.sensor_pins)
+                    relay_pins=r_pins,
+                    sensor_pins=s_pins)
                 if changed:
                     self._notify_change()
                     self.redraw()

@@ -294,6 +294,9 @@ class GatewayGUIApp:
         # Node pin config (populated from PINS response)
         self.node_relay_pins: list[str] = []
         self.node_sensor_pins: list[str] = []
+        # Per-node pin configs: nodeId → (relay_pins, sensor_pins)
+        self.node_pin_configs: dict[str, tuple[list[str], list[str]]] = {}
+        self._queried_nodes: set[str] = set()  # Track which nodes we've already queried
 
         # Automation engine (before build_ui — canvas needs it)
         self.engine = AutomationEngine(self.sensor_data, self._send_serial, self.topo_nodes)
@@ -717,6 +720,7 @@ class GatewayGUIApp:
                 # Extract content between from and trailing RSSI
                 parts = text.split(",", 2)
                 if len(parts) >= 3:
+                    from_node = parts[1]
                     content = parts[2]
                     # Strip trailing RSSI (last field, negative int)
                     last_comma = content.rfind(",")
@@ -727,7 +731,7 @@ class GatewayGUIApp:
                     if content.startswith("SDATA,"):
                         self._parse_sdata(content)
                     elif content.startswith("PINS,"):
-                        self._parse_pins(content)
+                        self._parse_pins(content, from_node)
 
         elif etype == "log":
             pass  # Could add a log panel later
@@ -748,6 +752,10 @@ class GatewayGUIApp:
             if hb_from and hb_from != "FFFF":
                 if hb_from not in self.topo_nodes:
                     self.topo_nodes[hb_from] = TopoNode(hb_from, hb_from == self.local_id)
+                    # Auto-query new node's pin config via mesh
+                    if hb_from != self.local_id and hb_from not in self._queried_nodes:
+                        self._queried_nodes.add(hb_from)
+                        self._send_serial(f"MSG,{hb_from},CMD,LIST")
                 node = self.topo_nodes[hb_from]
                 node.last_seen = now
                 node.packets += 1
@@ -1205,17 +1213,31 @@ class GatewayGUIApp:
                     self.engine.beacon_data[name]["triggered"] = False
                     self.engine.beacon_data[name]["timestamp"] = time.time()
 
-    def _parse_pins(self, text: str):
+    def _parse_pins(self, text: str, from_node: str = ""):
         """Parse PINS,R:2,3,4|S:33,34 response from node."""
         data = text[5:]  # strip "PINS,"
+        relay_pins = []
+        sensor_pins = []
         for part in data.split("|"):
             if part.startswith("R:"):
-                self.node_relay_pins = [p.strip() for p in part[2:].split(",") if p.strip()]
+                relay_pins = [p.strip() for p in part[2:].split(",") if p.strip()]
             elif part.startswith("S:"):
-                self.node_sensor_pins = [p.strip() for p in part[2:].split(",") if p.strip()]
-        # Update Logic Builder canvas so block config dialogs show correct pins
+                sensor_pins = [p.strip() for p in part[2:].split(",") if p.strip()]
+
+        # Store per-node pin config
+        node_id = from_node if from_node else self.local_id
+        if node_id and node_id != "????":
+            self.node_pin_configs[node_id] = (relay_pins, sensor_pins)
+
+        # Update local defaults (used when no specific node selected)
+        if not from_node or from_node == self.local_id:
+            self.node_relay_pins = relay_pins
+            self.node_sensor_pins = sensor_pins
+
+        # Update Logic Builder canvas with all known pin configs
         self.auto_canvas.relay_pins = self.node_relay_pins
         self.auto_canvas.sensor_pins = self.node_sensor_pins
+        self.auto_canvas.node_pin_configs = self.node_pin_configs
 
     def redraw_sensors(self):
         """Legacy sparkline — replaced by SensorDashboard. No-op."""
