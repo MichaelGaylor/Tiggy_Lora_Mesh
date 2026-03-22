@@ -670,6 +670,12 @@ void setupRadio() {
     radio.setDio2AsRfSwitch(true);
   #endif
     radio.setCurrentLimit(RADIO_CURRENT_LIMIT);
+  #if defined(RADIO_FEM_EN)
+    // GC1109 AGC fix: set register 0x8B5 bit 0 to fix AGC malfunction with FEM
+    // See: https://github.com/meshtastic/firmware/pull/9571
+    radio.mod->SPIsetRegValue(0x08B5, 0x01, 0, 0);
+    debugPrint("AGC fix applied (reg 0x8B5)");
+  #endif
     radio.setDio1Action(onRadioRx);
     // Diagnostic: read back actual radio config
     float ocp = radio.getCurrentLimit();
