@@ -614,7 +614,7 @@ class AutomationEngine:
         if trigger is None:
             block.status = "idle"
             return {}
-        st = self._block_state.setdefault(block.id, {"prev": False, "last_fire": 0.0})
+        st = self._block_state.setdefault(block.id, {"prev": None, "last_fire": 0.0})
         # Rising-edge + action gap
         if trigger and not st["prev"] and (now - st["last_fire"] > rule.action_gap):
             cfg = block.config
@@ -644,7 +644,7 @@ class AutomationEngine:
         if trigger is None:
             block.status = "idle"
             return {}
-        st = self._block_state.setdefault(block.id, {"prev": False, "last_fire": 0.0})
+        st = self._block_state.setdefault(block.id, {"prev": None, "last_fire": 0.0})
         cfg = block.config
         # Fire on state change (both edges)
         if trigger != st["prev"] and (now - st["last_fire"] > rule.action_gap):
