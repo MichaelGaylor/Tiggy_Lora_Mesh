@@ -688,22 +688,29 @@ class GatewayGUIApp:
             # Extract node ID from STATUS response or standalone ID line
             # Serial format: "ID:       6CB5" (with spaces)
             # BLE format: "STATUS,ID:6CB5,BOARD:..." (no spaces)
-            if text.startswith("STATUS,") or text.startswith("ID:"):
+            if text.startswith("STATUS,") or text.startswith("ID:") or text.startswith("Board:"):
                 node_id = ""
+                board_name = ""
                 if text.startswith("STATUS,"):
-                    # BLE format: STATUS,ID:6CB5,...
+                    # BLE format: STATUS,ID:6CB5,BOARD:Heltec V3,...
                     for field in text.split(","):
                         if field.startswith("ID:"):
                             node_id = field[3:].strip()
-                            break
+                        elif field.startswith("BOARD:"):
+                            board_name = field[6:].strip()
                 elif text.startswith("ID:"):
-                    # Serial format: "ID:       6CB5" — take last word
+                    # Serial format: "ID:       6CB5"
                     node_id = text.split()[-1].strip()
+                elif text.startswith("Board:"):
+                    # Serial format: "Board:    Heltec V3"
+                    board_name = text.split(":", 1)[1].strip()
                 if node_id and len(node_id) == 4:
                     self.local_id = node_id
                     self.engine.local_node_id = self.local_id
                     if self.local_id not in self.topo_nodes:
                         self.topo_nodes[self.local_id] = TopoNode(self.local_id, is_local=True)
+                if board_name:
+                    self._set_default_pins_for_board(board_name)
             # Parse pin config: PINS,R:2,3,4|S:33,34
             elif text.startswith("PINS,"):
                 self._parse_pins(text)
@@ -752,7 +759,11 @@ class GatewayGUIApp:
             if hb_from and hb_from != "FFFF":
                 if hb_from not in self.topo_nodes:
                     self.topo_nodes[hb_from] = TopoNode(hb_from, hb_from == self.local_id)
-                    # Auto-query new node's pin config via mesh
+                    # Give new node the default pins (same board type likely)
+                    if hb_from not in self.node_pin_configs and self.node_relay_pins:
+                        self.node_pin_configs[hb_from] = (self.node_relay_pins, self.node_sensor_pins)
+                        self.auto_canvas.node_pin_configs = self.node_pin_configs
+                    # Also query actual pin config via mesh (may override defaults)
                     if hb_from != self.local_id and hb_from not in self._queried_nodes:
                         self._queried_nodes.add(hb_from)
                         self._send_serial(f"MSG,{hb_from},CMD,LIST")
@@ -1195,6 +1206,32 @@ class GatewayGUIApp:
             self.sensor_data[key].append((now, val))
             if len(self.sensor_data[key]) > self.max_sensor_history:
                 self.sensor_data[key] = self.sensor_data[key][-self.max_sensor_history:]
+
+    def _set_default_pins_for_board(self, board_name: str):
+        """Set default relay/sensor pins based on board type from Pins.h defaults."""
+        defaults = {
+            "Heltec V3": (["2","3","4","5","6","7"], ["19","20","33"]),
+            "Heltec V4": (["2","3","4","5","6","7"], ["33","34","15"]),
+            "LoRa32 v1.6.1": (["2","4","12","15","17","33"], ["34","36","39"]),
+            "XIAO ESP32S3": (["2","4","5","6"], ["43","44"]),
+            "Heltec V2": (["2","12","13","17"], ["36","39"]),
+        }
+        for name, (r, s) in defaults.items():
+            if name.lower() in board_name.lower():
+                self.node_relay_pins = r
+                self.node_sensor_pins = s
+                # Store for local node
+                if self.local_id and self.local_id != "????":
+                    self.node_pin_configs[self.local_id] = (r, s)
+                # Also set as default for all discovered nodes (same board type likely)
+                for nid in self.topo_nodes:
+                    if nid not in self.node_pin_configs:
+                        self.node_pin_configs[nid] = (r, s)
+                # Update canvas
+                self.auto_canvas.relay_pins = r
+                self.auto_canvas.sensor_pins = s
+                self.auto_canvas.node_pin_configs = self.node_pin_configs
+                break
 
     def _parse_beacon_event(self, text: str, triggered: bool):
         """Parse BEACON,TRIGGERED,<name>,... or BEACON,REVERTED,<name> from serial."""
