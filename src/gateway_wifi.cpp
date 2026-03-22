@@ -181,12 +181,18 @@ void radioStartListening() {
 #if defined(RADIO_RXEN)
     digitalWrite(RADIO_RXEN, HIGH);
 #endif
+#if defined(RADIO_FEM_TXEN)
+    digitalWrite(RADIO_FEM_TXEN, LOW);
+#endif
     radio.startReceive();
 }
 
 void radioTransmit(const uint8_t* pkt, size_t len) {
 #if defined(RADIO_RXEN)
     digitalWrite(RADIO_RXEN, LOW);
+#endif
+#if defined(RADIO_FEM_TXEN)
+    digitalWrite(RADIO_FEM_TXEN, HIGH);
 #endif
     radio.standby();
     radio.transmit(pkt, len);
@@ -804,6 +810,16 @@ void setup() {
 #ifdef RADIO_RXEN
     pinMode(RADIO_RXEN, OUTPUT);
     digitalWrite(RADIO_RXEN, LOW);
+#endif
+
+    // FEM (GC1109 on Heltec V4)
+#ifdef RADIO_FEM_EN
+    pinMode(RADIO_FEM_EN, OUTPUT);
+    digitalWrite(RADIO_FEM_EN, HIGH);
+#endif
+#ifdef RADIO_FEM_TXEN
+    pinMode(RADIO_FEM_TXEN, OUTPUT);
+    digitalWrite(RADIO_FEM_TXEN, LOW);
 #endif
 
     // Load config from NVS

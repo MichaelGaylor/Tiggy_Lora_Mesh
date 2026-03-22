@@ -23,6 +23,8 @@
 // RADIO_RXEN           - External RF switch pin (XIAO Wio-SX1262, set to GPIO number)
 // RADIO_POWER          - TX power in dBm (default 20, max 22 for SX1262, 20 for SX1276)
 // RADIO_CURRENT_LIMIT  - PA over-current protection in mA (default 140 for SX1262)
+// RADIO_FEM_EN         - Front-end module enable pin (GC1109 on Heltec V4, HIGH = on)
+// RADIO_FEM_TXEN       - Front-end TX enable pin (HIGH = TX/PA, LOW = RX/LNA)
 
 // ═══════════════════════════════════════════════════════════════
 #if defined(BOARD_TDECK_PLUS)
@@ -267,7 +269,9 @@
 #define HAS_GPS             0
 #define HAS_OLED            1
 #define RADIO_SX1262        1
-#define RADIO_DIO2_RF_SWITCH 1  // DIO2 controls antenna RF switch
+#define RADIO_DIO2_RF_SWITCH 1  // DIO2 controls SX1262 RF switch → GC1109 CTX
+#define RADIO_FEM_EN        2     // GC1109 front-end enable (HIGH = on, LOW = disabled)
+#define RADIO_FEM_TXEN      46    // GC1109 PA TX enable (HIGH = TX/PA, LOW = RX/LNA)
 #define RADIO_TCXO_VOLTAGE  1.8f  // SX1262 TCXO on DIO3 at 1.8V
 
 // Power

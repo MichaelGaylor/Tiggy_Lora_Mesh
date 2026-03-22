@@ -587,7 +587,10 @@ void IRAM_ATTR onRadioRx() { mesh.rxFlag = true; }
 // Start listening — always continuous RX (no packet loss)
 void radioStartListening() {
 #if defined(RADIO_RXEN)
-    digitalWrite(RADIO_RXEN, HIGH);  // XIAO: enable RX path
+    digitalWrite(RADIO_RXEN, HIGH);
+#endif
+#if defined(RADIO_FEM_TXEN)
+    digitalWrite(RADIO_FEM_TXEN, LOW);   // RX/LNA mode
 #endif
     radio.startReceive();
 }
@@ -601,12 +604,15 @@ void radioTransmit(uint8_t* pkt, size_t len) {
         receiveCheck();
     }
 #if defined(RADIO_RXEN)
-    digitalWrite(RADIO_RXEN, LOW);   // XIAO: switch to TX path
+    digitalWrite(RADIO_RXEN, LOW);
+#endif
+#if defined(RADIO_FEM_TXEN)
+    digitalWrite(RADIO_FEM_TXEN, HIGH);  // TX/PA mode
 #endif
     radio.standby();
     radio.transmit(pkt, len);
     mesh.rxFlag = false;  // Clear false RX flag from TX_DONE DIO1 interrupt
-    radioStartListening();
+    radioStartListening();  // Switches back to RX/LNA mode
 }
 
 // MeshCore calls this to check if channel is free
@@ -624,6 +630,14 @@ void setupRadio() {
 #if defined(RADIO_RXEN)
     pinMode(RADIO_RXEN, OUTPUT);
     digitalWrite(RADIO_RXEN, LOW);
+#endif
+#if defined(RADIO_FEM_EN)
+    pinMode(RADIO_FEM_EN, OUTPUT);
+    digitalWrite(RADIO_FEM_EN, HIGH);   // Enable GC1109 front-end module
+#endif
+#if defined(RADIO_FEM_TXEN)
+    pinMode(RADIO_FEM_TXEN, OUTPUT);
+    digitalWrite(RADIO_FEM_TXEN, LOW);  // Start in RX/LNA mode
 #endif
     int state = RADIOLIB_ERR_UNKNOWN;
     for (int attempt = 0; attempt < 3; attempt++) {

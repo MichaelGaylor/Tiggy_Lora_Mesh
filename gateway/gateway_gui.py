@@ -838,7 +838,9 @@ class GatewayGUIApp:
                     self.topo_nodes[msg_from] = TopoNode(msg_from, msg_from == self.local_id)
                 self.topo_nodes[msg_from].last_seen = now
                 self.topo_nodes[msg_from].packets += 1
-                self.topo_nodes[msg_from].rssi = pkt_rssi
+                # Only update RSSI from direct messages (src == msg_from means no relay)
+                if src == msg_from:
+                    self.topo_nodes[msg_from].rssi = pkt_rssi
 
             # Build edges from route
             if route:
