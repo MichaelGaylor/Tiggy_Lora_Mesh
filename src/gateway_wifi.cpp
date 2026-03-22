@@ -276,10 +276,6 @@ void setupRadio() {
     radio.setDio2AsRfSwitch(true);
   #endif
     radio.setCurrentLimit(RADIO_CURRENT_LIMIT);
-  #if defined(RADIO_FEM_EN)
-    // GC1109 AGC fix: register 0x8B5 LSB corrects AGC malfunction with FEM
-    radio.mod->SPIsetRegValue(0x08B5, 0x01, 0, 0);
-  #endif
     radio.setDio1Action(onRadioRx);
 #elif defined(RADIO_SX1276)
     radio.setDio0Action(onRadioRx, RISING);
