@@ -55,7 +55,6 @@ STATUS_COLORS = {
 def show_block_config(parent, block: Block, discovered_nodes: dict,
                       relay_pins: list[str] = None, sensor_pins: list[str] = None):
     """Show a configuration dialog for a block. Returns True if changed."""
-    print(f"[DEBUG] show_block_config: relay_pins={relay_pins}, sensor_pins={sensor_pins}")
     bt = block.block_type
     cfg = block.config
     dialog = ctk.CTkToplevel(parent)
@@ -343,13 +342,15 @@ class AutomationCanvas:
                 fill="#B0B0B0", font=("Consolas", 13))
             return
 
-        # Draw wires first (behind blocks)
-        for wire in self.current_rule.wires:
-            self._draw_wire(wire)
-
-        # Draw blocks
+        # Draw blocks first (populates _port_pos needed by wires)
         for block in self.current_rule.blocks:
             self._draw_block(block)
+
+        # Draw wires (need port positions from blocks above)
+        for wire in self.current_rule.wires:
+            self._draw_wire(wire)
+        # Push wires behind blocks visually
+        self.canvas.tag_lower("wire")
 
     def update_live_values(self):
         """Update live value labels on wires (called periodically)."""
@@ -778,7 +779,6 @@ class AutomationCanvas:
                     r_pins, s_pins = self.node_pin_configs[node_id]
                     r_pins = list(r_pins)
                     s_pins = list(s_pins)
-                print(f"[DEBUG] Configure block: node={node_id}, relay_pins={r_pins}, sensor_pins={s_pins}")
                 changed = show_block_config(
                     self.parent.winfo_toplevel(), block,
                     self.engine.discovered_nodes,

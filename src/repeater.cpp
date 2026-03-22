@@ -586,6 +586,9 @@ void IRAM_ATTR onRadioRx() { mesh.rxFlag = true; }
 
 // Start listening — always continuous RX (no packet loss)
 void radioStartListening() {
+#if defined(RADIO_RXEN)
+    digitalWrite(RADIO_RXEN, HIGH);  // XIAO: enable RX path
+#endif
     radio.startReceive();
 }
 
@@ -597,6 +600,9 @@ void radioTransmit(uint8_t* pkt, size_t len) {
     if (mesh.rxFlag) {
         receiveCheck();
     }
+#if defined(RADIO_RXEN)
+    digitalWrite(RADIO_RXEN, LOW);   // XIAO: switch to TX path
+#endif
     radio.standby();
     radio.transmit(pkt, len);
     mesh.rxFlag = false;  // Clear false RX flag from TX_DONE DIO1 interrupt
@@ -615,6 +621,10 @@ bool radioChannelFree() {
 #endif
 
 void setupRadio() {
+#if defined(RADIO_RXEN)
+    pinMode(RADIO_RXEN, OUTPUT);
+    digitalWrite(RADIO_RXEN, LOW);
+#endif
     int state = RADIOLIB_ERR_UNKNOWN;
     for (int attempt = 0; attempt < 3; attempt++) {
         if (attempt > 0) {
@@ -642,6 +652,10 @@ void setupRadio() {
         }
     }
 #if defined(RADIO_SX1262)
+  #if defined(RADIO_DIO2_RF_SWITCH)
+    radio.setDio2AsRfSwitch(true);
+  #endif
+    radio.setCurrentLimit(140.0);
     radio.setDio1Action(onRadioRx);
 #elif defined(RADIO_SX1276)
     radio.setDio0Action(onRadioRx, RISING);

@@ -725,7 +725,6 @@ class GatewayGUIApp:
                 self._parse_beacon_event(text, False)
             # Parse direct SDATA from serial (local POLL response)
             elif text.startswith("SDATA,"):
-                print(f"[SDATA] Received: {text[:60]}")
                 self._parse_sdata(text)
             # Parse remote node responses that arrive wrapped in RX,<from>,<content>,<rssi>
             elif text.startswith("RX,"):
@@ -1043,9 +1042,6 @@ class GatewayGUIApp:
             return
         encrypted = self.selected_packet.get("encrypted", "")
         msg_id = self.selected_packet.get("msg_id", "")
-        print(f"[DECRYPT] selected_packet type={self.selected_packet.get('type')} "
-              f"src={self.selected_packet.get('src')} encrypted_len={len(encrypted)} "
-              f"encrypted[:20]={encrypted[:20]} key={key}")
         if not encrypted or not msg_id:
             self.decrypt_result.configure(text="Not an encrypted MSG packet", text_color=COLORS["bad"])
             return

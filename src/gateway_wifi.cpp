@@ -263,6 +263,10 @@ void setupRadio() {
         }
     }
 #if defined(RADIO_SX1262)
+  #if defined(RADIO_DIO2_RF_SWITCH)
+    radio.setDio2AsRfSwitch(true);
+  #endif
+    radio.setCurrentLimit(140.0);
     radio.setDio1Action(onRadioRx);
 #elif defined(RADIO_SX1276)
     radio.setDio0Action(onRadioRx, RISING);

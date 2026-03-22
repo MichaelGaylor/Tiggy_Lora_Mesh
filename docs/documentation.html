@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>TiggyOpenMesh v4.0 - Complete Documentation</title>
+<title>TiggyOpenMesh v4.1 - Complete Documentation</title>
 <style>
   :root {
     --bg: #0a0e14;
@@ -474,7 +474,7 @@
 <div class="hero">
   <h1>TiggyOpenMesh</h1>
   <div class="subtitle">T-Deck Plus &bull; LoRa32 &bull; Heltec V3 &bull; Heltec V4 &bull; XIAO ESP32S3</div>
-  <span class="version">v4.0 &mdash; MeshCore Architecture</span>
+  <span class="version">v4.1 &mdash; MeshCore Architecture</span>
   <p style="color:var(--dim); margin-top:16px; font-size:0.95em;">
     Complete technical documentation &mdash; hardware, protocol, menus, code architecture &amp; API
   </p>
@@ -514,6 +514,7 @@
   <a href="#gps">GPS</a>
   <a href="#device-management">Device Mgmt</a>
   <a href="#signal-routing">Signal &amp; Routes</a>
+  <a href="#ibeacon">iBeacon Scanner</a>
   <a href="#heltec-v4">Heltec V4 USB</a>
 </nav>
 
@@ -1016,7 +1017,7 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
 
 <div class="screen">
   <div class="screen-header">
-    <span class="title">TiggyOpenMesh v4.0</span>
+    <span class="title">TiggyOpenMesh v4.1</span>
     <span class="badge">ONLINE</span>
   </div>
   <div class="screen-content">
@@ -1121,7 +1122,7 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
 
 <h3>Settings Submenu</h3>
 <div class="screen">
-  <div class="screen-header"><span class="title">TiggyOpenMesh v4.0</span></div>
+  <div class="screen-header"><span class="title">TiggyOpenMesh v4.1</span></div>
   <div class="screen-content">
     <div class="menu-item selected"><div class="bar" style="background:var(--cyan);"></div> Set Local ID <span class="arrow">&gt;</span></div>
     <div class="menu-item"><div class="bar" style="background:var(--faint);"></div> Set Target ID</div>
@@ -1222,7 +1223,7 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
     </div>
     <div style="font-size:22px; color:var(--cyan); margin-top:14px; font-weight:700;">TiggyOpenMesh</div>
     <div style="color:var(--green); margin-top:4px;">T-Deck Plus Edition</div>
-    <div style="display:inline-block; background:var(--cyan); color:#000; padding:2px 12px; border-radius:8px; font-size:11px; font-weight:700; margin-top:6px;">v4.0</div>
+    <div style="display:inline-block; background:var(--cyan); color:#000; padding:2px 12px; border-radius:8px; font-size:11px; font-weight:700; margin-top:6px;">v4.1</div>
     <div style="background:var(--panel); border-radius:8px; padding:10px; margin:12px 20px 0; text-align:left; font-size:10px; color:var(--dim); line-height:1.8;">
       Freq: 868.0 MHz &nbsp;&nbsp; SF: 9<br>
       BW: 125 kHz &nbsp;&nbsp; Power: 20dBm<br>
@@ -1271,7 +1272,7 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
 <section id="android-app">
 <h2>9. Android App</h2>
 
-<p>The companion Android app connects to any repeater node via BLE (Nordic UART Service). It turns any headless board into a full communicator with chat, relay control, and settings.</p>
+<p>The companion Android app connects to any repeater node via BLE (Nordic UART Service). It turns any headless board into a full communicator with chat, relay control, sensor monitoring, and remote node management. A <strong>foreground BLE service</strong> keeps the connection alive when the app is in the background.</p>
 
 <h3>App Screens</h3>
 
@@ -1384,15 +1385,23 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
 <h3>App Architecture</h3>
 <table>
   <tr><th>Component</th><th>File</th><th>Responsibility</th></tr>
-  <tr><td>BLE Manager</td><td><code>BleManager.kt</code></td><td>Scan, connect, disconnect, send/receive via Nordic UART</td></tr>
-  <tr><td>ViewModel</td><td><code>MeshViewModel.kt</code></td><td>Parse incoming data, manage UI state (messages, relays, config)</td></tr>
+  <tr><td>BLE Manager</td><td><code>BleManager.kt</code></td><td>Scan, connect, disconnect, send/receive via Nordic UART. Remote relay/sensor control functions.</td></tr>
+  <tr><td>BLE Service</td><td><code>BleConnectionService.kt</code></td><td>Android foreground service &mdash; keeps BLE connection alive when app is in background.</td></tr>
+  <tr><td>App Singleton</td><td><code>LoRaMeshApp.kt</code></td><td>Application-level BleManager instance shared across all components.</td></tr>
+  <tr><td>ViewModel</td><td><code>MeshViewModel.kt</code></td><td>Parse incoming data, manage UI state. Auto-saves key/ID to EEPROM after changes.</td></tr>
   <tr><td>Scan Screen</td><td><code>ScanScreen.kt</code></td><td>BLE device discovery with RSSI colour coding</td></tr>
   <tr><td>Chat Screen</td><td><code>ChatScreen.kt</code></td><td>Send/receive messages, broadcast/direct toggle</td></tr>
-  <tr><td>Control Screen</td><td><code>ControlScreen.kt</code></td><td>Relay toggles, pulse buttons, sensor sparklines, timers, setpoints, auto-poll</td></tr>
+  <tr><td>Control Screen</td><td><code>ControlScreen.kt</code></td><td>Relay toggles, pulse buttons, sensor sparklines. <strong>Node picker</strong> for remote node control via mesh.</td></tr>
   <tr><td>Nodes Screen</td><td><code>NodesScreen.kt</code></td><td>Discovered mesh nodes list with online/offline status and signal strength</td></tr>
-  <tr><td>Settings Screen</td><td><code>SettingsScreen.kt</code></td><td>Node ID, AES key, power mode toggle, save to EEPROM, Telegram config</td></tr>
+  <tr><td>Settings Screen</td><td><code>SettingsScreen.kt</code></td><td>Node ID, AES key (auto-saved), GPS toggle, solar mode toggle, Telegram config</td></tr>
   <tr><td>Theme</td><td><code>Theme.kt</code></td><td>Dark theme matching firmware cyan/green palette</td></tr>
 </table>
+
+<h3>Remote Node Control</h3>
+<p>The Control screen includes a <strong>node picker dropdown</strong> at the top. Select any discovered mesh node to control its relays and read its sensors remotely. Commands are encrypted and sent via <code>MSG,&lt;nodeId&gt;,CMD,...</code> over the mesh. The local node processes commands directly via BLE.</p>
+
+<h3>Background BLE</h3>
+<p>The app uses an Android <strong>foreground service</strong> (<code>BleConnectionService</code>) to maintain the BLE connection when the app is backgrounded or the screen is off. A persistent notification shows the connection status. This prevents Android from killing the BLE connection during battery optimization.</p>
 </section>
 
 <!-- ═══════════════ BLE PROTOCOL ═══════════════ -->
@@ -1698,7 +1707,7 @@ SDATA,0010,34:2048,36:1200,39:4095</pre>
   <tr><th>Board</th><th>Default Sensor Pins</th><th>Notes</th></tr>
   <tr><td>LoRa32 T3</td><td>34, 36, 39</td><td>Input-only, ADC1. Best for analog sensors.</td></tr>
   <tr><td>Heltec V3</td><td>19, 20, 33</td><td>All ADC-capable on ESP32-S3.</td></tr>
-  <tr><td>Heltec V4</td><td>33, 34, 38</td><td>GPIO 19/20 are USB D-/D+ &mdash; <strong>do not use as GPIO</strong>. Use pins 33+ instead.</td></tr>
+  <tr><td>Heltec V4</td><td>33, 34, 15</td><td>GPIO 19/20 are USB D-/D+, GPIO 38 is GPS header &mdash; <strong>do not use as GPIO</strong>.</td></tr>
   <tr><td>XIAO ESP32S3</td><td>43, 44</td><td>Digital-only (UART pins). Use <code>SENSOR 2,4,5</code> for analog.</td></tr>
   <tr><td>Heltec V2</td><td>36, 39</td><td>Input-only, ADC1. Used as WiFi gateway &mdash; sensors optional.</td></tr>
   <tr><td>T-Deck Plus</td><td>None</td><td>No free GPIO &mdash; all pins used by display/keyboard/GPS.</td></tr>
@@ -1721,7 +1730,7 @@ SDATA,0010,34:2048,36:1200,39:4095</pre>
 <h3>Viewing Sensor Data</h3>
 <ul style="color:var(--dim); padding-left:20px;">
   <li><strong>Android app:</strong> Control screen shows live sparkline charts per sensor pin with min/max labels.</li>
-  <li><strong>PC Gateway GUI:</strong> Sensor Monitor panel with auto-decrypting sparklines. Enter AES key in the inspector, use POLL button to request readings.</li>
+  <li><strong>PC Gateway GUI &mdash; Sensors tab:</strong> Full sensor dashboard with <strong>circular gauge widgets</strong> (colour gradient, needle, min/max tracking), <strong>matplotlib line charts</strong> with configurable history length, and a toolbar for pause/resume, clear, and <strong>CSV export</strong> (saved to <code>gateway/exports/</code>).</li>
   <li><strong>Hub GUI:</strong> Sensor Monitor canvas with sparklines for all sensors across all gateway-connected nodes.</li>
   <li><strong>Web Map:</strong> Sensor bar at the bottom of the map page. Enter your 16-char AES key to decrypt sensor data client-side &mdash; the hub never sees plaintext. Sparkline cards auto-update every 5 seconds.</li>
 </ul>
@@ -2194,7 +2203,7 @@ gateway/
 <!-- ─── Opening the Logic Builder ─── -->
 
 <h3>Opening the Logic Builder</h3>
-<p>Click the <strong>[Logic Builder]</strong> toggle button in the gateway GUI title bar (next to the connection status). This hides the packet waterfall and node inspector and shows the automation canvas in their place. Click again to switch back to the normal view. <strong>Rules continue evaluating in the background</strong> even when the Logic Builder panel is hidden.</p>
+<p>Click the <strong>Logic</strong> tab at the bottom of the gateway GUI (alongside Packets and Sensors tabs). The automation canvas appears below the mesh topology map. <strong>Rules continue evaluating in the background</strong> regardless of which tab is active.</p>
 
 <!-- ─── Creating a Rule ─── -->
 
@@ -2221,6 +2230,12 @@ gateway/
     <td>Reads the latest sensor value for a specific pin on a specific node. Uses SDATA data received by the gateway.</td>
     <td><strong>Node ID:</strong> The 4-character hex ID of the node (e.g., A1B2). <strong>Pin:</strong> GPIO pin number. <strong>Label:</strong> Descriptive name (e.g., &ldquo;Wind Sensor&rdquo;).</td>
     <td>A number (the raw sensor reading, 0&ndash;4095 for analog).</td>
+  </tr>
+  <tr>
+    <td style="color:var(--cyan);">Beacon Detect</td>
+    <td>Detects an iBeacon tag by UUID or MAC address. Outputs true/false based on proximity (RSSI threshold). See <a href="#ibeacon" style="color:var(--cyan);">Section 38: iBeacon Scanner</a>.</td>
+    <td><strong>Beacon ID:</strong> UUID or MAC address. <strong>Name:</strong> Human label. <strong>RSSI Threshold:</strong> Minimum signal strength (e.g., -70 dBm).</td>
+    <td><code>detected</code> (bool), <code>rssi</code> (number).</td>
   </tr>
   <tr>
     <td style="color:var(--cyan);">Constant</td>
@@ -3441,8 +3456,82 @@ const int RELAY_PINS[]  = {2, 4, 5, 12, 13, 14};      <span class="comment">// D
 </section>
 
 <!-- ═══════════════════════════════════════════════════════════ -->
+<section id="ibeacon">
+<h2>38. iBeacon Scanner &mdash; BLE Proximity Triggers</h2>
+
+<p>Repeater nodes can scan for <strong>iBeacon</strong> BLE tags alongside the normal GATT server (dual-role BLE). When a configured beacon enters range (based on RSSI threshold), the node can trigger a relay or broadcast a mesh message &mdash; all without any phone or gateway connection.</p>
+
+<div class="info-box cyan">
+  <p><strong>Use cases:</strong> Livestock tracking (cow enters/leaves field), asset proximity (forklift near gate), personnel detection (worker arrives at remote site), vehicle presence (car in driveway).</p>
+</div>
+
+<h3>How It Works</h3>
+<ol style="color:var(--dim); padding-left:20px;">
+  <li>The node runs a non-blocking BLE scan every <strong>5 seconds</strong> (1-second scan duration).</li>
+  <li>Each detected device is checked against up to <strong>8 beacon rules</strong>.</li>
+  <li>Matching is by <strong>iBeacon UUID</strong> (contains dashes) or <strong>MAC address</strong> (contains colons).</li>
+  <li>If the beacon's RSSI is above the configured threshold, the rule's action fires.</li>
+  <li>A <strong>cooldown</strong> prevents re-triggering too quickly (default 10 seconds).</li>
+  <li>For relay actions, an optional <strong>auto-revert</strong> turns the relay off when the beacon has not been seen for a configurable duration.</li>
+</ol>
+
+<h3>Beacon Commands (BLE / Serial)</h3>
+<table>
+  <tr><th>Command</th><th>Description</th></tr>
+  <tr><td><code>BEACON,SCAN</code></td><td>One-off 2-second scan &mdash; returns all visible BLE devices with MAC, RSSI, UUID (if iBeacon), and name.</td></tr>
+  <tr><td><code>BEACON,LIST</code></td><td>List all active beacon rules with their configuration.</td></tr>
+  <tr>
+    <td><code>BEACON,ADD,&lt;uuid_or_mac&gt;,&lt;name&gt;,&lt;rssi&gt;,RELAY,&lt;pin&gt;,&lt;state&gt;[,&lt;cooldown&gt;][,REVERT,&lt;ms&gt;]</code></td>
+    <td>Add a relay action rule. Fires <code>digitalWrite(pin, state)</code> when beacon detected. Optional cooldown (ms) and auto-revert (ms after beacon gone).</td>
+  </tr>
+  <tr>
+    <td><code>BEACON,ADD,&lt;uuid_or_mac&gt;,&lt;name&gt;,&lt;rssi&gt;,MSG,&lt;text&gt;[,&lt;cooldown&gt;]</code></td>
+    <td>Add a broadcast message action. Sends an encrypted mesh broadcast when beacon detected.</td>
+  </tr>
+  <tr><td><code>BEACON,DELETE,&lt;index&gt;</code></td><td>Delete a rule by its slot index (0-7).</td></tr>
+  <tr><td><code>BEACON,CLEAR</code></td><td>Delete all beacon rules.</td></tr>
+</table>
+
+<h3>Examples</h3>
+<pre><span class="comment"># Scan for nearby beacons</span>
+BEACON,SCAN
+<span class="comment"># Response: BEACONSCAN,3,aa:bb:cc:dd:ee:ff:-62dBm,11:22:33:44:55:66:-88dBm:MyTag,...</span>
+
+<span class="comment"># Gate opener: turn on relay pin 4 when tag is within ~3m (-65 dBm)</span>
+<span class="comment"># Auto-revert relay after tag gone for 30 seconds</span>
+BEACON,ADD,aa:bb:cc:dd:ee:ff,Gate,<span style="color:var(--orange);">-65</span>,RELAY,4,1,10000,REVERT,30000
+
+<span class="comment"># Alert: broadcast "COW_OUT" when iBeacon UUID detected</span>
+BEACON,ADD,<span style="color:var(--cyan);">FDA50693-A4E2-4FB1-AFCF-C6EB0764...</span>,Daisy,<span style="color:var(--orange);">-80</span>,MSG,COW_OUT,60000
+
+<span class="comment"># List configured rules</span>
+BEACON,LIST
+<span class="comment"># Response: BEACONS,0:Gate:aa:bb:cc:dd:ee:ff:-65dBm:RELAY4:REVERT30000ms,1:Daisy:FDA50693...:MSG</span></pre>
+
+<h3>Events</h3>
+<p>When a beacon rule fires, the node sends a notification over BLE/serial:</p>
+<pre><span class="comment"># Relay triggered</span>
+BEACON,TRIGGERED,Gate,RELAY,4
+
+<span class="comment"># Message broadcast triggered</span>
+BEACON,TRIGGERED,Daisy,MSG,COW_OUT
+
+<span class="comment"># Relay auto-reverted (tag gone)</span>
+BEACON,REVERTED,Gate</pre>
+
+<h3>Persistence</h3>
+<p>Beacon rules are saved to <strong>EEPROM</strong> (address 512+, 128 bytes per rule, up to 8 rules = 1024 bytes). Rules persist across reboots. The runtime state (<code>lastSeen</code>, <code>triggered</code>) is not persisted &mdash; all rules start in the untriggered state after reboot.</p>
+
+<h3>Logic Builder Integration</h3>
+<p>The gateway GUI Logic Builder includes a <strong>Beacon Detect</strong> input block that can trigger automation rules based on beacon proximity events received from the mesh. Beacon events (<code>BEACON,TRIGGERED</code> / <code>BEACON,REVERTED</code>) from any node in the mesh are parsed by the gateway and fed into the block evaluation engine.</p>
+
+<div class="info-box">
+  <p><strong>Note:</strong> Beacon scanning is disabled in <strong>solar mode</strong> to conserve power. The BLE GATT server (phone app connection) continues to work alongside scanning in normal mode.</p>
+</div>
+</section>
+
 <section id="heltec-v4">
-<h2>37. Heltec WiFi LoRa 32 V4 — USB Notes</h2>
+<h2>39. Heltec WiFi LoRa 32 V4 — USB Notes</h2>
 
 <p>The Heltec V4 uses the ESP32-S3's <strong>native USB</strong> (HWCDC) instead of an external UART chip like the V3's CP2102. This has important implications:</p>
 
@@ -3471,10 +3560,10 @@ const int RELAY_PINS[]  = {2, 4, 5, 12, 13, 14};      <span class="comment">// D
 
 <!-- Footer -->
 <div style="background:var(--panel); border-top:1px solid var(--faint); padding:30px 40px; text-align:center; color:var(--faint); font-size:0.85em;">
-  <p>TiggyOpenMesh v4.0 &mdash; MeshCore Architecture</p>
+  <p>TiggyOpenMesh v4.1 &mdash; MeshCore Architecture</p>
   <p>T-Deck Plus &bull; LoRa32 T3 V1.6.1 &bull; Heltec WiFi LoRa 32 V3 &bull; Heltec WiFi LoRa 32 V4 &bull; XIAO ESP32S3</p>
-  <p>37 sections &mdash; Hardware, Protocol, UI, BLE, Gateway, Logic Builder, Timers, Setpoints, Sensors, Pulse Counters, SOS, Map, Solar, Delivery, SF Change, Collision Detection, IO Expansion, GPS, Device Management, Signal Routing, Heltec V4 USB, Caveats</p>
-  <p style="margin-top:8px;">Documentation generated March 2026</p>
+  <p>39 sections &mdash; Hardware, Protocol, UI, BLE, Gateway, Logic Builder, Timers, Setpoints, Sensors, Pulse Counters, SOS, Map, Solar, Delivery, SF Change, Collision Detection, IO Expansion, GPS, Device Management, Signal Routing, iBeacon Scanner, Heltec V4 USB, Caveats</p>
+  <p style="margin-top:8px;">Documentation updated March 2026</p>
 </div>
 
 </body>

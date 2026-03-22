@@ -12,13 +12,15 @@
 #pragma once
 
 // ─── Board capabilities (set automatically) ─────────────────
-// HAS_DISPLAY      - has a graphical TFT display
-// HAS_KEYBOARD     - has I2C keyboard
-// HAS_TRACKBALL    - has trackball input
-// HAS_GPS          - has built-in GPS module
-// HAS_OLED         - has small OLED (SSD1306)
-// RADIO_SX1262     - uses SX1262 (RadioLib)
-// RADIO_SX1276     - uses SX1276 (RadioLib)
+// HAS_DISPLAY          - has a graphical TFT display
+// HAS_KEYBOARD         - has I2C keyboard
+// HAS_TRACKBALL        - has trackball input
+// HAS_GPS              - has built-in GPS module
+// HAS_OLED             - has small OLED (SSD1306)
+// RADIO_SX1262         - uses SX1262 (RadioLib)
+// RADIO_SX1276         - uses SX1276 (RadioLib)
+// RADIO_DIO2_RF_SWITCH - SX1262 DIO2 controls the RF antenna switch (Heltec, T-Deck, etc.)
+// RADIO_RXEN           - External RF switch pin (XIAO Wio-SX1262, set to GPIO number)
 
 // ═══════════════════════════════════════════════════════════════
 #if defined(BOARD_TDECK_PLUS)
@@ -34,6 +36,7 @@
 #define HAS_GPS             1
 #define HAS_OLED            0
 #define RADIO_SX1262        1
+#define RADIO_DIO2_RF_SWITCH 1  // DIO2 controls antenna RF switch
 
 // Power
 #define BOARD_POWERON       10
@@ -184,6 +187,7 @@
 #define HAS_GPS             0
 #define HAS_OLED            1
 #define RADIO_SX1262        1
+#define RADIO_DIO2_RF_SWITCH 1  // DIO2 controls antenna RF switch
 #define RADIO_TCXO_VOLTAGE  1.8f  // SX1262 TCXO on DIO3 at 1.8V — required or radio hangs
 
 // Power
@@ -261,6 +265,7 @@
 #define HAS_GPS             0
 #define HAS_OLED            1
 #define RADIO_SX1262        1
+#define RADIO_DIO2_RF_SWITCH 1  // DIO2 controls antenna RF switch
 #define RADIO_TCXO_VOLTAGE  1.8f  // SX1262 TCXO on DIO3 at 1.8V
 
 // Power
