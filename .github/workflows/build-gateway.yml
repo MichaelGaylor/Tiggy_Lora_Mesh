@@ -40,6 +40,8 @@ jobs:
           cd gateway
           pyinstaller --noconfirm --onefile --windowed `
             --collect-data customtkinter `
+            --collect-all matplotlib `
+            --hidden-import sensor_dashboard `
             --name "TiggyOpenMesh-Gateway" `
             gateway_gui.py
 
