@@ -291,9 +291,10 @@ class GatewayGUIApp:
         # Logic builder state
         self.logic_visible = False
 
-        # Node pin config (populated from PINS response)
-        self.node_relay_pins: list[str] = []
-        self.node_sensor_pins: list[str] = []
+        # Node pin config — defaults cover all common ESP32-S3 boards (V3, V4, XIAO)
+        # CMD,LIST or STATUS can override these if they arrive
+        self.node_relay_pins: list[str] = ["2","3","4","5","6","7"]
+        self.node_sensor_pins: list[str] = ["15","19","20","33","34"]
         # Per-node pin configs: nodeId → (relay_pins, sensor_pins)
         self.node_pin_configs: dict[str, tuple[list[str], list[str]]] = {}
         self._queried_nodes: set[str] = set()  # Track which nodes we've already queried
@@ -303,6 +304,9 @@ class GatewayGUIApp:
 
         self.build_ui()
         self._refresh_rule_list()  # Load saved rules into combo box
+        # Push default pins to canvas immediately
+        self.auto_canvas.relay_pins = self.node_relay_pins
+        self.auto_canvas.sensor_pins = self.node_sensor_pins
 
         self.refresh_ports()
         self.root.after(50, self.poll_events)
