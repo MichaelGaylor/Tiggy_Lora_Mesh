@@ -302,11 +302,13 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
     // ─── Settings ────────────────────────────────────────────
     fun setNodeId(id: String) {
         ble.setNodeId(id)
+        ble.send("SAVE")  // Persist to EEPROM immediately
         _config.value = _config.value.copy(nodeId = id)
     }
 
     fun setAesKey(key: String) {
         ble.setAesKey(key)
+        ble.send("SAVE")  // Persist to EEPROM immediately
         _config.value = _config.value.copy(aesKey = key)
     }
 
