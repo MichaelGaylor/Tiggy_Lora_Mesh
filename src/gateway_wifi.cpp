@@ -785,7 +785,7 @@ void setup() {
     delay(500);
 
     // Hardware watchdog — 30s timeout, auto-reboots on hang
-    esp_task_wdt_init(30, true);
+    esp_task_wdt_init(30, false);  // false = clean reboot, not panic
     esp_task_wdt_add(NULL);
 
     Serial.println("\n═══════════════════════════════════");

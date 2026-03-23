@@ -1961,27 +1961,10 @@ void processBleCommand(const String& line) {
 // SECTION: Serial Configuration
 // ═══════════════════════════════════════════════════════════════
 
-static String serialLineBuf;
-
-void processSerialLine(const String& line);  // Forward declaration
-
 void handleSerialConfig() {
-    // Non-blocking: read available chars, process complete lines
-    while (Serial.available()) {
-        char c = Serial.read();
-        if (c == '\n' || c == '\r') {
-            serialLineBuf.trim();
-            if (serialLineBuf.length() > 0) {
-                processSerialLine(serialLineBuf);
-                serialLineBuf = "";
-            }
-        } else if (serialLineBuf.length() < 256) {
-            serialLineBuf += c;
-        }
-    }
-}
-
-void processSerialLine(const String& line) {
+    if (!Serial.available()) return;
+    String line = Serial.readStringUntil('\n'); line.trim();
+    if (line.length() == 0) return;
 
     if (line.startsWith("ID ")) {
         String id = line.substring(3); id.trim(); id.toUpperCase();
@@ -2574,10 +2557,9 @@ void setup() {
     Serial.begin(115200);
     delay(1000);
 
-    // Hardware watchdog — 30s timeout, auto-reboots on hang
-    // Generous enough for BLE scan (1s), EEPROM commit (100ms), radio TX (500ms)
-    esp_task_wdt_init(30, true);  // 30s timeout, panic on trigger
-    esp_task_wdt_add(NULL);       // Add current task (loopTask)
+    // Hardware watchdog — 30s timeout, clean reboot on hang (no panic dump)
+    esp_task_wdt_init(30, false);  // false = clean reboot, not panic
+    esp_task_wdt_add(NULL);
 
     Serial.println("\n═══════════════════════════════════");
     Serial.println("  TiggyOpenMesh Repeater v4.0");
@@ -2923,7 +2905,7 @@ void loop() {
     lastBtn = btn;
 #endif
 
-    esp_task_wdt_reset();  // Pet the watchdog — must happen every <30s
+    esp_task_wdt_reset();  // Pet the watchdog
     yield();
 }
 
