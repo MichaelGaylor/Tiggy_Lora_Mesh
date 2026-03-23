@@ -16,6 +16,7 @@
 #include <Wire.h>
 #include <EEPROM.h>
 #include <RadioLib.h>
+#include <esp_task_wdt.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
 #include <TinyGPSPlus.h>
@@ -2174,6 +2175,11 @@ void setup() {
 
   Serial.begin(115200);
   delay(200);
+
+  // Hardware watchdog — 30s timeout, auto-reboots on hang
+  esp_task_wdt_init(30, true);
+  esp_task_wdt_add(NULL);
+
   debugPrint("\n=== TiggyOpenMesh v3.1 - T-Deck Plus ===");
   // Seed RNG with hardware random XOR'd with unique MAC address
   uint8_t mac[6];
@@ -2362,5 +2368,6 @@ void loop() {
       break;
   }
 
+  esp_task_wdt_reset();  // Pet the watchdog
   yield();
 }

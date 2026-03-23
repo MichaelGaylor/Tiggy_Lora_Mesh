@@ -18,6 +18,7 @@
 #include <Wire.h>
 #include <EEPROM.h>
 #include <RadioLib.h>
+#include <esp_task_wdt.h>
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLESecurity.h>
@@ -2569,6 +2570,12 @@ void updateOLED() {
 void setup() {
     Serial.begin(115200);
     delay(1000);
+
+    // Hardware watchdog — 30s timeout, auto-reboots on hang
+    // Generous enough for BLE scan (1s), EEPROM commit (100ms), radio TX (500ms)
+    esp_task_wdt_init(30, true);  // 30s timeout, panic on trigger
+    esp_task_wdt_add(NULL);       // Add current task (loopTask)
+
     Serial.println("\n═══════════════════════════════════");
     Serial.println("  TiggyOpenMesh Repeater v4.0");
     Serial.println("  Board: " + String(BOARD_NAME));
@@ -2913,6 +2920,7 @@ void loop() {
     lastBtn = btn;
 #endif
 
+    esp_task_wdt_reset();  // Pet the watchdog — must happen every <30s
     yield();
 }
 

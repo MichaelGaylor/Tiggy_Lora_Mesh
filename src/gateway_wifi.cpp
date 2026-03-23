@@ -32,6 +32,7 @@
 #include <WiFi.h>
 #include <Preferences.h>
 #include <RadioLib.h>
+#include <esp_task_wdt.h>
 #include <WebSocketsClient.h>
 #include <BLEDevice.h>
 #include <BLEServer.h>
@@ -782,6 +783,11 @@ void checkRadioRx() {
 void setup() {
     Serial.begin(115200);
     delay(500);
+
+    // Hardware watchdog — 30s timeout, auto-reboots on hang
+    esp_task_wdt_init(30, true);
+    esp_task_wdt_add(NULL);
+
     Serial.println("\n═══════════════════════════════════");
     Serial.println("  TiggyOpenMesh WiFi Gateway v1.1");
     Serial.println("  Board: " BOARD_NAME);
@@ -919,6 +925,7 @@ void loop() {
         }
     }
 
+    esp_task_wdt_reset();  // Pet the watchdog
     yield();
 }
 
