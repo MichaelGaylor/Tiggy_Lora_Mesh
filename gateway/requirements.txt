@@ -5,4 +5,5 @@ customtkinter>=5.2
 Pillow>=10.0
 pycryptodome>=3.20
 matplotlib>=3.8
+meshtastic>=2.0
 pyinstaller>=6.0
