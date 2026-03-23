@@ -700,7 +700,7 @@ void receiveCheck() {
         mesh.processPacket(mp);
 
         // Gateway mode: forward raw packet + RSSI over serial for bridge server
-        if (gatewayMode && Serial.availableForWrite() > 200) {
+        if (gatewayMode && Serial.availableForWrite() > 10) {
             Serial.println("PKT," + mesh.toHex(pkt, len) + "," + String(mesh.lastRSSI));
         }
     }
