@@ -788,7 +788,9 @@ class GatewayGUIApp:
                         self.engine._log("Engine", f"RX SDATA from {from_node}: {content[:50]}")
                     elif content.startswith("PINS,"):
                         self._parse_pins(content, from_node)
-            # Log ALL unhandled serial lines so we can see what's coming back
+            # Log unhandled serial lines (full text for scan results, truncated for others)
+            elif text.startswith("BEACONSCAN,"):
+                self.engine._log("Serial", text)  # Full scan result for beacon dialog
             else:
                 self.engine._log("Serial", text[:60])
 

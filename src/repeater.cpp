@@ -390,7 +390,8 @@ void ioExpandPoll() {
             }
             ioExpandRxBuf = "";
         } else {
-            ioExpandRxBuf += c;
+            if (ioExpandRxBuf.length() < 256) ioExpandRxBuf += c;
+            else ioExpandRxBuf = "";  // Flush if too large (malformed data)
         }
     }
 
@@ -695,7 +696,7 @@ void receiveCheck() {
         mesh.processPacket(mp);
 
         // Gateway mode: forward raw packet + RSSI over serial for bridge server
-        if (gatewayMode) {
+        if (gatewayMode && Serial.availableForWrite() > 200) {
             Serial.println("PKT," + mesh.toHex(pkt, len) + "," + String(mesh.lastRSSI));
         }
     }
@@ -1956,10 +1957,27 @@ void processBleCommand(const String& line) {
 // SECTION: Serial Configuration
 // ═══════════════════════════════════════════════════════════════
 
+static String serialLineBuf;
+
+void processSerialLine(const String& line);  // Forward declaration
+
 void handleSerialConfig() {
-    if (!Serial.available()) return;
-    String line = Serial.readStringUntil('\n'); line.trim();
-    if (line.length() == 0) return;
+    // Non-blocking: read available chars, process complete lines
+    while (Serial.available()) {
+        char c = Serial.read();
+        if (c == '\n' || c == '\r') {
+            serialLineBuf.trim();
+            if (serialLineBuf.length() > 0) {
+                processSerialLine(serialLineBuf);
+                serialLineBuf = "";
+            }
+        } else if (serialLineBuf.length() < 256) {
+            serialLineBuf += c;
+        }
+    }
+}
+
+void processSerialLine(const String& line) {
 
     if (line.startsWith("ID ")) {
         String id = line.substring(3); id.trim(); id.toUpperCase();
@@ -2825,11 +2843,31 @@ void loop() {
         lastRouteClean = millis();
     }
 
-    // 5. Serial config
+    // 5. Serial config (non-blocking)
     handleSerialConfig();
 
-    // 6. OLED refresh
+    // 6. OLED refresh + periodic reinit (recovers from I2C glitches)
+#if HAS_OLED
+    static unsigned long lastOledReinit = 0;
+    if (oledAvailable && millis() - lastOledReinit > 300000) {  // Every 5 minutes
+        Wire.begin(BOARD_I2C_SDA, BOARD_I2C_SCL);
+        oled.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+        lastOledReinit = millis();
+    }
+#endif
     updateOLED();
+
+    // Heap monitor — auto-restart if dangerously low
+    static unsigned long lastHeapCheck = 0;
+    if (millis() - lastHeapCheck > 60000) {
+        lastHeapCheck = millis();
+        uint32_t freeHeap = ESP.getFreeHeap();
+        if (freeHeap < 20000) {
+            debugPrint("LOW HEAP: " + String(freeHeap) + "B — restarting");
+            delay(100);
+            ESP.restart();
+        }
+    }
 
     // 7. Relay timers
     processTimers();

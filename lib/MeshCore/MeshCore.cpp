@@ -228,8 +228,12 @@ void MeshCore::updateRouting(const String& from, const String& route, int rssi) 
         uint16_t cost = nodes.size() - i;
         int newScore = (cost * COST_WEIGHT) - rssi;
         auto it = routingTable.find(dest);
-        if (it == routingTable.end() ||
-            newScore < ((it->second.cost * COST_WEIGHT) - it->second.rssi)) {
+        if (it == routingTable.end()) {
+            // New route — check table isn't full
+            if (routingTable.size() >= MAX_NODES) pruneStale();
+            if (routingTable.size() >= MAX_NODES) continue;  // Still full after prune
+            routingTable[dest] = { nextHop, cost, (uint32_t)millis(), rssi };
+        } else if (newScore < ((it->second.cost * COST_WEIGHT) - it->second.rssi)) {
             routingTable[dest] = { nextHop, cost, (uint32_t)millis(), rssi };
         }
     }

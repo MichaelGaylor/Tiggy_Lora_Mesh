@@ -53,7 +53,9 @@ STATUS_COLORS = {
 # ─── Config Dialogs ───────────────────────────────────────────
 
 def show_block_config(parent, block: Block, discovered_nodes: dict,
-                      relay_pins: list[str] = None, sensor_pins: list[str] = None):
+                      relay_pins: list[str] = None, sensor_pins: list[str] = None,
+                      send_serial: Optional[callable] = None,
+                      engine=None):
     """Show a configuration dialog for a block. Returns True if changed."""
     bt = block.block_type
     cfg = block.config
@@ -129,37 +131,32 @@ def show_block_config(parent, block: Block, discovered_nodes: dict,
 
         def do_scan():
             scan_result.delete("1.0", "end")
-            scan_result.insert("end", "Scanning... (2 seconds)\n")
-            # Get the gateway app reference to send serial command
-            try:
-                top = parent
-                while top and not hasattr(top, 'gateway'):
-                    top = top.master
-                if top and hasattr(top, 'gateway') and top.gateway and top.gateway.serial_conn:
-                    top.gateway.serial_conn.write(b"BEACON,SCAN\n")
-                    import time as _time
-                    _time.sleep(2.5)
-                    response = b""
-                    while top.gateway.serial_conn.in_waiting:
-                        response += top.gateway.serial_conn.read(top.gateway.serial_conn.in_waiting)
-                    lines = response.decode("ascii", errors="replace").strip().split("\n")
-                    scan_result.delete("1.0", "end")
-                    found = False
-                    for line in lines:
-                        if line.startswith("BEACONSCAN,"):
-                            parts = line.split(",")
-                            count = int(parts[1]) if len(parts) > 1 else 0
-                            if count == 0:
-                                scan_result.insert("end", "No beacons found\n")
+            if not send_serial:
+                scan_result.insert("end", "Not connected — connect to a node first\n")
+                return
+            scan_result.insert("end", "Scanning... (3 seconds)\n")
+            send_serial("BEACON,SCAN")
+            # Poll for scan result (arrives via serial_line → engine event log)
+            dialog.after(3500, lambda: check_scan_result())
+
+        def check_scan_result():
+            scan_result.delete("1.0", "end")
+            found = False
+            if engine and hasattr(engine, 'event_log'):
+                for ts, name, msg in reversed(engine.event_log[-20:]):
+                    if "BEACONSCAN" in msg:
+                        parts = msg.split(",")
+                        count = int(parts[1]) if len(parts) > 1 else 0
+                        if count == 0:
+                            scan_result.insert("end", "No beacons found\n")
+                        else:
+                            scan_result.insert("end", f"Found {count} device(s):\n")
                             for entry in parts[2:]:
-                                scan_result.insert("end", entry + "\n")
-                            found = True
-                    if not found:
-                        scan_result.insert("end", "No scan response received\n")
-                else:
-                    scan_result.insert("end", "Not connected to node\n")
-            except Exception as e:
-                scan_result.insert("end", f"Error: {e}\n")
+                                scan_result.insert("end", f"  {entry}\n")
+                        found = True
+                        break
+            if not found:
+                scan_result.insert("end", "No scan response — check serial connection\n")
 
         ctk.CTkButton(scan_frame, text="Scan for Beacons", width=140,
                        font=("Consolas", 9), fg_color=COLORS["accent"],
@@ -754,7 +751,9 @@ class AutomationCanvas:
                     self.parent.winfo_toplevel(), block,
                     self.engine.discovered_nodes,
                     relay_pins=list(self.relay_pins),
-                    sensor_pins=list(self.sensor_pins))
+                    sensor_pins=list(self.sensor_pins),
+                    send_serial=self.engine.send_serial,
+                    engine=self.engine)
                 if changed:
                     self._notify_change()
                     self.redraw()
@@ -821,7 +820,9 @@ class AutomationCanvas:
                     self.parent.winfo_toplevel(), block,
                     self.engine.discovered_nodes,
                     relay_pins=r_pins,
-                    sensor_pins=s_pins)
+                    sensor_pins=s_pins,
+                    send_serial=self.engine.send_serial,
+                    engine=self.engine)
                 if changed:
                     self._notify_change()
                     self.redraw()
@@ -866,6 +867,8 @@ class AutomationCanvas:
                 self.parent.winfo_toplevel(), block,
                 self.engine.discovered_nodes,
                 relay_pins=list(self.relay_pins),
-                sensor_pins=list(self.sensor_pins))
+                sensor_pins=list(self.sensor_pins),
+                send_serial=self.engine.send_serial,
+                    engine=self.engine)
             self._notify_change()
             self.redraw()
