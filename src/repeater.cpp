@@ -627,13 +627,16 @@ void setupRadio() {
     pinMode(RADIO_RXEN, OUTPUT);
     digitalWrite(RADIO_RXEN, LOW);
 #endif
+#if defined(RADIO_FEM_POWER)
+    pinMode(RADIO_FEM_POWER, ANALOG);   // GC1109 PA power pin
+#endif
 #if defined(RADIO_FEM_EN)
     pinMode(RADIO_FEM_EN, OUTPUT);
-    digitalWrite(RADIO_FEM_EN, HIGH);   // Enable GC1109 front-end module
+    digitalWrite(RADIO_FEM_EN, HIGH);   // Enable GC1109 front-end (permanently)
 #endif
 #if defined(RADIO_FEM_TXEN)
     pinMode(RADIO_FEM_TXEN, OUTPUT);
-    digitalWrite(RADIO_FEM_TXEN, HIGH);  // Power enable (stays HIGH permanently)
+    digitalWrite(RADIO_FEM_TXEN, HIGH);  // PA TX enable (permanently — needed for both TX and RX)
 #endif
     int state = RADIOLIB_ERR_UNKNOWN;
     for (int attempt = 0; attempt < 3; attempt++) {

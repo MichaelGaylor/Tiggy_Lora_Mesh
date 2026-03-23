@@ -813,6 +813,9 @@ void setup() {
 #endif
 
     // FEM (GC1109 on Heltec V4)
+#ifdef RADIO_FEM_POWER
+    pinMode(RADIO_FEM_POWER, ANALOG);
+#endif
 #ifdef RADIO_FEM_EN
     pinMode(RADIO_FEM_EN, OUTPUT);
     digitalWrite(RADIO_FEM_EN, HIGH);

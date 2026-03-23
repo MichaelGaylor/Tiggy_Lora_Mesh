@@ -270,8 +270,9 @@
 #define HAS_OLED            1
 #define RADIO_SX1262        1
 #define RADIO_DIO2_RF_SWITCH 1  // DIO2 controls SX1262 RF switch → GC1109 CTX
-#define RADIO_FEM_EN        2     // GC1109 front-end enable (HIGH = on, LOW = disabled)
-#define RADIO_FEM_TXEN      46    // GC1109 PA TX enable (HIGH = TX/PA, LOW = RX/LNA)
+#define RADIO_FEM_EN        2     // GC1109 front-end enable (HIGH = on, permanently)
+#define RADIO_FEM_TXEN      46    // GC1109 PA TX enable (HIGH = on, permanently)
+#define RADIO_FEM_POWER     7     // GC1109 PA power pin (ANALOG mode)
 #define RADIO_TCXO_VOLTAGE  1.8f  // SX1262 TCXO on DIO3 at 1.8V
 
 // Power
