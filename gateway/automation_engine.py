@@ -38,6 +38,7 @@ class BlockType(str, Enum):
     SET_RELAY = "set_relay"
     PULSE_RELAY = "pulse_relay"
     SEND_BROADCAST = "send_broadcast"
+    SEND_TELEGRAM = "send_telegram"
     SEND_DIRECT = "send_direct"
 
 
@@ -148,6 +149,13 @@ BLOCK_DEFS = {
         "outputs": [],
         "defaults": {"message_true": "", "message_false": ""},
     },
+    BlockType.SEND_TELEGRAM: {
+        "category": "action",
+        "label": "Send Telegram",
+        "inputs": [("trigger", "bool")],
+        "outputs": [],
+        "defaults": {"message_true": "", "message_false": ""},
+    },
     BlockType.SEND_DIRECT: {
         "category": "action",
         "label": "Direct Msg",
@@ -222,6 +230,7 @@ class Rule:
         self.id = rule_id or uuid.uuid4().hex[:8]
         self.name = name
         self.enabled = True
+        self.deployed = False  # Whether rule has been deployed to firmware
         self.blocks: list[Block] = []
         self.wires: list[Wire] = []
         self.eval_interval = 5.0
@@ -235,6 +244,7 @@ class Rule:
             "id": self.id,
             "name": self.name,
             "enabled": self.enabled,
+            "deployed": self.deployed,
             "eval_interval": self.eval_interval,
             "action_gap": self.action_gap,
             "blocks": [b.to_dict() for b in self.blocks],
@@ -245,6 +255,7 @@ class Rule:
     def from_dict(d: dict) -> "Rule":
         r = Rule(d.get("name", "Rule"), d.get("id"))
         r.enabled = d.get("enabled", True)
+        r.deployed = d.get("deployed", False)
         r.eval_interval = d.get("eval_interval", 5.0)
         r.action_gap = d.get("action_gap", d.get("cooldown", 10.0))
         r.blocks = [Block.from_dict(b) for b in d.get("blocks", [])]
@@ -621,6 +632,9 @@ class AutomationEngine:
         if bt == BlockType.SEND_DIRECT:
             return self._eval_action_message(block, inputs, now, rule, broadcast=False)
 
+        if bt == BlockType.SEND_TELEGRAM:
+            return self._eval_action_telegram(block, inputs, now, rule)
+
         return {}
 
     def _eval_action_relay(self, block: Block, inputs: dict, now: float,
@@ -677,6 +691,29 @@ class AutomationEngine:
                     block.status = "queued"
                 else:
                     block.error = "Queue full"
+        st["prev"] = bool(trigger)
+        if not trigger:
+            block.status = "active"
+        return {}
+
+    def _eval_action_telegram(self, block: Block, inputs: dict, now: float,
+                              rule: Rule) -> dict:
+        trigger = inputs.get("trigger")
+        if trigger is None:
+            block.status = "idle"
+            return {}
+        st = self._block_state.setdefault(block.id, {"prev": None, "last_fire": 0.0})
+        cfg = block.config
+        if trigger != st["prev"] and (now - st["last_fire"] > rule.action_gap):
+            msg = cfg.get("message_true", "") if trigger else cfg.get("message_false", "")
+            if msg and hasattr(self, 'telegram_bridge') and self.telegram_bridge:
+                try:
+                    self.telegram_bridge.send_alert_sync(msg)
+                    self._log(rule.name, f"TELEGRAM: {msg}")
+                    st["last_fire"] = now
+                    block.status = "triggered"
+                except Exception as e:
+                    block.error = f"Telegram: {e}"
         st["prev"] = bool(trigger)
         if not trigger:
             block.status = "active"
@@ -830,6 +867,8 @@ class AutomationEngine:
                 cmd += f",DEBOUNCE,{int(hold_s * 1000)}"
 
         self.send_serial(cmd)
+        rule.deployed = True
+        self._save_rules()
         return True, f"Deployed to node: {cmd}"
 
     def _deploy_beacon_rule(self, rule: Rule, beacon_block: 'Block') -> tuple[bool, str]:
@@ -867,9 +906,32 @@ class AutomationEngine:
             self.send_serial(f"MSG,{node_id},{cmd}")
 
         self.deployed_beacons.add(name)
+        rule.deployed = True
+        self._save_rules()
         self._log("Deploy", f"BEACON,ADD sent: {name} ({beacon_id})")
         target = "local" if is_local else node_id
         return True, f"Beacon rule deployed to {target}: {name}"
+
+    def undeploy_rule(self, rule: Rule) -> tuple[bool, str]:
+        """Remove a deployed rule from the firmware."""
+        if not rule.deployed:
+            return False, "Rule is not deployed"
+
+        # Check for beacon rules — send BEACON,CLEAR to remove all
+        beacons = [b for b in rule.blocks if b.block_type == BlockType.BEACON_DETECT]
+        if beacons:
+            name = beacons[0].config.get("name", "")
+            self.send_serial("BEACON,CLEAR")
+            self.deployed_beacons.discard(name)
+            self._log("Undeploy", f"BEACON,CLEAR sent (removed: {name})")
+        else:
+            # For setpoint rules, send SETPOINT,CLEAR
+            self.send_serial("SETPOINT,CLEAR")
+            self._log("Undeploy", f"SETPOINT,CLEAR sent")
+
+        rule.deployed = False
+        self._save_rules()
+        return True, "Rule undeployed from node"
 
     # ─── Wire Value Access (for canvas live display) ──────────
 

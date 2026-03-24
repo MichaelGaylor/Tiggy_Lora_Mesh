@@ -402,6 +402,33 @@ class GatewayGUIApp:
         if cfg.get("serial_port"):
             self.port_combo.set(cfg["serial_port"])
 
+        # Telegram bot config row
+        tg_row = ctk.CTkFrame(self.root, fg_color="transparent")
+        tg_row.pack(fill="x", padx=10, pady=(0, 2))
+        ctk.CTkLabel(tg_row, text="Telegram:", text_color=COLORS["dim"],
+                     font=("Consolas", 10)).pack(side="left")
+        self.tg_token_entry = ctk.CTkEntry(tg_row, width=280, placeholder_text="Bot token",
+                                            font=("Consolas", 10))
+        self.tg_token_entry.pack(side="left", padx=2)
+        ctk.CTkLabel(tg_row, text="Chat ID:", text_color=COLORS["dim"],
+                     font=("Consolas", 10)).pack(side="left", padx=(5, 0))
+        self.tg_chatid_entry = ctk.CTkEntry(tg_row, width=100, placeholder_text="123456789",
+                                              font=("Consolas", 10))
+        self.tg_chatid_entry.pack(side="left", padx=2)
+        self.tg_connect_btn = ctk.CTkButton(tg_row, text="Start Bot", width=80,
+                                              font=("Consolas", 10), fg_color=COLORS["accent"],
+                                              text_color="#000", command=self._toggle_telegram)
+        self.tg_connect_btn.pack(side="left", padx=5)
+        self.tg_status_label = ctk.CTkLabel(tg_row, text="", font=("Consolas", 9))
+        self.tg_status_label.pack(side="left", padx=5)
+        self.telegram_bridge = None
+
+        # Restore Telegram settings
+        if cfg.get("tg_token"):
+            self.tg_token_entry.insert(0, cfg["tg_token"])
+        if cfg.get("tg_chatid"):
+            self.tg_chatid_entry.insert(0, cfg["tg_chatid"])
+
         # Middle: Topology + Node Cards
         mid_frame = ctk.CTkFrame(self.root, fg_color="transparent")
         mid_frame.pack(fill="both", padx=10, pady=5, expand=True)
@@ -525,9 +552,14 @@ class GatewayGUIApp:
                                                  text_color=COLORS["text"])
         self.rule_enabled_cb.pack(side="left", padx=10)
 
+        ctk.CTkButton(lb_toolbar, text="Undeploy", width=65, font=("Consolas", 10),
+                        fg_color="#555", text_color="#FFF",
+                        command=self._undeploy_rule).pack(side="right", padx=3)
         ctk.CTkButton(lb_toolbar, text="Deploy", width=55, font=("Consolas", 10),
                         fg_color=COLORS["warn"], text_color="#000",
                         command=self._deploy_rule).pack(side="right", padx=3)
+        self.deploy_status_label = ctk.CTkLabel(lb_toolbar, text="", font=("Consolas", 9))
+        self.deploy_status_label.pack(side="right", padx=5)
 
         # Block adder toolbar
         lb_blocks = ctk.CTkFrame(self.logic_frame, fg_color="transparent")
@@ -1168,6 +1200,7 @@ class GatewayGUIApp:
         self.eval_combo.set(f"{int(rule.eval_interval)}s")
         self.gap_combo.set(f"{int(rule.action_gap)}s")
         self.rule_enabled_var.set(rule.enabled)
+        self._update_deploy_status()
         status_colors = {"active": COLORS["good"], "triggered": COLORS["bad"],
                          "disabled": COLORS["faint"], "error": COLORS["bad"],
                          "idle": COLORS["dim"]}
@@ -1241,7 +1274,58 @@ class GatewayGUIApp:
         ok, msg = self.engine.try_deploy_as_setpoint(rule)
         color = COLORS["good"] if ok else COLORS["bad"]
         self.logic_log.configure(text=f"Deploy: {msg}", text_color=color)
-        self._deploy_msg_until = time.time() + 5  # Show deploy message for 5 seconds
+        self._deploy_msg_until = time.time() + 5
+        self._update_deploy_status()
+
+    def _undeploy_rule(self):
+        rule = self.auto_canvas.current_rule
+        if not rule:
+            return
+        ok, msg = self.engine.undeploy_rule(rule)
+        color = COLORS["good"] if ok else COLORS["bad"]
+        self.logic_log.configure(text=f"Undeploy: {msg}", text_color=color)
+        self._deploy_msg_until = time.time() + 5
+        self._update_deploy_status()
+
+    def _update_deploy_status(self):
+        rule = self.auto_canvas.current_rule
+        if rule and rule.deployed:
+            self.deploy_status_label.configure(text="DEPLOYED", text_color=COLORS["good"])
+        else:
+            self.deploy_status_label.configure(text="", text_color=COLORS["dim"])
+
+    def _toggle_telegram(self):
+        if self.telegram_bridge and self.telegram_bridge.is_running:
+            self.telegram_bridge.stop()
+            self.telegram_bridge = None
+            self.tg_connect_btn.configure(text="Start Bot")
+            self.tg_status_label.configure(text="Stopped", text_color=COLORS["dim"])
+        else:
+            token = self.tg_token_entry.get().strip()
+            chat_id = self.tg_chatid_entry.get().strip()
+            if not token:
+                self.tg_status_label.configure(text="Enter bot token", text_color=COLORS["bad"])
+                return
+            try:
+                from telegram_bot import TelegramBridge
+                self.telegram_bridge = TelegramBridge(
+                    token=token, chat_id=chat_id,
+                    sensor_data=self.sensor_data,
+                    send_serial=self._send_serial,
+                    rules=self.engine.rules,
+                    engine=self.engine,
+                    node_names=getattr(self, 'node_names', {}),
+                )
+                self.telegram_bridge.start()
+                self.engine.telegram_bridge = self.telegram_bridge
+                self.tg_connect_btn.configure(text="Stop Bot")
+                self.tg_status_label.configure(text="Running", text_color=COLORS["good"])
+                # Save to config
+                self._saved_config["tg_token"] = token
+                self._saved_config["tg_chatid"] = chat_id
+                self._save_config()
+            except Exception as e:
+                self.tg_status_label.configure(text=f"Error: {e}", text_color=COLORS["bad"])
 
     def _eval_automation(self):
         """Periodic automation rule evaluation."""

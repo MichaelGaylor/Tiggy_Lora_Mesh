@@ -40,7 +40,8 @@ CATEGORY_BLOCKS = {
     "Condition": [BlockType.COMPARE, BlockType.AND_GATE, BlockType.OR_GATE,
                   BlockType.NOT_GATE, BlockType.DEBOUNCE, BlockType.LATCH],
     "Action": [BlockType.SET_RELAY, BlockType.PULSE_RELAY,
-               BlockType.SEND_BROADCAST, BlockType.SEND_DIRECT],
+               BlockType.SEND_BROADCAST, BlockType.SEND_DIRECT,
+               BlockType.SEND_TELEGRAM],
 }
 
 STATUS_COLORS = {
@@ -232,6 +233,10 @@ def show_block_config(parent, block: Block, discovered_nodes: dict,
 
     elif bt == BlockType.SEND_DIRECT:
         add_node_combo("Node ID:", "node_id")
+        add_field("Msg (true):", "message_true", "")
+        add_field("Msg (false):", "message_false", "")
+
+    elif bt == BlockType.SEND_TELEGRAM:
         add_field("Msg (true):", "message_true", "")
         add_field("Msg (false):", "message_false", "")
 
