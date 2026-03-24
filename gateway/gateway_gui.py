@@ -1241,6 +1241,7 @@ class GatewayGUIApp:
         ok, msg = self.engine.try_deploy_as_setpoint(rule)
         color = COLORS["good"] if ok else COLORS["bad"]
         self.logic_log.configure(text=f"Deploy: {msg}", text_color=color)
+        self._deploy_msg_until = time.time() + 5  # Show deploy message for 5 seconds
 
     def _eval_automation(self):
         """Periodic automation rule evaluation."""
@@ -1256,19 +1257,22 @@ class GatewayGUIApp:
                                      "error": COLORS["bad"], "idle": COLORS["dim"]}
                     self.rule_status_dot.configure(
                         text_color=status_colors.get(rule.status, COLORS["dim"]))
-                # Update event log with queue status
-                q = self.engine.queue_depth
-                q_txt = f"  |  Queue: {q} pending" if q > 0 else ""
-                if self.engine.event_log:
-                    last = self.engine.event_log[-1]
-                    ts = time.strftime("%H:%M:%S", time.localtime(last[0]))
-                    self.logic_log.configure(
-                        text=f"{ts} [{last[1]}] {last[2]}{q_txt}",
-                        text_color="#FFE000" if q > 5 else "#B0B0B0")
-                elif q > 0:
-                    self.logic_log.configure(
-                        text=f"Queue: {q} pending",
-                        text_color="#FFE000")
+                # Update event log with queue status (skip if deploy message showing)
+                if hasattr(self, '_deploy_msg_until') and time.time() < self._deploy_msg_until:
+                    pass  # Don't overwrite deploy message
+                else:
+                    q = self.engine.queue_depth
+                    q_txt = f"  |  Queue: {q} pending" if q > 0 else ""
+                    if self.engine.event_log:
+                        last = self.engine.event_log[-1]
+                        ts = time.strftime("%H:%M:%S", time.localtime(last[0]))
+                        self.logic_log.configure(
+                            text=f"{ts} [{last[1]}] {last[2]}{q_txt}",
+                            text_color="#FFE000" if q > 5 else "#B0B0B0")
+                    elif q > 0:
+                        self.logic_log.configure(
+                            text=f"Queue: {q} pending",
+                            text_color="#FFE000")
         except Exception as e:
             print(f"[ENGINE TICK ERROR] {type(e).__name__}: {e}")
         self.root.after(1000, self._eval_automation)

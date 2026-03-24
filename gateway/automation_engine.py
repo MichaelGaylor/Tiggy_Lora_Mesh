@@ -298,6 +298,7 @@ class AutomationEngine:
         self.discovered_nodes = discovered_nodes
         self.local_node_id = ""  # Set by gateway GUI after connecting
         self.beacon_data: dict[str, dict] = {}  # beacon_name → {timestamp, rssi, triggered}
+        self.deployed_beacons: set[str] = set()  # beacon IDs that have been deployed
         self.rules: list[Rule] = []
         self.rules_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rules.json")
 
@@ -480,8 +481,12 @@ class AutomationEngine:
             # Check if beacon data has ever been received
             entry = self.beacon_data.get(beacon_id, {})
             if not entry:
-                block.error = "Not deployed — click Deploy"
-                block.status = "idle"
+                if beacon_id in self.deployed_beacons:
+                    block.error = "Listening..."
+                    block.status = "active"
+                else:
+                    block.error = "Not deployed — click Deploy"
+                    block.status = "idle"
                 return {"detected": False, "rssi": 0}
             ts = entry.get("timestamp", 0)
             triggered = entry.get("triggered", False)
@@ -842,9 +847,9 @@ class AutomationEngine:
         broadcasts = [b for b in rule.blocks if b.block_type == BlockType.SEND_BROADCAST]
 
         if relays:
-            relay_node = relays[0].config.get("node_id", "")
             relay_pin = relays[0].config.get("pin", 2)
-            action_part = f"RELAY,{relay_node},{relay_pin}"
+            action = relays[0].config.get("action", 1)
+            action_part = f"RELAY,{relay_pin},{action}"
         elif broadcasts:
             msg = broadcasts[0].config.get("message_true", "BEACON_NEAR")
             action_part = f"MSG,{msg}"
@@ -857,11 +862,13 @@ class AutomationEngine:
         is_local = not node_id or node_id == self.local_node_id
         if is_local:
             self.send_serial(cmd)
-            return True, f"Beacon rule deployed to local node: {name}"
         else:
-            # Send via mesh to remote node
             self.send_serial(f"MSG,{node_id},{cmd}")
-            return True, f"Beacon rule sent to {node_id}: {name}"
+
+        self.deployed_beacons.add(beacon_id)
+        self._log("Deploy", f"BEACON,ADD sent: {name} ({beacon_id})")
+        target = "local" if is_local else node_id
+        return True, f"Beacon rule deployed to {target}: {name}"
 
     # ─── Wire Value Access (for canvas live display) ──────────
 
