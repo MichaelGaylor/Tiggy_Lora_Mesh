@@ -110,7 +110,13 @@ def show_block_config(parent, block: Block, discovered_nodes: dict,
     # Build fields based on block type
     if bt == BlockType.SENSOR_READ:
         add_node_combo("Node ID:", "node_id")
-        pins = sensor_pins if sensor_pins else []
+        # Filter pins: show only pins seen in sensor_data for the selected node
+        node_id = cfg.get("node_id", "")
+        known_pins = []
+        if engine and hasattr(engine, 'sensor_data') and node_id:
+            prefix = f"{node_id}:"
+            known_pins = sorted({k.split(":")[1] for k in engine.sensor_data if k.startswith(prefix)})
+        pins = known_pins if known_pins else (sensor_pins if sensor_pins else [])
         if pins:
             add_combo("Pin:", "pin", pins, str(cfg.get("pin", pins[0] if pins else "0")))
         else:
@@ -118,6 +124,7 @@ def show_block_config(parent, block: Block, discovered_nodes: dict,
         add_field("Label:", "label", "")
 
     elif bt == BlockType.BEACON_DETECT:
+        add_node_combo("Detect at Node:", "node_id")
         add_field("Beacon ID:", "beacon_id", "")
         add_field("Name:", "name", "")
         add_field("RSSI Thresh:", "rssi_thresh", "-70")
@@ -128,35 +135,48 @@ def show_block_config(parent, block: Block, discovered_nodes: dict,
         scan_result = ctk.CTkTextbox(scan_frame, height=80, font=("Consolas", 9),
                                       fg_color=COLORS["bg"], text_color=COLORS["text"])
         scan_result.pack(fill="x", pady=(0, 4))
+        scan_attempts = [0]
 
         def do_scan():
             scan_result.delete("1.0", "end")
             if not send_serial:
                 scan_result.insert("end", "Not connected — connect to a node first\n")
                 return
-            scan_result.insert("end", "Scanning... (3 seconds)\n")
+            scan_attempts[0] = 0
+            scan_result.insert("end", "Scanning... (5 seconds)\n")
             send_serial("BEACON,SCAN")
-            # Poll for scan result (arrives via serial_line → engine event log)
-            dialog.after(3500, lambda: check_scan_result())
+            dialog.after(5000, check_scan_result)
 
         def check_scan_result():
-            scan_result.delete("1.0", "end")
             found = False
             if engine and hasattr(engine, 'event_log'):
-                for ts, name, msg in reversed(engine.event_log[-20:]):
-                    if "BEACONSCAN" in msg:
+                for ts, name, msg in reversed(engine.event_log[-30:]):
+                    if "BEACONSCAN" in msg.upper():
+                        scan_result.delete("1.0", "end")
                         parts = msg.split(",")
-                        count = int(parts[1]) if len(parts) > 1 else 0
+                        try:
+                            count = int(parts[1]) if len(parts) > 1 else 0
+                        except ValueError:
+                            count = 0
                         if count == 0:
-                            scan_result.insert("end", "No beacons found\n")
+                            scan_result.insert("end", "No beacons found nearby\n")
                         else:
                             scan_result.insert("end", f"Found {count} device(s):\n")
                             for entry in parts[2:]:
-                                scan_result.insert("end", f"  {entry}\n")
+                                scan_result.insert("end", f"  {entry.strip()}\n")
                         found = True
                         break
             if not found:
-                scan_result.insert("end", "No scan response — check serial connection\n")
+                scan_attempts[0] += 1
+                if scan_attempts[0] < 2:
+                    # Retry once
+                    scan_result.delete("1.0", "end")
+                    scan_result.insert("end", "Retrying scan...\n")
+                    send_serial("BEACON,SCAN")
+                    dialog.after(5000, check_scan_result)
+                else:
+                    scan_result.delete("1.0", "end")
+                    scan_result.insert("end", "No scan response — check serial connection\n")
 
         ctk.CTkButton(scan_frame, text="Scan for Beacons", width=140,
                        font=("Consolas", 9), fg_color=COLORS["accent"],

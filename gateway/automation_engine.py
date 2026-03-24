@@ -473,18 +473,30 @@ class AutomationEngine:
         if bt == BlockType.BEACON_DETECT:
             beacon_id = cfg.get("beacon_id", "")
             rssi_thresh = cfg.get("rssi_thresh", -70)
+            node_id = cfg.get("node_id", "")
             if not beacon_id:
                 block.error = "No beacon configured"
                 return {"detected": False, "rssi": 0}
+            # Check if beacon data has ever been received
             entry = self.beacon_data.get(beacon_id, {})
+            if not entry:
+                block.error = "Not deployed — click Deploy"
+                block.status = "idle"
+                return {"detected": False, "rssi": 0}
             ts = entry.get("timestamp", 0)
             triggered = entry.get("triggered", False)
+            source_node = entry.get("source_node", "")
             age = now - ts if ts else 999
-            if triggered and age < 15:  # Seen within last 15 seconds
+            # If node specified, only match events from that node
+            if node_id and source_node and source_node != node_id:
+                block.error = f"Waiting for {node_id}"
+                block.status = "active"
+                return {"detected": False, "rssi": 0}
+            if triggered and age < 15:
                 block.error = ""
                 block.status = "triggered"
                 return {"detected": True, "rssi": entry.get("rssi", 0)}
-            block.error = "Not seen" if age > 15 else ""
+            block.error = "Listening..." if age < 60 else "Not seen"
             block.status = "active"
             return {"detected": False, "rssi": 0}
 
@@ -738,10 +750,16 @@ class AutomationEngine:
     # ─── Deploy to Node (firmware setpoint) ───────────────────
 
     def try_deploy_as_setpoint(self, rule: Rule) -> tuple[bool, str]:
-        """Try to convert a rule to a firmware setpoint command.
-        Supports patterns with optional Scale and Debounce:
+        """Try to convert a rule to a firmware setpoint or beacon command.
+        Supports:
           sensor [> scale] > compare > [debounce >] relay/broadcast
+          beacon_detect > relay/broadcast
         """
+        # Check for beacon rules first
+        beacons = [b for b in rule.blocks if b.block_type == BlockType.BEACON_DETECT]
+        if beacons:
+            return self._deploy_beacon_rule(rule, beacons[0])
+
         sensors = [b for b in rule.blocks if b.block_type == BlockType.SENSOR_READ]
         compares = [b for b in rule.blocks if b.block_type == BlockType.COMPARE]
         relays = [b for b in rule.blocks if b.block_type == BlockType.SET_RELAY]
@@ -807,6 +825,43 @@ class AutomationEngine:
 
         self.send_serial(cmd)
         return True, f"Deployed to node: {cmd}"
+
+    def _deploy_beacon_rule(self, rule: Rule, beacon_block: 'Block') -> tuple[bool, str]:
+        """Deploy a beacon detection rule to the target node."""
+        cfg = beacon_block.config
+        beacon_id = cfg.get("beacon_id", "").strip()
+        name = cfg.get("name", "beacon").strip() or "beacon"
+        rssi_thresh = cfg.get("rssi_thresh", -70)
+        node_id = cfg.get("node_id", "").strip()
+
+        if not beacon_id:
+            return False, "Beacon ID (MAC) is required"
+
+        # Determine action from connected blocks
+        relays = [b for b in rule.blocks if b.block_type == BlockType.SET_RELAY]
+        broadcasts = [b for b in rule.blocks if b.block_type == BlockType.SEND_BROADCAST]
+
+        if relays:
+            relay_node = relays[0].config.get("node_id", "")
+            relay_pin = relays[0].config.get("pin", 2)
+            action_part = f"RELAY,{relay_node},{relay_pin}"
+        elif broadcasts:
+            msg = broadcasts[0].config.get("message_true", "BEACON_NEAR")
+            action_part = f"MSG,{msg}"
+        else:
+            return False, "Need a relay or broadcast action block"
+
+        cmd = f"BEACON,ADD,{beacon_id},{name},{rssi_thresh},{action_part}"
+
+        # Send to target node (local or remote)
+        is_local = not node_id or node_id == self.local_node_id
+        if is_local:
+            self.send_serial(cmd)
+            return True, f"Beacon rule deployed to local node: {name}"
+        else:
+            # Send via mesh to remote node
+            self.send_serial(f"MSG,{node_id},{cmd}")
+            return True, f"Beacon rule sent to {node_id}: {name}"
 
     # ─── Wire Value Access (for canvas live display) ──────────
 
