@@ -558,12 +558,12 @@ class AutomationCanvas:
             items.append(lbl)
             self._port_pos[(block.id, pname, "out")] = (px, py)
 
-        # Error text
+        # Error text (use _error tag so update_live_values can replace it)
         if block.error:
             err = self.canvas.create_text(
                 x + BLOCK_W // 2, y + h + 12, text=block.error,
                 fill="#FF5252", font=("Consolas", 9),
-                tags=(f"block_{block.id}",))
+                tags=(f"block_{block.id}", f"{block.id}_error"))
             items.append(err)
 
         self._block_items[block.id] = items

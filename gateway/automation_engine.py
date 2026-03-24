@@ -473,15 +473,16 @@ class AutomationEngine:
 
         if bt == BlockType.BEACON_DETECT:
             beacon_id = cfg.get("beacon_id", "")
+            beacon_name = cfg.get("name", "").strip()
             rssi_thresh = cfg.get("rssi_thresh", -70)
             node_id = cfg.get("node_id", "")
             if not beacon_id:
                 block.error = "No beacon configured"
                 return {"detected": False, "rssi": 0}
-            # Check if beacon data has ever been received
-            entry = self.beacon_data.get(beacon_id, {})
+            # beacon_data is keyed by NAME (firmware sends BEACON,TRIGGERED,<name>,...)
+            entry = self.beacon_data.get(beacon_name, {})
             if not entry:
-                if beacon_id in self.deployed_beacons:
+                if beacon_name in self.deployed_beacons:
                     block.error = "Listening..."
                     block.status = "active"
                 else:
@@ -865,7 +866,7 @@ class AutomationEngine:
         else:
             self.send_serial(f"MSG,{node_id},{cmd}")
 
-        self.deployed_beacons.add(beacon_id)
+        self.deployed_beacons.add(name)
         self._log("Deploy", f"BEACON,ADD sent: {name} ({beacon_id})")
         target = "local" if is_local else node_id
         return True, f"Beacon rule deployed to {target}: {name}"
