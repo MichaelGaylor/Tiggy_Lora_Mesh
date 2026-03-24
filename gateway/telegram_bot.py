@@ -55,7 +55,7 @@ class TelegramBridge:
         self.chat_id = str(chat_id)
         self.sensor_data = sensor_data
         self.send_serial = send_serial
-        self.rules = rules
+        self._rules_ref = rules  # May go stale if engine reloads
         self.node_names = node_names  # {"5041": "Farm1", ...}
         self.engine = engine
 
@@ -69,6 +69,11 @@ class TelegramBridge:
     @property
     def is_running(self) -> bool:
         return self._running
+
+    @property
+    def rules(self) -> list:
+        """Always read from engine to avoid stale reference."""
+        return getattr(self.engine, 'rules', self._rules_ref)
 
     # ── Lifecycle ──────────────────────────────────────────────
 
