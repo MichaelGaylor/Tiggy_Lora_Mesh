@@ -132,7 +132,7 @@ def show_block_config(parent, block: Block, discovered_nodes: dict,
         # Scan button — sends BEACON,SCAN and shows results
         scan_frame = ctk.CTkFrame(dialog, fg_color="transparent")
         scan_frame.grid(row=row, column=0, columnspan=2, pady=4, padx=10, sticky="ew")
-        scan_result = ctk.CTkTextbox(scan_frame, height=80, font=("Consolas", 9),
+        scan_result = ctk.CTkTextbox(scan_frame, height=160, font=("Consolas", 12),
                                       fg_color=COLORS["bg"], text_color=COLORS["text"])
         scan_result.pack(fill="x", pady=(0, 4))
         scan_attempts = [0]
