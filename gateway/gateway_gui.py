@@ -514,6 +514,8 @@ class GatewayGUIApp:
                                             font=("Consolas", 10),
                                             command=self._on_rule_select)
         self.rule_combo.pack(side="left", padx=2)
+        # Allow typing to rename — save on Enter
+        self.rule_combo.bind("<Return>", lambda _: self._rename_current_rule())
         ctk.CTkButton(lb_toolbar, text="+ New", width=60, font=("Consolas", 10),
                         fg_color=COLORS["accent"], text_color="#000",
                         command=self._new_rule).pack(side="left", padx=3)
@@ -1294,6 +1296,21 @@ class GatewayGUIApp:
         color = COLORS["good"] if ok else COLORS["bad"]
         self.logic_log.configure(text=f"Undeploy: {msg}", text_color=color)
         self._deploy_msg_until = time.time() + 5
+        self._update_deploy_status()
+
+    def _rename_current_rule(self):
+        rule = self.auto_canvas.current_rule
+        if not rule:
+            return
+        new_name = self.rule_combo.get().strip()
+        if not new_name or new_name == rule.name:
+            return
+        rule.name = new_name
+        self.engine._save_rules()
+        # Update combo values
+        names = [r.name for r in self.engine.rules]
+        self.rule_combo.configure(values=names)
+        self.rule_combo.set(new_name)
         self._update_deploy_status()
 
     def _update_deploy_status(self):
