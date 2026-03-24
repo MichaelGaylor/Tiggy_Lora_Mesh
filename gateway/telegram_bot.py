@@ -335,6 +335,13 @@ class TelegramBridge:
             )
             return
 
+        # Check for Telegram Output block first — its value is THE answer
+        tg_outputs = [b for b in rule.blocks if b.block_type == BlockType.TELEGRAM_OUTPUT]
+        if tg_outputs:
+            reply = self._handle_telegram_output(rule, tg_outputs)
+            await update.message.reply_text(reply)
+            return
+
         # Determine what kind of rule this is and respond accordingly
         has_sensor = False
         has_action = False
@@ -345,18 +352,36 @@ class TelegramBridge:
             elif cat == "action":
                 has_action = True
 
-        if has_sensor and not has_action:
-            # Sensor query — read and reply
-            reply = self._handle_sensor_query(rule)
-            await update.message.reply_text(reply)
-        elif has_action:
+        if has_action:
             # Action rule — execute it
             reply = self._handle_action_command(rule)
             await update.message.reply_text(reply)
+        elif has_sensor:
+            # Sensor query fallback — read raw values
+            reply = self._handle_sensor_query(rule)
+            await update.message.reply_text(reply)
         else:
             await update.message.reply_text(
-                f"Rule '{rule.name}' matched but has no sensor reads or actions to execute."
+                f"Rule '{rule.name}' matched but has no outputs or actions to execute."
             )
+
+    # ── Telegram Output block handling ─────────────────────────
+
+    def _handle_telegram_output(self, rule: Rule, tg_blocks: list) -> str:
+        """Read the value from Telegram Output blocks and return formatted text."""
+        lines = [f"{rule.name}", ""]
+        for block in tg_blocks:
+            lv = block.last_value
+            if lv is None:
+                lines.append("  No data yet")
+                continue
+            if isinstance(lv, dict) and "formatted" in lv:
+                lines.append(f"  {lv['formatted']}")
+            elif isinstance(lv, dict) and "value" in lv:
+                lines.append(f"  {lv['value']}")
+            else:
+                lines.append(f"  {lv}")
+        return "\n".join(lines)
 
     # ── Sensor query handling ──────────────────────────────────
 

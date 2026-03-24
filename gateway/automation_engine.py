@@ -38,7 +38,7 @@ class BlockType(str, Enum):
     SET_RELAY = "set_relay"
     PULSE_RELAY = "pulse_relay"
     SEND_BROADCAST = "send_broadcast"
-    SEND_TELEGRAM = "send_telegram"
+    TELEGRAM_OUTPUT = "telegram_output"
     SEND_DIRECT = "send_direct"
 
 
@@ -149,12 +149,12 @@ BLOCK_DEFS = {
         "outputs": [],
         "defaults": {"message_true": "", "message_false": ""},
     },
-    BlockType.SEND_TELEGRAM: {
+    BlockType.TELEGRAM_OUTPUT: {
         "category": "action",
-        "label": "Send Telegram",
-        "inputs": [("trigger", "bool")],
+        "label": "Telegram Output",
+        "inputs": [("value", "number")],
         "outputs": [],
-        "defaults": {"message_true": "", "message_false": ""},
+        "defaults": {"label": "", "unit": "", "format": "{label}: {value} {unit}"},
     },
     BlockType.SEND_DIRECT: {
         "category": "action",
@@ -632,7 +632,7 @@ class AutomationEngine:
         if bt == BlockType.SEND_DIRECT:
             return self._eval_action_message(block, inputs, now, rule, broadcast=False)
 
-        if bt == BlockType.SEND_TELEGRAM:
+        if bt == BlockType.TELEGRAM_OUTPUT:
             return self._eval_action_telegram(block, inputs, now, rule)
 
         return {}
@@ -698,25 +698,29 @@ class AutomationEngine:
 
     def _eval_action_telegram(self, block: Block, inputs: dict, now: float,
                               rule: Rule) -> dict:
-        trigger = inputs.get("trigger")
-        if trigger is None:
-            block.status = "idle"
-            return {}
-        st = self._block_state.setdefault(block.id, {"prev": None, "last_fire": 0.0})
+        """Telegram Output block — stores the incoming value for bot queries.
+        The value is whatever is wired to the 'value' input port.
+        When a user sends the rule's #name in Telegram, the bot reads
+        block.last_value and formats it with label/unit from config."""
+        val = inputs.get("value")
         cfg = block.config
-        if trigger != st["prev"] and (now - st["last_fire"] > rule.action_gap):
-            msg = cfg.get("message_true", "") if trigger else cfg.get("message_false", "")
-            if msg and hasattr(self, 'telegram_bridge') and self.telegram_bridge:
-                try:
-                    self.telegram_bridge.send_alert_sync(msg)
-                    self._log(rule.name, f"TELEGRAM: {msg}")
-                    st["last_fire"] = now
-                    block.status = "triggered"
-                except Exception as e:
-                    block.error = f"Telegram: {e}"
-        st["prev"] = bool(trigger)
-        if not trigger:
+        if val is not None:
+            label = cfg.get("label", "")
+            unit = cfg.get("unit", "")
+            fmt = cfg.get("format", "{label}: {value} {unit}").strip()
+            try:
+                if isinstance(val, float):
+                    formatted = fmt.format(label=label, value=f"{val:.1f}", unit=unit).strip()
+                else:
+                    formatted = fmt.format(label=label, value=val, unit=unit).strip()
+            except (KeyError, ValueError):
+                formatted = f"{label}: {val} {unit}".strip()
+            block.last_value = {"value": val, "formatted": formatted}
             block.status = "active"
+            block.error = ""
+        else:
+            block.status = "idle"
+            block.error = "No input"
         return {}
 
     # ─── Command Queue ────────────────────────────────────────
