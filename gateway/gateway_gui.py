@@ -655,14 +655,23 @@ class GatewayGUIApp:
         except Exception:
             return {}
 
-    def _save_config(self, port: str, hub: str, name: str, key: str,
-                     lat: str = "", lon: str = "", ant_height: str = ""):
+    def _save_config(self, port: str = None, hub: str = None, name: str = None,
+                     key: str = None, lat: str = "", lon: str = "", ant_height: str = ""):
         try:
+            # Read current widget values as defaults if args not provided
+            cfg = {
+                "serial_port": port or self.port_combo.get(),
+                "hub_url": hub if hub is not None else self.hub_entry.get().strip(),
+                "gw_name": name or self.name_entry.get().strip(),
+                "hub_key": key if key is not None else self.key_entry.get().strip(),
+                "lat": lat or self.lat_entry.get().strip(),
+                "lon": lon or self.lon_entry.get().strip(),
+                "ant_height": ant_height or self.ant_height_entry.get().strip(),
+                "tg_token": self.tg_token_entry.get().strip(),
+                "tg_chatid": self.tg_chatid_entry.get().strip(),
+            }
             with open(self.CONFIG_FILE, "w") as f:
-                json.dump({"serial_port": port, "hub_url": hub,
-                           "gw_name": name, "hub_key": key,
-                           "lat": lat, "lon": lon, "ant_height": ant_height},
-                          f, indent=2)
+                json.dump(cfg, f, indent=2)
         except Exception:
             pass
 
