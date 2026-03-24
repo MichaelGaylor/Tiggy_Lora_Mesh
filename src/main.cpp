@@ -16,7 +16,6 @@
 #include <Wire.h>
 #include <EEPROM.h>
 #include <RadioLib.h>
-#include <esp_task_wdt.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
 #include <TinyGPSPlus.h>
@@ -28,6 +27,10 @@
 #include "Pins.h"
 #include "phrases.h"
 #include "MeshCore.h"
+
+// ─── Hardware Timer Watchdog (30s, independent of RTOS) ─────
+hw_timer_t *swWdt = NULL;
+void IRAM_ATTR onSwWdtTimeout() { ESP.restart(); }
 
 // ─── Theme Colors ───────────────────────────────────────────
 #define COL_BG          0x0000
@@ -2176,9 +2179,11 @@ void setup() {
   Serial.begin(115200);
   delay(200);
 
-  // Hardware watchdog — 30s timeout, auto-reboots on hang
-  esp_task_wdt_init(30, false);  // false = clean reboot, not panic
-  esp_task_wdt_add(NULL);
+  // Hardware timer watchdog — 30s, completely independent of RTOS
+  swWdt = timerBegin(3, 80, true);
+  timerAttachInterrupt(swWdt, &onSwWdtTimeout, true);
+  timerAlarmWrite(swWdt, 30000000, false);
+  timerAlarmEnable(swWdt);
 
   debugPrint("\n=== TiggyOpenMesh v3.1 - T-Deck Plus ===");
   // Seed RNG with hardware random XOR'd with unique MAC address
@@ -2368,6 +2373,6 @@ void loop() {
       break;
   }
 
-  esp_task_wdt_reset();  // Pet the watchdog
+  timerWrite(swWdt, 0);  // Pet the hardware timer watchdog
   yield();
 }

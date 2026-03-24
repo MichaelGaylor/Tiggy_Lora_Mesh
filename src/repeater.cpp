@@ -18,7 +18,6 @@
 #include <Wire.h>
 #include <EEPROM.h>
 #include <RadioLib.h>
-#include <esp_task_wdt.h>
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLESecurity.h>
@@ -37,6 +36,10 @@
 
 // Only compile for repeater boards
 #if defined(BOARD_LORA32) || defined(BOARD_HELTEC_V3) || defined(BOARD_HELTEC_V4) || defined(BOARD_XIAO_S3) || defined(BOARD_CUSTOM)
+
+// ─── Hardware Timer Watchdog (30s, independent of RTOS) ─────
+hw_timer_t *swWdt = NULL;
+void IRAM_ATTR onSwWdtTimeout() { ESP.restart(); }
 
 // ─── OLED Display ────────────────────────────────────────────
 #include <Adafruit_GFX.h>
@@ -2557,9 +2560,11 @@ void setup() {
     Serial.begin(115200);
     delay(1000);
 
-    // Hardware watchdog — 30s timeout, clean reboot on hang (no panic dump)
-    esp_task_wdt_init(30, false);  // false = clean reboot, not panic
-    esp_task_wdt_add(NULL);
+    // Hardware timer watchdog — 30s, completely independent of RTOS
+    swWdt = timerBegin(3, 80, true);  // Timer 3, 1MHz tick
+    timerAttachInterrupt(swWdt, &onSwWdtTimeout, true);
+    timerAlarmWrite(swWdt, 30000000, false);  // 30 seconds
+    timerAlarmEnable(swWdt);
 
     Serial.println("\n═══════════════════════════════════");
     Serial.println("  TiggyOpenMesh Repeater v4.0");
@@ -2905,7 +2910,7 @@ void loop() {
     lastBtn = btn;
 #endif
 
-    esp_task_wdt_reset();  // Pet the watchdog
+    timerWrite(swWdt, 0);  // Pet the hardware timer watchdog
     yield();
 }
 

@@ -32,13 +32,16 @@
 #include <WiFi.h>
 #include <Preferences.h>
 #include <RadioLib.h>
-#include <esp_task_wdt.h>
 #include <WebSocketsClient.h>
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
 #include "Pins.h"
+
+// ─── Hardware Timer Watchdog (30s, independent of RTOS) ─────
+hw_timer_t *swWdt = NULL;
+void IRAM_ATTR onSwWdtTimeout() { ESP.restart(); }
 
 // ─── Conditional OLED ────────────────────────────────────────
 #if HAS_OLED
@@ -784,9 +787,11 @@ void setup() {
     Serial.begin(115200);
     delay(500);
 
-    // Hardware watchdog — 30s timeout, auto-reboots on hang
-    esp_task_wdt_init(30, false);  // false = clean reboot, not panic
-    esp_task_wdt_add(NULL);
+    // Hardware timer watchdog — 30s, completely independent of RTOS
+    swWdt = timerBegin(3, 80, true);
+    timerAttachInterrupt(swWdt, &onSwWdtTimeout, true);
+    timerAlarmWrite(swWdt, 30000000, false);
+    timerAlarmEnable(swWdt);
 
     Serial.println("\n═══════════════════════════════════");
     Serial.println("  TiggyOpenMesh WiFi Gateway v1.1");
@@ -928,7 +933,7 @@ void loop() {
         }
     }
 
-    esp_task_wdt_reset();  // Pet the watchdog
+    timerWrite(swWdt, 0);  // Pet the hardware timer watchdog
     yield();
 }
 
