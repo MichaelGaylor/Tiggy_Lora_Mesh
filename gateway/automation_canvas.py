@@ -423,13 +423,29 @@ class AutomationCanvas:
                         font=("Consolas", 10))
                     self._value_labels[label_key] = item
 
-        # Update block status dots
+        # Update block status dots + error text
         for block in self.current_rule.blocks:
             dot_key = f"{block.id}_status_dot"
             items = self.canvas.find_withtag(dot_key)
             color = STATUS_COLORS.get(block.status, STATUS_COLORS["idle"])
             for item in items:
                 self.canvas.itemconfig(item, fill=color, outline=color)
+
+            # Update error/status text below block
+            err_tag = f"{block.id}_error"
+            self.canvas.delete(err_tag)
+            if block.error:
+                bdef = BLOCK_DEFS.get(block.block_type, {})
+                ins = bdef.get("inputs", [])
+                outs = bdef.get("outputs", [])
+                n_ports = max(len(ins), len(outs), 1)
+                h = BLOCK_H_BASE + max(0, n_ports - 1) * PORT_SPACING
+                self.canvas.create_text(
+                    block.x + BLOCK_W // 2, block.y + h + 12,
+                    text=block.error, fill="#FF5252", font=("Consolas", 9),
+                    tags=(f"block_{block.id}", err_tag))
+
+        self.canvas.update_idletasks()  # Force visual refresh
 
     # ─── Drawing ──────────────────────────────────────────────
 
