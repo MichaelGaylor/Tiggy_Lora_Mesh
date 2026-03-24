@@ -431,15 +431,36 @@ class AutomationCanvas:
             for item in items:
                 self.canvas.itemconfig(item, fill=color, outline=color)
 
+            bdef = BLOCK_DEFS.get(block.block_type, {})
+            ins = bdef.get("inputs", [])
+            outs = bdef.get("outputs", [])
+            n_ports = max(len(ins), len(outs), 1)
+            h = BLOCK_H_BASE + max(0, n_ports - 1) * PORT_SPACING
+
+            # Update live value text on the block
+            val_tag = f"{block.id}_live_val"
+            self.canvas.delete(val_tag)
+            if block.last_value is not None:
+                lv = block.last_value
+                if isinstance(lv, dict):
+                    # Show first output value
+                    first_out = outs[0][0] if outs else ""
+                    val = lv.get(first_out, lv.get("value", lv.get("result", "")))
+                else:
+                    val = lv
+                if val is not None:
+                    txt = str(val)
+                    if isinstance(val, float):
+                        txt = f"{val:.1f}"
+                    self.canvas.create_text(
+                        block.x + BLOCK_W // 2, block.y + h - 8,
+                        text=txt, fill=COLORS["accent"], font=("Consolas", 11, "bold"),
+                        tags=(f"block_{block.id}", val_tag))
+
             # Update error/status text below block
             err_tag = f"{block.id}_error"
             self.canvas.delete(err_tag)
             if block.error:
-                bdef = BLOCK_DEFS.get(block.block_type, {})
-                ins = bdef.get("inputs", [])
-                outs = bdef.get("outputs", [])
-                n_ports = max(len(ins), len(outs), 1)
-                h = BLOCK_H_BASE + max(0, n_ports - 1) * PORT_SPACING
                 self.canvas.create_text(
                     block.x + BLOCK_W // 2, block.y + h + 12,
                     text=block.error, fill="#FF5252", font=("Consolas", 9),
