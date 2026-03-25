@@ -422,8 +422,9 @@ class AutomationEngine:
             outputs = self._eval_block(block, inputs, now, rule)
             for port_name, val in outputs.items():
                 values[(bid, port_name)] = val
-            block.last_value = outputs.get(
-                list(outputs.keys())[0]) if outputs else None
+            # Don't overwrite last_value if block set it internally (e.g. Telegram Output)
+            if outputs:
+                block.last_value = outputs.get(list(outputs.keys())[0])
 
             bdef = BLOCK_DEFS.get(block.block_type, {})
             if bdef.get("category") == "action" and inputs.get("trigger"):
