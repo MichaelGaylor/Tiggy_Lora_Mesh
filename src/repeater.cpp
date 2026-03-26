@@ -587,7 +587,17 @@ void checkBeacons() {
     if (beaconScanDone) {
         beaconScanDone = false;
         BLEScanResults results = pBLEScan->getResults();
-        for (int i = 0; i < results.getCount(); i++) {
+        int count = results.getCount();
+        // Debug: log scan results and revert timer state
+        for (int i = 0; i < MAX_BEACON_RULES; i++) {
+            if (beaconRules[i].active && beaconRules[i].revertMs > 0) {
+                unsigned long age = now - beaconRules[i].lastSeen;
+                bleSend("BEACON,DEBUG," + String(count) + "devs,age=" +
+                        String(age) + "ms,revert=" + String(beaconRules[i].revertMs) +
+                        ",triggered=" + String(beaconRules[i].triggered));
+            }
+        }
+        for (int i = 0; i < count; i++) {
             BLEAdvertisedDevice dev = results.getDevice(i);
             matchBeacon(dev);
         }
