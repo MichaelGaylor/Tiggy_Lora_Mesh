@@ -34,6 +34,17 @@ CATEGORY_COLORS = {
 
 PORT_COLORS = {"number": "#00E5FF", "bool": "#FFE000", "string": "#FFFFFF"}
 
+# Deployment badges: where each block can run
+# FW = firmware only, GUI = GUI engine only, FW+GUI = both
+DEPLOY_BADGE = {
+    BlockType.BEACON_DETECT: "FW",
+    BlockType.MOVING_AVG: "GUI", BlockType.DELTA_RATE: "GUI",
+    BlockType.AND_GATE: "GUI", BlockType.OR_GATE: "GUI",
+    BlockType.NOT_GATE: "GUI", BlockType.LATCH: "GUI",
+    BlockType.SEND_DIRECT: "GUI", BlockType.TELEGRAM_OUTPUT: "GUI",
+}
+# All others default to "FW+GUI" (both)
+
 CATEGORY_BLOCKS = {
     "Input": [BlockType.SENSOR_READ, BlockType.BEACON_DETECT, BlockType.CONSTANT],
     "Transform": [BlockType.SCALE, BlockType.MOVING_AVG, BlockType.DELTA_RATE],
@@ -504,13 +515,21 @@ class AutomationCanvas:
             tags=(f"block_{block.id}", "block"))
         items.append(r)
 
-        # Title
+        # Title + deployment badge
         label = bdef.get("label", block.block_type.value)
+        badge = DEPLOY_BADGE.get(block.block_type, "FW+GUI")
+        badge_color = "#FF5252" if badge == "FW" else ("#00E5FF" if badge == "GUI" else "#555")
         t = self.canvas.create_text(
             x + 8, y + 8, text=label, anchor="nw",
             fill=COLORS["text"], font=("Consolas", 11, "bold"),
             tags=(f"block_{block.id}",))
         items.append(t)
+        # Badge (small text, top-right area)
+        b = self.canvas.create_text(
+            x + BLOCK_W - 18, y + 18, text=badge, anchor="e",
+            fill=badge_color, font=("Consolas", 7),
+            tags=(f"block_{block.id}",))
+        items.append(b)
 
         # Status dot
         dot = self.canvas.create_oval(
