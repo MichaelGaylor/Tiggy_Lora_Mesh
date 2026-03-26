@@ -933,10 +933,15 @@ class AutomationEngine:
         telegrams = [b for b in rule.blocks if b.block_type == BlockType.TELEGRAM_OUTPUT]
 
         if relays:
+            relay_node = relays[0].config.get("node_id", "").strip()
             relay_pin = relays[0].config.get("pin", 2)
             action = relays[0].config.get("action", 1)
-            cooldown = 5  # Default cooldown between re-triggers
-            action_part = f"RELAY,{relay_pin},{action},{cooldown}"
+            cooldown = 5
+            # Include target node if relay is on a different node than the scanner
+            if relay_node and relay_node != node_id:
+                action_part = f"RELAY,{relay_node},{relay_pin},{action},{cooldown}"
+            else:
+                action_part = f"RELAY,{relay_pin},{action},{cooldown}"
             # Monostable → REVERT (retriggerable hold timer on firmware)
             if monostables:
                 hold_ms = int(monostables[0].config.get("hold_seconds", 60) * 1000)

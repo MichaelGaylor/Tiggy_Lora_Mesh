@@ -271,6 +271,7 @@ struct BeaconRule {
     uint8_t actionType;  // 0=relay, 1=message
     uint8_t relayPin;    // For relay action
     uint8_t relayState;  // 0=OFF, 1=ON
+    char targetNode[5];  // For remote relay: target node ID (e.g., "C706")
     char message[32];    // For message action
     uint16_t cooldownMs; // Min time between triggers
     uint16_t revertMs;   // 0=one-shot, >0=auto-revert after tag gone for X ms
@@ -472,10 +473,23 @@ void broadcastGPS() {
 
 void executeBeaconAction(BeaconRule& r) {
     if (r.actionType == 0) {
-        // Relay action
-        digitalWrite(r.relayPin, r.relayState ? HIGH : LOW);
+        // Relay action — local or remote
+        if (r.targetNode[0] && String(r.targetNode) != String(mesh.localID)) {
+            // Remote relay: send CMD,SET via mesh
+            String cmdText = "CMD,SET," + String(r.relayPin) + "," + String(r.relayState);
+            String hex = mesh.encryptMsg(cmdText);
+            uint16_t dest = strtol(r.targetNode, nullptr, 16);
+            String mid = mesh.generateMsgID();
+            String payload = String(mesh.localID) + "," + String(r.targetNode) + "," +
+                             mid + "," + String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+            mesh.transmitPacket(dest, payload);
+            debugPrint("BEACON: " + String(r.name) + " -> remote " + String(r.targetNode) + " pin " + String(r.relayPin) + "=" + String(r.relayState));
+        } else {
+            // Local relay: direct GPIO
+            digitalWrite(r.relayPin, r.relayState ? HIGH : LOW);
+            debugPrint("BEACON: " + String(r.name) + " -> pin " + String(r.relayPin) + "=" + String(r.relayState));
+        }
         r.triggered = true;
-        debugPrint("BEACON: " + String(r.name) + " -> pin " + String(r.relayPin) + "=" + String(r.relayState));
         bleSend("BEACON,TRIGGERED," + String(r.name) + ",RELAY," + String(r.relayPin));
     } else {
         // Broadcast message over mesh
@@ -2359,10 +2373,26 @@ String processBeaconCommand(const String& args) {
 
         if (actionStr == "RELAY") {
             r.actionType = 0;
+            // Format: <pin>,<state>[,cooldown][,REVERT,ms]
+            // Or:     <targetNode>,<pin>,<state>[,cooldown][,REVERT,ms]
+            // Detect if first field is a node ID (4 hex chars) or pin number
             int c5 = actionArgs.indexOf(',');
             if (c5 < 0) return "ERR,BEACON,FORMAT";
-            r.relayPin = actionArgs.substring(0, c5).toInt();
-            String remainder = actionArgs.substring(c5 + 1);
+            String firstField = actionArgs.substring(0, c5);
+            String remainder;
+            if (firstField.length() == 4 && mesh.isValidNodeID(firstField)) {
+                // Remote target: RELAY,<node>,<pin>,<state>,...
+                strncpy(r.targetNode, firstField.c_str(), 4); r.targetNode[4] = '\0';
+                int c6 = actionArgs.indexOf(',', c5 + 1);
+                if (c6 < 0) return "ERR,BEACON,FORMAT";
+                r.relayPin = actionArgs.substring(c5 + 1, c6).toInt();
+                remainder = actionArgs.substring(c6 + 1);
+            } else {
+                // Local: RELAY,<pin>,<state>,...
+                r.targetNode[0] = '\0';
+                r.relayPin = firstField.toInt();
+                remainder = actionArgs.substring(c5 + 1);
+            }
             // Parse state and optional cooldown/revert
             int c6 = remainder.indexOf(',');
             if (c6 < 0) {
@@ -2370,7 +2400,6 @@ String processBeaconCommand(const String& args) {
             } else {
                 r.relayState = remainder.substring(0, c6).toInt();
                 String extra = remainder.substring(c6 + 1);
-                // Check for REVERT
                 int revertIdx = extra.indexOf("REVERT,");
                 if (revertIdx >= 0) {
                     r.revertMs = extra.substring(revertIdx + 7).toInt();
