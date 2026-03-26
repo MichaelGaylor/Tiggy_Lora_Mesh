@@ -18,6 +18,7 @@ import secrets
 import threading
 import time
 
+import tkinter
 import customtkinter as ctk
 import serial
 import serial.tools.list_ports
@@ -287,6 +288,7 @@ class GatewayGUIApp:
         self.async_thread: threading.Thread | None = None
         self.connected = False
         self._saved_config = self._load_config()
+        self.node_names = self._saved_config.get("node_names", {})
 
         # Mesh state
         self.topo_nodes: dict[str, TopoNode] = {}
@@ -701,6 +703,8 @@ class GatewayGUIApp:
                 "ant_height": ant_height or self.ant_height_entry.get().strip(),
                 "tg_token": self.tg_token_entry.get().strip(),
                 "tg_chatid": self.tg_chatid_entry.get().strip(),
+                "node_names": getattr(self, 'node_names', {}),
+                "mesh_port": getattr(self, '_saved_config', {}).get("mesh_port", ""),
             }
             with open(self.CONFIG_FILE, "w") as f:
                 json.dump(cfg, f, indent=2)
@@ -1019,6 +1023,80 @@ class GatewayGUIApp:
                 elif node.hops:
                     ctk.CTkLabel(row2, text="Direct", font=("Consolas", 12),
                                   text_color=COLORS["dim"]).pack(side="left")
+
+            # Right-click context menu on node card
+            node_ref = node  # Capture for lambda
+            def _node_context(event, nid=node_ref.id, is_local=node_ref.is_local):
+                menu = tkinter.Menu(self.root, tearoff=0, bg="#222", fg="#EEE",
+                                    activebackground="#444", font=("Consolas", 10))
+                menu.add_command(label=f"Query Rules on {nid}",
+                                 command=lambda: self._query_node_rules(nid, is_local))
+                menu.add_command(label=f"Set Name for {nid}",
+                                 command=lambda: self._set_node_name(nid))
+                menu.add_separator()
+                menu.add_command(label=f"Clear Rules on {nid}",
+                                 command=lambda: self._clear_node_rules(nid, is_local))
+                menu.tk_popup(event.x_root, event.y_root)
+            card.bind("<Button-3>", _node_context)
+            for child in card.winfo_children():
+                child.bind("<Button-3>", _node_context)
+                for subchild in child.winfo_children():
+                    subchild.bind("<Button-3>", _node_context)
+
+    def _query_node_rules(self, node_id: str, is_local: bool):
+        """Send BEACON,LIST and SETPOINT,LIST to query deployed rules on a node."""
+        if is_local:
+            self._send_serial("BEACON,LIST")
+            self._send_serial("SETPOINT,LIST")
+        else:
+            self._send_serial(f"MSG,{node_id},BEACON,LIST")
+            self._send_serial(f"MSG,{node_id},SETPOINT,LIST")
+        # Show a popup that will be populated when responses arrive
+        popup = ctk.CTkToplevel(self.root)
+        popup.title(f"Rules on {node_id}")
+        popup.geometry("400x300")
+        popup.attributes("-topmost", True)
+        result_text = ctk.CTkTextbox(popup, font=("Consolas", 11),
+                                      fg_color=COLORS["bg"], text_color=COLORS["text"])
+        result_text.pack(fill="both", expand=True, padx=10, pady=10)
+        result_text.insert("end", f"Querying {node_id}...\n\nWaiting for response...\n")
+
+        # Poll engine event log for responses
+        def check_response(attempts=0):
+            if attempts > 10:
+                result_text.insert("end", "\nNo response — node may be offline or have no rules.")
+                return
+            found = False
+            for ts, name, msg in reversed(self.engine.event_log[-30:]):
+                if "BEACONLIST" in msg or "SETPOINTLIST" in msg or "OK,BEACON" in msg or "OK,SETPOINT" in msg:
+                    result_text.delete("1.0", "end")
+                    result_text.insert("end", f"Rules on {node_id}:\n\n{msg}\n")
+                    found = True
+                    break
+            if not found:
+                popup.after(1000, lambda: check_response(attempts + 1))
+        popup.after(2000, check_response)
+
+    def _set_node_name(self, node_id: str):
+        """Set a friendly name for a node."""
+        if not hasattr(self, 'node_names'):
+            self.node_names = {}
+        dialog = ctk.CTkInputDialog(text=f"Friendly name for {node_id}:",
+                                     title="Set Node Name")
+        name = dialog.get_input()
+        if name:
+            self.node_names[node_id] = name
+            self._save_config()
+
+    def _clear_node_rules(self, node_id: str, is_local: bool):
+        """Clear all deployed rules on a node."""
+        if is_local:
+            self._send_serial("BEACON,CLEAR")
+            self._send_serial("SETPOINT,CLEAR")
+        else:
+            self._send_serial(f"MSG,{node_id},BEACON,CLEAR")
+            self._send_serial(f"MSG,{node_id},SETPOINT,CLEAR")
+        self.engine._log("Deploy", f"Cleared all rules on {node_id}")
 
     # ─── Topology Canvas Animation ──────────────────────────
 
