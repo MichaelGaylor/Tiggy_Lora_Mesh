@@ -419,7 +419,7 @@ class GatewayGUIApp:
                                               font=("Consolas", 10), fg_color=COLORS["accent"],
                                               text_color="#000", command=self._toggle_telegram)
         self.tg_connect_btn.pack(side="left", padx=5)
-        self.tg_status_label = ctk.CTkLabel(tg_row, text="", font=("Consolas", 9))
+        self.tg_status_label = ctk.CTkLabel(tg_row, text="", font=("Consolas", 11))
         self.tg_status_label.pack(side="left", padx=5)
         self.telegram_bridge = None
 
@@ -444,7 +444,7 @@ class GatewayGUIApp:
                                                font=("Consolas", 10), fg_color=COLORS["accent"],
                                                text_color="#000", command=self._toggle_mesh_bridge)
         self.mesh_bridge_btn.pack(side="left", padx=5)
-        self.mesh_status_label = ctk.CTkLabel(mesh_row, text="", font=("Consolas", 9))
+        self.mesh_status_label = ctk.CTkLabel(mesh_row, text="", font=("Consolas", 11))
         self.mesh_status_label.pack(side="left", padx=5)
         self.mesh_bridge = None
         self._mesh_port_map = {}
@@ -491,7 +491,7 @@ class GatewayGUIApp:
             f.pack(side="left", padx=15)
             val = ctk.CTkLabel(f, text="0", font=("Consolas", 18, "bold"), text_color=color)
             val.pack()
-            ctk.CTkLabel(f, text=label, font=("Consolas", 9), text_color=COLORS["dim"]).pack()
+            ctk.CTkLabel(f, text=label, font=("Consolas", 11), text_color=COLORS["dim"]).pack()
             self.stat_labels[key] = val
 
         # Hub status
@@ -499,7 +499,7 @@ class GatewayGUIApp:
         f.pack(side="left", padx=15)
         self.hub_status_dot = ctk.CTkLabel(f, text="●", font=("Consolas", 18), text_color=COLORS["bad"])
         self.hub_status_dot.pack()
-        ctk.CTkLabel(f, text="Hub", font=("Consolas", 9), text_color=COLORS["dim"]).pack()
+        ctk.CTkLabel(f, text="Hub", font=("Consolas", 11), text_color=COLORS["dim"]).pack()
 
         # Right: Node cards
         right_frame = ctk.CTkFrame(mid_frame, fg_color=COLORS["panel"], corner_radius=8)
@@ -587,7 +587,7 @@ class GatewayGUIApp:
         ctk.CTkButton(lb_toolbar, text="Deploy", width=55, font=("Consolas", 10),
                         fg_color=COLORS["warn"], text_color="#000",
                         command=self._deploy_rule).pack(side="right", padx=3)
-        self.deploy_status_label = ctk.CTkLabel(lb_toolbar, text="", font=("Consolas", 9))
+        self.deploy_status_label = ctk.CTkLabel(lb_toolbar, text="", font=("Consolas", 11))
         self.deploy_status_label.pack(side="right", padx=5)
 
         # Block adder toolbar
@@ -623,7 +623,7 @@ class GatewayGUIApp:
         wf_frame = self.wf_frame
         ctk.CTkLabel(wf_frame, text="  Packet Waterfall (click to inspect)", font=("Consolas", 11, "bold"),
                       text_color=COLORS["accent"], anchor="w").pack(fill="x", padx=10, pady=(5, 0))
-        self.wf_text = ctk.CTkTextbox(wf_frame, font=("Consolas", 9), fg_color=COLORS["bg"],
+        self.wf_text = ctk.CTkTextbox(wf_frame, font=("Consolas", 11), fg_color=COLORS["bg"],
                                        text_color=COLORS["dim"], height=100, state="disabled")
         self.wf_text.pack(fill="both", expand=True, padx=10, pady=(0, 5))
         self.wf_text.bind("<Button-1>", self.on_waterfall_click)
@@ -639,19 +639,19 @@ class GatewayGUIApp:
         insp_inner = ctk.CTkFrame(insp_frame, fg_color="transparent")
         insp_inner.pack(fill="x", padx=10)
         self.insp_label = ctk.CTkLabel(insp_inner, text="Click a packet above to inspect",
-                                         font=("Consolas", 9), text_color=COLORS["dim"], anchor="w")
+                                         font=("Consolas", 11), text_color=COLORS["dim"], anchor="w")
         self.insp_label.pack(fill="x")
 
         decrypt_row = ctk.CTkFrame(insp_frame, fg_color="transparent")
         decrypt_row.pack(fill="x", padx=10, pady=(2, 5))
-        ctk.CTkLabel(decrypt_row, text="AES Key:", text_color=COLORS["dim"], font=("Consolas", 9)).pack(side="left")
+        ctk.CTkLabel(decrypt_row, text="AES Key:", text_color=COLORS["dim"], font=("Consolas", 11)).pack(side="left")
         self.aes_entry = ctk.CTkEntry(decrypt_row, width=180, placeholder_text="16-char key",
-                                       font=("Consolas", 9))
+                                       font=("Consolas", 11))
         self.aes_entry.pack(side="left", padx=5)
-        self.decrypt_btn = ctk.CTkButton(decrypt_row, text="Decrypt", width=70, font=("Consolas", 9),
+        self.decrypt_btn = ctk.CTkButton(decrypt_row, text="Decrypt", width=70, font=("Consolas", 11),
                                            fg_color=COLORS["accent"], text_color="#000", command=self.decrypt_selected)
         self.decrypt_btn.pack(side="left", padx=5)
-        self.decrypt_result = ctk.CTkLabel(decrypt_row, text="", font=("Consolas", 9),
+        self.decrypt_result = ctk.CTkLabel(decrypt_row, text="", font=("Consolas", 11),
                                             text_color=COLORS["good"])
         self.decrypt_result.pack(side="left", padx=10)
 
@@ -1132,14 +1132,14 @@ class GatewayGUIApp:
             rssi_vals = [nd.rssi for nd in online_nodes]
             best, worst, avg = max(rssi_vals), min(rssi_vals), sum(rssi_vals) // len(rssi_vals)
             summary = f"{len(online_nodes)} nodes | Best: {best}dBm | Worst: {worst}dBm | Avg: {avg}dBm"
-            canvas.create_text(w // 2, 10, text=summary, fill="#B0B0B0", font=("Consolas", 9))
+            canvas.create_text(w // 2, 10, text=summary, fill="#B0B0B0", font=("Consolas", 11))
             # Weak link warning
             weak = [nd for nd in online_nodes if nd.rssi < -100]
             if weak:
                 worst_node = min(weak, key=lambda nd: nd.rssi)
                 via = f" via {worst_node.next_hop}" if worst_node.next_hop and worst_node.next_hop != worst_node.id else ""
                 warn = f"Weak: {worst_node.id} ({worst_node.rssi}dBm{via})"
-                canvas.create_text(w // 2, 22, text=warn, fill=COLORS["warn"], font=("Consolas", 9))
+                canvas.create_text(w // 2, 22, text=warn, fill=COLORS["warn"], font=("Consolas", 11))
 
         # Circular layout with padding for summary
         top_pad = 35
@@ -1170,7 +1170,7 @@ class GatewayGUIApp:
                     mx = (na.x + nb.x) / 2
                     my = (na.y + nb.y) / 2
                     canvas.create_text(mx, my - 6, text=f"{rssi}", fill=color,
-                                        font=("Consolas", 8))
+                                        font=("Consolas", 11))
 
         # Draw nodes — size by hop count
         for node in nodes:
@@ -1197,7 +1197,7 @@ class GatewayGUIApp:
             if age < 120 and node.rssi < 0:
                 canvas.create_text(node.x, node.y + r + 8, text=f"{node.rssi}dBm",
                                     fill=self._rssi_edge_color(node.rssi),
-                                    font=("Consolas", 7))
+                                    font=("Consolas", 11))
 
         self.root.after(33, self.animate_topology)
 

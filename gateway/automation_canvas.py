@@ -35,15 +35,15 @@ CATEGORY_COLORS = {
 PORT_COLORS = {"number": "#00E5FF", "bool": "#FFE000", "string": "#FFFFFF"}
 
 # Deployment badges: where each block can run
-# FW = firmware only, GUI = GUI engine only, FW+GUI = both
+# ND = node only, GUI = GUI engine only, ND+GUI = both
 DEPLOY_BADGE = {
-    BlockType.BEACON_DETECT: "FW",
+    BlockType.BEACON_DETECT: "ND",
     BlockType.MOVING_AVG: "GUI", BlockType.DELTA_RATE: "GUI",
     BlockType.AND_GATE: "GUI", BlockType.OR_GATE: "GUI",
     BlockType.NOT_GATE: "GUI", BlockType.LATCH: "GUI",
     BlockType.SEND_DIRECT: "GUI", BlockType.TELEGRAM_OUTPUT: "GUI",
 }
-# All others default to "FW+GUI" (both)
+# All others default to "ND+GUI" (both)
 
 CATEGORY_BLOCKS = {
     "Input": [BlockType.SENSOR_READ, BlockType.BEACON_DETECT, BlockType.CONSTANT],
@@ -194,7 +194,7 @@ def show_block_config(parent, block: Block, discovered_nodes: dict,
                     scan_result.insert("end", "No scan response — check serial connection\n")
 
         ctk.CTkButton(scan_frame, text="Scan for Beacons", width=140,
-                       font=("Consolas", 9), fg_color=COLORS["accent"],
+                       font=("Consolas", 11), fg_color=COLORS["accent"],
                        text_color="#000", command=do_scan).pack()
         scan_result.insert("end", "Click Scan to find nearby beacons.\nCopy MAC or UUID into Beacon ID field.")
         row += 1
@@ -486,7 +486,7 @@ class AutomationCanvas:
             if block.error:
                 self.canvas.create_text(
                     block.x + BLOCK_W // 2, block.y + h + 12,
-                    text=block.error, fill="#FF5252", font=("Consolas", 9),
+                    text=block.error, fill="#FF5252", font=("Consolas", 11),
                     tags=(f"block_{block.id}", err_tag))
 
         self.canvas.update_idletasks()  # Force visual refresh
@@ -517,8 +517,8 @@ class AutomationCanvas:
 
         # Title + deployment badge
         label = bdef.get("label", block.block_type.value)
-        badge = DEPLOY_BADGE.get(block.block_type, "FW+GUI")
-        badge_color = "#FF5252" if badge == "FW" else ("#00E5FF" if badge == "GUI" else "#555")
+        badge = DEPLOY_BADGE.get(block.block_type, "ND+GUI")
+        badge_color = "#FF5252" if badge == "ND" else ("#00E5FF" if badge == "GUI" else "#00E676")
         t = self.canvas.create_text(
             x + 8, y + 8, text=label, anchor="nw",
             fill=COLORS["text"], font=("Consolas", 11, "bold"),
@@ -527,7 +527,7 @@ class AutomationCanvas:
         # Badge (small text, top-right area)
         b = self.canvas.create_text(
             x + BLOCK_W - 18, y + 18, text=badge, anchor="e",
-            fill=badge_color, font=("Consolas", 8),
+            fill=badge_color, font=("Consolas", 11),
             tags=(f"block_{block.id}",))
         items.append(b)
 
@@ -564,7 +564,7 @@ class AutomationCanvas:
             items.append(p)
             lbl = self.canvas.create_text(
                 px + PORT_R + 4, py, text=pname, anchor="w",
-                fill="#B0B0B0", font=("Consolas", 9),
+                fill="#B0B0B0", font=("Consolas", 11),
                 tags=(f"block_{block.id}",))
             items.append(lbl)
             self._port_pos[(block.id, pname, "in")] = (px, py)
@@ -584,7 +584,7 @@ class AutomationCanvas:
             items.append(p)
             lbl = self.canvas.create_text(
                 px - PORT_R - 4, py, text=pname, anchor="e",
-                fill="#B0B0B0", font=("Consolas", 9),
+                fill="#B0B0B0", font=("Consolas", 11),
                 tags=(f"block_{block.id}",))
             items.append(lbl)
             self._port_pos[(block.id, pname, "out")] = (px, py)
@@ -593,7 +593,7 @@ class AutomationCanvas:
         if block.error:
             err = self.canvas.create_text(
                 x + BLOCK_W // 2, y + h + 12, text=block.error,
-                fill="#FF5252", font=("Consolas", 9),
+                fill="#FF5252", font=("Consolas", 11),
                 tags=(f"block_{block.id}", f"{block.id}_error"))
             items.append(err)
 
