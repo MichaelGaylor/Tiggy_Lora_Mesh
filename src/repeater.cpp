@@ -530,10 +530,6 @@ void matchBeacon(BLEAdvertisedDevice& dev) {
     for (int i = 0; i < MAX_BEACON_RULES; i++) {
         BeaconRule& r = beaconRules[i];
         if (!r.active) continue;
-        // Debug: show match attempt for target beacon only
-        if (r.mac[0] && mac.substring(0, 8).equalsIgnoreCase(String(r.mac).substring(0, 8))) {
-            bleSend("BEACON,MATCH," + mac + ",vs," + String(r.mac) + ",rssi=" + String(rssi));
-        }
         if (rssi < r.rssiThresh) continue;
 
         bool match = false;
@@ -591,17 +587,7 @@ void checkBeacons() {
     if (beaconScanDone) {
         beaconScanDone = false;
         BLEScanResults results = pBLEScan->getResults();
-        int count = results.getCount();
-        // Debug: log scan results and revert timer state
-        for (int i = 0; i < MAX_BEACON_RULES; i++) {
-            if (beaconRules[i].active && beaconRules[i].revertMs > 0) {
-                unsigned long age = now - beaconRules[i].lastSeen;
-                bleSend("BEACON,DEBUG," + String(count) + "devs,age=" +
-                        String(age) + "ms,revert=" + String(beaconRules[i].revertMs) +
-                        ",triggered=" + String(beaconRules[i].triggered));
-            }
-        }
-        for (int i = 0; i < count; i++) {
+        for (int i = 0; i < results.getCount(); i++) {
             BLEAdvertisedDevice dev = results.getDevice(i);
             matchBeacon(dev);
         }

@@ -968,11 +968,13 @@ class AutomationEngine:
 
         cmd = f"BEACON,ADD,{beacon_id},{name},{rssi_thresh},{action_part}"
 
-        # Send to target node (local or remote)
+        # Always clear existing beacon rules first (prevents stale EEPROM mismatch)
         is_local = not node_id or node_id == self.local_node_id
         if is_local:
+            self.send_serial("BEACON,CLEAR")
             self.send_serial(cmd)
         else:
+            self.send_serial(f"MSG,{node_id},BEACON,CLEAR")
             self.send_serial(f"MSG,{node_id},{cmd}")
 
         self.deployed_beacons.add(name)
