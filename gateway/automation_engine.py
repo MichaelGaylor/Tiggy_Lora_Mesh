@@ -942,7 +942,8 @@ class AutomationEngine:
                 action_part = f"RELAY,{relay_node},{relay_pin},{action},{cooldown}"
             else:
                 action_part = f"RELAY,{relay_pin},{action},{cooldown}"
-            # Monostable → REVERT (retriggerable hold timer on firmware)
+            # Monostable → firmware REVERT (autonomous, no traffic)
+            # Firmware sends KEEPALIVE events so GUI stays informed
             if monostables:
                 hold_ms = int(monostables[0].config.get("hold_seconds", 60) * 1000)
                 action_part += f",REVERT,{hold_ms}"
