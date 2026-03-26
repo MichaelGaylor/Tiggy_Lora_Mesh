@@ -539,12 +539,17 @@ void matchBeacon(BLEAdvertisedDevice& dev) {
 
         r.lastSeen = now;
 
-        // Cooldown check — don't re-trigger too fast
-        if (r.triggered && r.revertMs > 0) continue;  // Auto-revert mode: stay active
+        // Cooldown — don't re-trigger too fast
         if (now - r.lastTrigger < r.cooldownMs) continue;
-
         r.lastTrigger = now;
-        executeBeaconAction(r);
+
+        if (r.triggered && r.revertMs > 0) {
+            // Already triggered with REVERT active — don't re-fire the action
+            // but DO notify the GUI so monostable/beacon_data stays alive
+            bleSend("BEACON,TRIGGERED," + String(r.name) + ",KEEPALIVE");
+        } else {
+            executeBeaconAction(r);
+        }
     }
 }
 

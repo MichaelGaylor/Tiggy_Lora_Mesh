@@ -527,7 +527,7 @@ class AutomationCanvas:
         # Badge (small text, top-right area)
         b = self.canvas.create_text(
             x + BLOCK_W - 18, y + 18, text=badge, anchor="e",
-            fill=badge_color, font=("Consolas", 7),
+            fill=badge_color, font=("Consolas", 8),
             tags=(f"block_{block.id}",))
         items.append(b)
 
