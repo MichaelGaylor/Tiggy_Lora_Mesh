@@ -238,7 +238,8 @@ class Rule:
         self.id = rule_id or uuid.uuid4().hex[:8]
         self.name = name
         self.enabled = True
-        self.deployed = False  # Whether rule has been deployed to firmware
+        self.deployed = False  # Whether rule has been deployed
+        self.deploy_mode = ""  # "firmware", "gui", or "" (not deployed)
         self.blocks: list[Block] = []
         self.wires: list[Wire] = []
         self.eval_interval = 5.0
@@ -253,6 +254,7 @@ class Rule:
             "name": self.name,
             "enabled": self.enabled,
             "deployed": self.deployed,
+            "deploy_mode": self.deploy_mode,
             "eval_interval": self.eval_interval,
             "action_gap": self.action_gap,
             "blocks": [b.to_dict() for b in self.blocks],
@@ -264,6 +266,7 @@ class Rule:
         r = Rule(d.get("name", "Rule"), d.get("id"))
         r.enabled = d.get("enabled", True)
         r.deployed = d.get("deployed", False)
+        r.deploy_mode = d.get("deploy_mode", "")
         r.eval_interval = d.get("eval_interval", 5.0)
         r.action_gap = d.get("action_gap", d.get("cooldown", 10.0))
         r.blocks = [Block.from_dict(b) for b in d.get("blocks", [])]
@@ -824,16 +827,36 @@ class AutomationEngine:
     # ─── Deploy to Node (firmware setpoint) ───────────────────
 
     def try_deploy_as_setpoint(self, rule: Rule) -> tuple[bool, str]:
-        """Try to convert a rule to a firmware setpoint or beacon command.
-        Supports:
-          sensor [> scale] > compare > [debounce >] relay/broadcast
-          beacon_detect > relay/broadcast
+        """Smart deploy: analyses the rule chain and deploys firmware parts
+        to the node, marks GUI-only parts as 'runs in engine'.
+
+        Firmware-deployable patterns:
+          - beacon [+ monostable] > relay  → BEACON,ADD with REVERT
+          - beacon > broadcast             → BEACON,ADD with MSG
+          - sensor > compare > relay       → SETPOINT command
+          - sensor > compare > broadcast   → SETPOINT command
+
+        GUI-only (runs in engine, no deploy needed):
+          - anything with Telegram Output, Scale→Telegram, complex chains
         """
-        # Check for beacon rules first
+        block_types = {b.block_type for b in rule.blocks}
+
+        # ── Beacon rules (may include monostable as REVERT) ──
         beacons = [b for b in rule.blocks if b.block_type == BlockType.BEACON_DETECT]
         if beacons:
             return self._deploy_beacon_rule(rule, beacons[0])
 
+        # ── GUI-only chains (no firmware deploy needed) ───────
+        gui_only_types = {BlockType.TELEGRAM_OUTPUT, BlockType.MONOSTABLE}
+        if block_types & gui_only_types:
+            # These run in the GUI engine automatically
+            rule.deployed = True
+            rule.deploy_mode = "gui"
+            self._save_rules()
+            gui_parts = [BLOCK_DEFS[bt]["label"] for bt in block_types & gui_only_types]
+            return True, f"Runs in GUI engine ({', '.join(gui_parts)})"
+
+        # ── Sensor setpoint deploy ────────────────────────────
         sensors = [b for b in rule.blocks if b.block_type == BlockType.SENSOR_READ]
         compares = [b for b in rule.blocks if b.block_type == BlockType.COMPARE]
         relays = [b for b in rule.blocks if b.block_type == BlockType.SET_RELAY]
@@ -846,12 +869,7 @@ class AutomationEngine:
             return False, "Need exactly 1 sensor and 1 compare block"
         if len(relays) + len(broadcasts) != 1:
             return False, "Need exactly 1 action (relay or broadcast)"
-        if len(scales) > 1:
-            return False, "Max 1 Scale block for firmware deploy"
-        if len(debounces) > 1:
-            return False, "Max 1 Debounce block for firmware deploy"
 
-        # Check for unsupported block types
         allowed = {BlockType.SENSOR_READ, BlockType.COMPARE, BlockType.CONSTANT,
                    BlockType.SET_RELAY, BlockType.SEND_BROADCAST,
                    BlockType.SCALE, BlockType.DEBOUNCE}
@@ -867,7 +885,6 @@ class AutomationEngine:
         sensor_pin = sensors[0].config.get("pin", 0)
         threshold = constants[0].config.get("value", 0) if constants else 0
 
-        # Build action part
         if relays:
             target_node = relays[0].config.get("node_id", "")
             relay_pin = relays[0].config.get("pin", 0)
@@ -884,14 +901,12 @@ class AutomationEngine:
 
         cmd = f"SETPOINT,{sensor_pin},{op},{threshold},{action_part}"
 
-        # Append SCALE suffix if present
         if scales:
             factor = scales[0].config.get("factor", 1.0)
             offset = scales[0].config.get("offset", 0.0)
             if factor != 1.0 or offset != 0.0:
                 cmd += f",SCALE,{factor},{offset}"
 
-        # Append DEBOUNCE suffix if present
         if debounces:
             hold_s = debounces[0].config.get("hold_seconds", 0)
             if hold_s > 0:
@@ -899,6 +914,7 @@ class AutomationEngine:
 
         self.send_serial(cmd)
         rule.deployed = True
+        rule.deploy_mode = "firmware"
         self._save_rules()
         return True, f"Deployed to node: {cmd}"
 
@@ -916,16 +932,36 @@ class AutomationEngine:
         # Determine action from connected blocks
         relays = [b for b in rule.blocks if b.block_type == BlockType.SET_RELAY]
         broadcasts = [b for b in rule.blocks if b.block_type == BlockType.SEND_BROADCAST]
+        monostables = [b for b in rule.blocks if b.block_type == BlockType.MONOSTABLE]
+        telegrams = [b for b in rule.blocks if b.block_type == BlockType.TELEGRAM_OUTPUT]
 
         if relays:
             relay_pin = relays[0].config.get("pin", 2)
             action = relays[0].config.get("action", 1)
-            action_part = f"RELAY,{relay_pin},{action}"
+            cooldown = 5  # Default cooldown between re-triggers
+            action_part = f"RELAY,{relay_pin},{action},{cooldown}"
+            # Monostable → REVERT (retriggerable hold timer on firmware)
+            if monostables:
+                hold_ms = int(monostables[0].config.get("hold_seconds", 60) * 1000)
+                action_part += f",REVERT,{hold_ms}"
         elif broadcasts:
             msg = broadcasts[0].config.get("message_true", "BEACON_NEAR")
-            action_part = f"MSG,{msg}"
+            cooldown = 60  # Don't spam broadcasts
+            if monostables:
+                cooldown = int(monostables[0].config.get("hold_seconds", 60))
+            action_part = f"MSG,{msg},{cooldown}"
+        elif telegrams:
+            # Beacon → Telegram: deploy beacon scan, telegram runs in GUI
+            action_part = f"MSG,BEACON_{name}"  # Firmware broadcasts, GUI picks up
+            self._log("Deploy", f"Beacon scan deployed to node, Telegram Output runs in GUI")
         else:
-            return False, "Need a relay or broadcast action block"
+            # No firmware action — GUI-only chain (monostable→telegram etc)
+            if monostables or telegrams:
+                rule.deployed = True
+                rule.deploy_mode = "gui"
+                self._save_rules()
+                return True, "Runs in GUI engine (no firmware action)"
+            return False, "Need a relay, broadcast, or telegram action block"
 
         cmd = f"BEACON,ADD,{beacon_id},{name},{rssi_thresh},{action_part}"
 

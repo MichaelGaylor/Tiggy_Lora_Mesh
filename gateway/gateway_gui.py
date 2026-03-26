@@ -1346,7 +1346,9 @@ class GatewayGUIApp:
     def _update_deploy_status(self):
         rule = self.auto_canvas.current_rule
         if rule and rule.deployed:
-            self.deploy_status_label.configure(text="DEPLOYED", text_color=COLORS["good"])
+            mode = getattr(rule, 'deploy_mode', 'firmware')
+            label = "DEPLOYED (node)" if mode == "firmware" else "RUNNING (GUI)"
+            self.deploy_status_label.configure(text=label, text_color=COLORS["good"])
         else:
             self.deploy_status_label.configure(text="", text_color=COLORS["dim"])
 
