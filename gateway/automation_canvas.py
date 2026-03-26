@@ -38,7 +38,8 @@ CATEGORY_BLOCKS = {
     "Input": [BlockType.SENSOR_READ, BlockType.BEACON_DETECT, BlockType.CONSTANT],
     "Transform": [BlockType.SCALE, BlockType.MOVING_AVG, BlockType.DELTA_RATE],
     "Condition": [BlockType.COMPARE, BlockType.AND_GATE, BlockType.OR_GATE,
-                  BlockType.NOT_GATE, BlockType.DEBOUNCE, BlockType.LATCH],
+                  BlockType.NOT_GATE, BlockType.DEBOUNCE, BlockType.MONOSTABLE,
+                  BlockType.LATCH],
     "Action": [BlockType.SET_RELAY, BlockType.PULSE_RELAY,
                BlockType.SEND_BROADCAST, BlockType.SEND_DIRECT,
                BlockType.TELEGRAM_OUTPUT],
@@ -208,6 +209,9 @@ def show_block_config(parent, block: Block, discovered_nodes: dict,
 
     elif bt == BlockType.DEBOUNCE:
         add_field("Hold (sec):", "hold_seconds", "5.0")
+
+    elif bt == BlockType.MONOSTABLE:
+        add_field("Hold time (sec):", "hold_seconds", "60.0")
 
     elif bt == BlockType.SET_RELAY:
         add_node_combo("Node ID:", "node_id")
@@ -616,6 +620,8 @@ class AutomationCanvas:
             return ops.get(cfg.get("operator", "GT"), "?")
         if bt == BlockType.DEBOUNCE:
             return f"{cfg.get('hold_seconds', 5)}s"
+        if bt == BlockType.MONOSTABLE:
+            return f"{cfg.get('hold_seconds', 60)}s hold"
         if bt == BlockType.SET_RELAY:
             return f"{cfg.get('node_id', '?')}:pin{cfg.get('pin', '?')} {'HIGH' if cfg.get('action', 1) else 'LOW'}"
         if bt == BlockType.PULSE_RELAY:

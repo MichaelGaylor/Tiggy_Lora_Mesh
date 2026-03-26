@@ -33,6 +33,7 @@ class BlockType(str, Enum):
     OR_GATE = "or_gate"
     NOT_GATE = "not_gate"
     DEBOUNCE = "debounce"
+    MONOSTABLE = "monostable"
     LATCH = "latch"
     # Actions
     SET_RELAY = "set_relay"
@@ -120,6 +121,13 @@ BLOCK_DEFS = {
         "inputs": [("in", "bool")],
         "outputs": [("result", "bool")],
         "defaults": {"hold_seconds": 5.0},
+    },
+    BlockType.MONOSTABLE: {
+        "category": "condition",
+        "label": "Monostable",
+        "inputs": [("trigger", "bool")],
+        "outputs": [("result", "bool")],
+        "defaults": {"hold_seconds": 60.0},
     },
     BlockType.LATCH: {
         "category": "condition",
@@ -607,6 +615,24 @@ class AutomationEngine:
                 st["since"] = 0
                 st["output"] = False
             block.status = "active"
+            return {"result": st["output"]}
+
+        if bt == BlockType.MONOSTABLE:
+            trigger = inputs.get("trigger")
+            hold = cfg.get("hold_seconds", 60.0)
+            st = self._block_state.setdefault(sk, {"last_trigger": 0, "output": False})
+            if trigger:
+                st["last_trigger"] = now  # Retrigger — reset timer
+                st["output"] = True
+            # Stay TRUE for hold_seconds after last trigger
+            if st["output"] and (now - st["last_trigger"]) >= hold:
+                st["output"] = False  # Timer expired
+            block.status = "triggered" if st["output"] else "active"
+            if st["output"]:
+                remaining = hold - (now - st["last_trigger"])
+                block.error = f"{remaining:.0f}s remaining"
+            else:
+                block.error = ""
             return {"result": st["output"]}
 
         if bt == BlockType.LATCH:
