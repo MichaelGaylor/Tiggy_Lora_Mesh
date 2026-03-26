@@ -429,6 +429,33 @@ class GatewayGUIApp:
         if cfg.get("tg_chatid"):
             self.tg_chatid_entry.insert(0, cfg["tg_chatid"])
 
+        # Meshtastic bridge config row
+        mesh_row = ctk.CTkFrame(self.root, fg_color="transparent")
+        mesh_row.pack(fill="x", padx=10, pady=(0, 2))
+        ctk.CTkLabel(mesh_row, text="Meshtastic:", text_color=COLORS["dim"],
+                     font=("Consolas", 10)).pack(side="left")
+        self.mesh_port_combo = ctk.CTkComboBox(mesh_row, width=200, values=["(none)"],
+                                                 font=("Consolas", 10))
+        self.mesh_port_combo.pack(side="left", padx=2)
+        ctk.CTkButton(mesh_row, text="Detect", width=55, font=("Consolas", 10),
+                       fg_color=COLORS["panel"], text_color=COLORS["text"],
+                       command=self._refresh_mesh_ports).pack(side="left", padx=2)
+        self.mesh_bridge_btn = ctk.CTkButton(mesh_row, text="Start Bridge", width=90,
+                                               font=("Consolas", 10), fg_color=COLORS["accent"],
+                                               text_color="#000", command=self._toggle_mesh_bridge)
+        self.mesh_bridge_btn.pack(side="left", padx=5)
+        self.mesh_status_label = ctk.CTkLabel(mesh_row, text="", font=("Consolas", 9))
+        self.mesh_status_label.pack(side="left", padx=5)
+        self.mesh_bridge = None
+        self._mesh_port_map = {}
+
+        # Restore Meshtastic port and populate dropdown
+        self._refresh_mesh_ports()
+        if cfg.get("mesh_port"):
+            matched = [v for v in self._mesh_port_map if cfg["mesh_port"] in v]
+            if matched:
+                self.mesh_port_combo.set(matched[0])
+
         # Middle: Topology + Node Cards
         mid_frame = ctk.CTkFrame(self.root, fg_color="transparent")
         mid_frame.pack(fill="both", padx=10, pady=5, expand=True)
@@ -635,8 +662,11 @@ class GatewayGUIApp:
         if ports:
             values = [desc for _, desc in ports]
             self.port_combo.configure(values=values)
-            self.port_combo.set(values[0])
             self._port_map = {desc: dev for dev, desc in ports}
+            # Restore saved port if available
+            saved = self._saved_config.get("serial_port", "")
+            matched = [v for v in values if saved and saved in v]
+            self.port_combo.set(matched[0] if matched else values[0])
         else:
             self.port_combo.configure(values=["No ports found"])
             self.port_combo.set("No ports found")
@@ -1352,6 +1382,85 @@ class GatewayGUIApp:
                 self._save_config()
             except Exception as e:
                 self.tg_status_label.configure(text=f"Error: {e}", text_color=COLORS["bad"])
+
+    def _refresh_mesh_ports(self):
+        ports = detect_serial_ports()
+        if ports:
+            values = [desc for _, desc in ports]
+            self.mesh_port_combo.configure(values=values)
+            self._mesh_port_map = {desc: dev for dev, desc in ports}
+        else:
+            self.mesh_port_combo.configure(values=["No ports found"])
+            self._mesh_port_map = {}
+
+    def _toggle_mesh_bridge(self):
+        if self.mesh_bridge:
+            # Stop bridge
+            try:
+                self.mesh_bridge.mesh.stop()
+                self.mesh_bridge.tom.stop()
+            except Exception:
+                pass
+            self.mesh_bridge = None
+            self.mesh_bridge_btn.configure(text="Start Bridge")
+            self.mesh_status_label.configure(text="Stopped", text_color=COLORS["dim"])
+            return
+
+        desc = self.mesh_port_combo.get()
+        mesh_port = self._mesh_port_map.get(desc)
+        if not mesh_port:
+            self.mesh_status_label.configure(text="Select a port", text_color=COLORS["bad"])
+            return
+
+        # Get TOM serial port (the one the GUI is connected to)
+        tom_port = self.get_selected_port()
+        if not tom_port or not self.gateway:
+            self.mesh_status_label.configure(text="Connect TOM first", text_color=COLORS["bad"])
+            return
+
+        try:
+            from meshtastic_bridge import Bridge
+            aes_key = self.key_entry.get().strip()
+            self.mesh_bridge = Bridge(
+                tom_port="__gui__",  # Marker: bridge uses GUI's serial connection
+                mesh_port=mesh_port,
+                aes_key=aes_key,
+            )
+            # Override TOM interface to use GUI's send_serial instead of own serial port
+            self.mesh_bridge.tom = None  # Don't open a second TOM serial
+            self.mesh_bridge.mesh.connect()
+
+            # Hook Meshtastic events into GUI
+            def on_mesh_text(from_id, text, packet):
+                name = self.mesh_bridge.mapper.get_mesh_name(from_id)
+                tom_id = self.mesh_bridge.mapper.get_tom_id(from_id)
+                self._emit("log", text=f"MESH MSG from {name}: {text}")
+                # Forward to TOM mesh
+                display = f"[Mesh {name}] {text}"
+                self._send_serial(f"MSG,FFFF,{display}")
+
+            def on_mesh_position(from_id, lat, lon, alt, packet):
+                name = self.mesh_bridge.mapper.get_mesh_name(from_id)
+                self._emit("log", text=f"MESH POS from {name}: {lat:.6f},{lon:.6f}")
+
+            def on_mesh_nodeinfo(from_id, name, packet):
+                self.mesh_bridge.mapper.set_mesh_name(from_id, name)
+                tom_id = self.mesh_bridge.mapper.get_tom_id(from_id)
+                self._emit("log", text=f"MESH node: {name} → {tom_id}")
+
+            self.mesh_bridge.mesh.on_text = on_mesh_text
+            self.mesh_bridge.mesh.on_position = on_mesh_position
+            self.mesh_bridge.mesh.on_nodeinfo = on_mesh_nodeinfo
+
+            self.mesh_bridge_btn.configure(text="Stop Bridge")
+            self.mesh_status_label.configure(text="Running", text_color=COLORS["good"])
+
+            # Save port
+            self._saved_config["mesh_port"] = mesh_port
+            self._save_config()
+        except Exception as e:
+            self.mesh_status_label.configure(text=f"Error: {e}", text_color=COLORS["bad"])
+            self.mesh_bridge = None
 
     def _eval_automation(self):
         """Periodic automation rule evaluation."""
