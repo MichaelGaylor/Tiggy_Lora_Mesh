@@ -816,9 +816,6 @@ class AutomationEngine:
                     self.send_serial(f"POLL,{node_id}")
                 self._last_poll_time[node_id] = now
 
-        if not needed:
-            pass
-
     def _log(self, rule_name: str, message: str):
         self.event_log.append((time.time(), rule_name, message))
         if len(self.event_log) > 200:
@@ -852,7 +849,7 @@ class AutomationEngine:
             # These run in the GUI engine automatically
             rule.deployed = True
             rule.deploy_mode = "gui"
-            self._save_rules()
+            self.save_rules()
             gui_parts = [BLOCK_DEFS[bt]["label"] for bt in block_types & gui_only_types]
             return True, f"Runs in GUI engine ({', '.join(gui_parts)})"
 
@@ -915,7 +912,7 @@ class AutomationEngine:
         self.send_serial(cmd)
         rule.deployed = True
         rule.deploy_mode = "firmware"
-        self._save_rules()
+        self.save_rules()
         return True, f"Deployed to node: {cmd}"
 
     def _deploy_beacon_rule(self, rule: Rule, beacon_block: 'Block') -> tuple[bool, str]:
@@ -959,7 +956,7 @@ class AutomationEngine:
             if monostables or telegrams:
                 rule.deployed = True
                 rule.deploy_mode = "gui"
-                self._save_rules()
+                self.save_rules()
                 return True, "Runs in GUI engine (no firmware action)"
             return False, "Need a relay, broadcast, or telegram action block"
 
@@ -974,7 +971,7 @@ class AutomationEngine:
 
         self.deployed_beacons.add(name)
         rule.deployed = True
-        self._save_rules()
+        self.save_rules()
         self._log("Deploy", f"BEACON,ADD sent: {name} ({beacon_id})")
         target = "local" if is_local else node_id
         return True, f"Beacon rule deployed to {target}: {name}"
@@ -997,7 +994,7 @@ class AutomationEngine:
             self._log("Undeploy", f"SETPOINT,CLEAR sent")
 
         rule.deployed = False
-        self._save_rules()
+        self.save_rules()
         return True, "Rule undeployed from node"
 
     # ─── Wire Value Access (for canvas live display) ──────────

@@ -326,7 +326,6 @@ class GatewayGUIApp:
         self.refresh_ports()
         self.root.after(50, self.poll_events)
         self.root.after(33, self.animate_topology)
-        self.root.after(2000, self.redraw_sensors)
         self.root.after(1000, self._eval_automation)
 
     # ─── UI Construction ────────────────────────────────────
@@ -341,7 +340,6 @@ class GatewayGUIApp:
         self.conn_label = ctk.CTkLabel(title_frame, text="Disconnected", font=("Consolas", 12),
                                         text_color=COLORS["bad"])
         self.conn_label.pack(side="right", padx=15)
-        # Logic Builder button removed — now a tab
 
         # Connection controls
         conn_frame = ctk.CTkFrame(self.root, fg_color=COLORS["panel"], corner_radius=8)
@@ -1067,7 +1065,7 @@ class GatewayGUIApp:
                 result_text.insert("end", "\nNo response — node may be offline or have no rules.")
                 return
             found = False
-            for ts, name, msg in reversed(self.engine.event_log[-30:]):
+            for _ts, name, msg in reversed(self.engine.event_log[-30:]):
                 if "BEACONLIST" in msg or "SETPOINTLIST" in msg or "OK,BEACON" in msg or "OK,SETPOINT" in msg:
                     result_text.delete("1.0", "end")
                     result_text.insert("end", f"Rules on {node_id}:\n\n{msg}\n")
@@ -1414,7 +1412,7 @@ class GatewayGUIApp:
         if not new_name or new_name == rule.name:
             return
         rule.name = new_name
-        self.engine._save_rules()
+        self.engine.save_rules()
         # Update combo values
         names = [r.name for r in self.engine.rules]
         self.rule_combo.configure(values=names)
@@ -1573,7 +1571,7 @@ class GatewayGUIApp:
                             text=f"Queue: {q} pending",
                             text_color="#FFE000")
         except Exception as e:
-            print(f"[ENGINE TICK ERROR] {type(e).__name__}: {e}")
+            self.engine._log("Engine", f"Tick error: {type(e).__name__}: {e}")
         self.root.after(1000, self._eval_automation)
 
     # ─── Sensor Dashboard ──────────────────────────────────
@@ -1668,10 +1666,6 @@ class GatewayGUIApp:
         self.auto_canvas.relay_pins = self.node_relay_pins
         self.auto_canvas.sensor_pins = self.node_sensor_pins
         self.auto_canvas.node_pin_configs = self.node_pin_configs
-
-    def redraw_sensors(self):
-        """Legacy sparkline — replaced by SensorDashboard. No-op."""
-        pass
 
     # ─── Lifecycle ──────────────────────────────────────────
 

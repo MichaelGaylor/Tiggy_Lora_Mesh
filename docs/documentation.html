@@ -515,6 +515,10 @@
   <a href="#device-management">Device Mgmt</a>
   <a href="#signal-routing">Signal &amp; Routes</a>
   <a href="#ibeacon">iBeacon Scanner</a>
+  <a href="#meshtastic-bridge">Meshtastic Bridge</a>
+  <a href="#telegram-gateway">Telegram Bot (GW)</a>
+  <a href="#sensor-dashboard">Sensor Dashboard</a>
+  <a href="#hw-watchdog">HW Watchdog</a>
   <a href="#heltec-v4">Heltec V4 USB</a>
 </nav>
 
@@ -763,17 +767,21 @@ D6/GPIO43 ●  ● D7 /GPIO44  CS/NSS</pre>
     <h4 style="color:var(--red);">Heltec WiFi LoRa 32 V4</h4>
     <p><strong>MCU:</strong> ESP32-S3 &bull; <strong>Radio:</strong> SX1262 + GC1109 PA (<strong>28 dBm!</strong>) &bull; <strong>Display:</strong> SSD1306 128&times;64 OLED</p>
     <p><strong>Best repeater.</strong> Highest TX power, 16MB flash, native USB-C, solar input, GNSS connector.</p>
+    <div class="info-box red" style="margin:8px 0; padding:8px 12px; font-size:0.85em;">
+      <p><strong>FEM Note:</strong> The GC1109 front-end module requires <strong>GPIO 2</strong> (FEM enable) and <strong>GPIO 46</strong> (PA TX enable) permanently HIGH. These pins are reserved by the firmware and <strong>cannot be used as relay pins</strong>. GPIO 7 is the PA power pin (set to ANALOG mode). Misconfiguring these pins disables the power amplifier and reduces TX range to ~1/10th.</p>
+    </div>
     <table style="font-size:0.8em;">
       <tr><th>Function</th><th>Pin</th></tr>
       <tr><td>SPI MOSI / MISO / SCK</td><td>10 / 11 / 9</td></tr>
       <tr><td>Radio CS / RST / DIO1 / BUSY</td><td>8 / 12 / 14 / 13</td></tr>
       <tr><td>I2C SDA / SCL / OLED RST</td><td>17 / 18 / 21</td></tr>
+      <tr><td>FEM Enable / PA TX Enable / PA Power</td><td style="color:var(--red);">2 / 46 / 7 (reserved, do not touch)</td></tr>
       <tr><td>Vext Power Control</td><td>36 (LOW = OLED on)</td></tr>
       <tr><td>ADC Control</td><td>37 (HIGH = enable battery divider)</td></tr>
       <tr><td>Battery ADC</td><td>1</td></tr>
       <tr><td>LED</td><td>35</td></tr>
-      <tr><td>Default Relay Pins</td><td style="color:var(--orange);">2, 3, 4, 5, 6, 7</td></tr>
-      <tr><td>Default Sensor Pins</td><td style="color:var(--yellow);">19, 20, 33</td></tr>
+      <tr><td>Default Relay Pins</td><td style="color:var(--orange);">3, 4, 5, 6</td></tr>
+      <tr><td>Default Sensor Pins</td><td style="color:var(--yellow);">33, 34, 15</td></tr>
     </table>
   </div>
 
@@ -1495,10 +1503,20 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
 <span class="keyword">EXPAND OFF</span>             <span class="comment">Disable IO expansion board</span>
 <span class="keyword">SOLAR ON</span>               <span class="comment">Enable solar/low-power mode (SX1262 boards only)</span>
 <span class="keyword">SOLAR OFF</span>              <span class="comment">Disable solar mode, restore normal operation</span>
+<span class="keyword">BEACON,SCAN</span>            <span class="comment">Scan for nearby BLE beacons (2 seconds)</span>
+<span class="keyword">BEACON,ADD,...</span>         <span class="comment">Add a beacon detection rule (see iBeacon Scanner)</span>
+<span class="keyword">BEACON,LIST</span>            <span class="comment">List all active beacon rules</span>
+<span class="keyword">BEACON,CLEAR</span>           <span class="comment">Delete all beacon rules</span>
+<span class="keyword">SETPOINT,...</span>           <span class="comment">Add a cross-node setpoint rule (see Setpoints)</span>
+<span class="keyword">SETPOINT,LIST</span>          <span class="comment">List all active setpoint rules</span>
+<span class="keyword">SETPOINT,CLEAR</span>         <span class="comment">Delete all setpoint rules</span>
+<span class="keyword">REBOOT</span>                 <span class="comment">Restart the node (settings preserved)</span>
+<span class="keyword">EEPROM,RESET</span>           <span class="comment">Factory reset — wipe all EEPROM and restart</span>
+<span class="keyword">GPSPOS</span>                 <span class="comment">Query current GPS position</span>
+<span class="keyword">GPS,&lt;tx&gt;,&lt;rx&gt;</span>          <span class="comment">Set GPS UART pins e.g. GPS,38,39</span>
 
-<span class="comment"># STATUS response now includes:</span>
-<span class="comment">#   POWER:NORMAL or POWER:SOLAR</span>
-<span class="comment">#   SF:9 (current spreading factor)</span>
+<span class="comment"># STATUS response includes:</span>
+<span class="comment">#   ID, BOARD, POWER:NORMAL|SOLAR, SF:9, RELAY pins, SENSOR pins</span>
 </pre>
 
 <div class="info-box orange">
@@ -1707,7 +1725,7 @@ SDATA,0010,34:2048,36:1200,39:4095</pre>
   <tr><th>Board</th><th>Default Sensor Pins</th><th>Notes</th></tr>
   <tr><td>LoRa32 T3</td><td>34, 36, 39</td><td>Input-only, ADC1. Best for analog sensors.</td></tr>
   <tr><td>Heltec V3</td><td>19, 20, 33</td><td>All ADC-capable on ESP32-S3.</td></tr>
-  <tr><td>Heltec V4</td><td>33, 34, 15</td><td>GPIO 19/20 are USB D-/D+, GPIO 38 is GPS header &mdash; <strong>do not use as GPIO</strong>.</td></tr>
+  <tr><td>Heltec V4</td><td>33, 34, 15</td><td>GPIO 19/20 are USB D-/D+, GPIO 2/46/7 are GC1109 FEM, GPIO 38 is GPS header &mdash; <strong>do not use any of these as GPIO</strong>.</td></tr>
   <tr><td>XIAO ESP32S3</td><td>43, 44</td><td>Digital-only (UART pins). Use <code>SENSOR 2,4,5</code> for analog.</td></tr>
   <tr><td>Heltec V2</td><td>36, 39</td><td>Input-only, ADC1. Used as WiFi gateway &mdash; sensors optional.</td></tr>
   <tr><td>T-Deck Plus</td><td>None</td><td>No free GPIO &mdash; all pins used by display/keyboard/GPS.</td></tr>
@@ -2177,6 +2195,9 @@ gateway/
   <span style="color:var(--green);">gateway_hub_gui.py</span>      <span class="comment"># Central hub server — Windows GUI (live dashboard)</span>
   <span style="color:var(--orange);">automation_engine.py</span>    <span class="comment"># Logic Builder evaluation engine — rule model, persistence, anti-flood</span>
   <span style="color:var(--orange);">automation_canvas.py</span>    <span class="comment"># Logic Builder visual canvas — drag, connect, configure blocks</span>
+  <span style="color:var(--red);">telegram_bot.py</span>         <span class="comment"># Telegram bot bridge — exposes rules as chat commands</span>
+  <span style="color:var(--red);">meshtastic_bridge.py</span>    <span class="comment"># TiggyOpenMesh ↔ Meshtastic bidirectional bridge</span>
+  <span style="color:var(--cyan);">sensor_dashboard.py</span>     <span class="comment"># Sensor gauges, line chart, CSV export (Sensors tab)</span>
   <span style="color:var(--dim);">rules.json</span>              <span class="comment"># Auto-generated Logic Builder rules (JSON persistence)</span>
   <span style="color:var(--dim);">requirements.txt</span>        <span class="comment"># Python dependencies: pyserial, websockets, aiohttp, customtkinter</span>
   <span style="color:var(--dim);">gateways.json</span>           <span class="comment"># Auto-generated gateway registry (location persistence)</span>
@@ -2187,6 +2208,26 @@ gateway/
 <div class="info-box cyan">
   <p><strong>Hub serves the map:</strong> The hub serves both WebSocket and HTTP on the <strong>same port</strong>. Open <code>http://hub-address:9000/</code> in a browser to see the <a href="#gateway-map" style="color:var(--cyan);">Live Gateway Map</a>. Gateways connect via <code>ws://hub:9000/</code> (same port).</p>
 </div>
+
+<!-- ─── Gateway GUI Features ─── -->
+
+<h3>Gateway GUI — Feature Overview</h3>
+<p>The Windows GUI client (<code>gateway_gui.py</code>) provides a comprehensive dashboard with four main tabs:</p>
+
+<table>
+  <tr><th>Tab / Feature</th><th>What It Shows</th></tr>
+  <tr><td style="color:var(--cyan);"><strong>Mesh Topology</strong></td><td>Live force-directed graph of all discovered nodes. Edges coloured and sized by RSSI (green=strong, red=weak). Signal quality summary bar, weak link warnings. Node cards with signal bars, hop count, route info, and right-click context menus.</td></tr>
+  <tr><td style="color:var(--green);"><strong>Packets tab</strong></td><td><strong>Packet Waterfall:</strong> scrolling log of all mesh traffic with timestamps, direction, source, destination, TTL, and route. Click a packet to inspect. <strong>Packet Inspector:</strong> detailed breakdown of the selected packet with AES key entry for manual decryption.</td></tr>
+  <tr><td style="color:var(--orange);"><strong>Sensors tab</strong></td><td><strong>Sensor Dashboard:</strong> circular gauges with needles and min/max tracking, matplotlib line charts, pause/resume, clear, and CSV export. See <a href="#sensor-dashboard" style="color:var(--cyan);">Section 41</a>.</td></tr>
+  <tr><td style="color:var(--red);"><strong>Logic tab</strong></td><td><strong>Logic Builder:</strong> PLC-style visual automation canvas. Drag-and-drop blocks, wire connections, live value display on wires, rule management, deploy/undeploy. See <a href="#logic-builder" style="color:var(--cyan);">Section 22</a>.</td></tr>
+</table>
+
+<p>Additional GUI integrations above the tabs:</p>
+<ul style="color:var(--dim); padding-left:20px;">
+  <li><strong>Telegram Bot:</strong> Enter bot token and chat ID, click Start Bot. See <a href="#telegram-gateway" style="color:var(--cyan);">Section 40</a>.</li>
+  <li><strong>Meshtastic Bridge:</strong> Select a second serial port and click Start Bridge. See <a href="#meshtastic-bridge" style="color:var(--cyan);">Section 39</a>.</li>
+  <li><strong>Hub connection:</strong> Enter <code>wss://</code> URL, gateway name, hub key, lat/lon, and antenna height. All settings are saved between sessions.</li>
+</ul>
 
 </section>
 
@@ -2313,6 +2354,11 @@ gateway/
     <td><strong>Hold (seconds):</strong> How long the input must stay true before the output becomes true (e.g., 5.0).</td>
   </tr>
   <tr>
+    <td style="color:var(--yellow);">Monostable</td>
+    <td>One-shot retriggerable timer. When the trigger input goes true, the output goes true and stays true for the configured hold time. If the trigger fires again before the timer expires, the timer restarts. Useful for beacon-based gate control: &ldquo;keep the gate open while the beacon is nearby, close 60 seconds after it leaves.&rdquo;</td>
+    <td><strong>Hold time (seconds):</strong> How long the output stays true after the last trigger (e.g., 60.0).</td>
+  </tr>
+  <tr>
     <td style="color:var(--yellow);">Latch (SR Flip-Flop)</td>
     <td>Once &ldquo;set&rdquo; goes true, the output stays true until &ldquo;reset&rdquo; goes true. Like a physical toggle switch.</td>
     <td>None &mdash; connect a <strong>set</strong> signal and a <strong>reset</strong> signal.</td>
@@ -2342,6 +2388,11 @@ gateway/
     <td style="color:var(--red);">Send Direct</td>
     <td>Sends a text message to a <strong>specific node</strong>.</td>
     <td><strong>Node ID:</strong> Target node. <strong>Message (true):</strong> Text when true. <strong>Message (false):</strong> Optional text when false.</td>
+  </tr>
+  <tr>
+    <td style="color:var(--red);">Telegram Output</td>
+    <td>Stores the incoming value for Telegram bot queries. When a user sends the rule's <code>#name</code> command in Telegram (e.g., <code>#getwind</code>), the bot reads this block's last value and replies with a formatted message. Does not fire a LoRa action &mdash; this is a read-only display endpoint.</td>
+    <td><strong>Label:</strong> Human name (e.g., &ldquo;Wind Speed&rdquo;). <strong>Unit:</strong> Engineering unit (e.g., &ldquo;m/s&rdquo;). <strong>Format:</strong> Template string (default: <code>{label}: {value} {unit}</code>).</td>
   </tr>
 </table>
 
@@ -2424,6 +2475,26 @@ gateway/
 <p>The gateway builds an expanded <code>SETPOINT</code> command with optional suffixes:</p>
 <pre>SETPOINT,&lt;pin&gt;,&lt;op&gt;,&lt;threshold&gt;,&lt;target&gt;,&lt;relayPin&gt;,&lt;action&gt;[,SCALE,&lt;f&gt;,&lt;o&gt;][,DEBOUNCE,&lt;ms&gt;]
 SETPOINT,&lt;pin&gt;,&lt;op&gt;,&lt;threshold&gt;,MSG,&lt;msgTrue&gt;[,&lt;msgFalse&gt;][,SCALE,&lt;f&gt;,&lt;o&gt;][,DEBOUNCE,&lt;ms&gt;]</pre>
+
+<h4>Smart Deploy</h4>
+<p>The <strong>[Deploy]</strong> button analyses your rule chain and picks the best deploy strategy automatically:</p>
+<table>
+  <tr><th>Pattern</th><th>Deploy Mode</th><th>How It Works</th></tr>
+  <tr><td>Sensor &rarr; Compare &rarr; Relay/Broadcast</td><td style="color:var(--green);">Firmware setpoint</td><td>Sends a <code>SETPOINT</code> command to the node. Runs autonomously with zero radio until the condition triggers.</td></tr>
+  <tr><td>Beacon Detect &rarr; Relay</td><td style="color:var(--green);">Firmware beacon rule</td><td>Sends a <code>BEACON,ADD</code> command. Node scans for BLE beacons independently.</td></tr>
+  <tr><td>Beacon Detect &rarr; Monostable &rarr; Relay</td><td style="color:var(--green);">Firmware beacon + REVERT</td><td>The Monostable's hold time becomes a <code>REVERT</code> timer: relay auto-reverts after the beacon leaves range for that duration.</td></tr>
+  <tr><td>Beacon Detect &rarr; Broadcast Msg</td><td style="color:var(--green);">Firmware beacon + MSG</td><td>Node broadcasts a mesh message when the beacon is detected.</td></tr>
+  <tr><td>Anything with Telegram Output or Monostable</td><td style="color:var(--cyan);">GUI engine</td><td>Runs in the Python gateway process. No firmware deploy needed &mdash; the engine evaluates the rule and the Telegram bot reads the output.</td></tr>
+</table>
+
+<h4>Node Management (Right-Click Menu)</h4>
+<p>Right-click any node card in the Discovered Nodes panel to access management commands:</p>
+<table>
+  <tr><th>Action</th><th>What It Does</th></tr>
+  <tr><td><strong>Query Rules</strong></td><td>Sends <code>BEACON,LIST</code> and <code>SETPOINT,LIST</code> to the node and shows deployed rules in a popup.</td></tr>
+  <tr><td><strong>Set Name</strong></td><td>Assign a friendly name to the node (e.g., &ldquo;Farm1&rdquo;). Saved between sessions. Used by the Telegram bot for human-readable responses.</td></tr>
+  <tr><td><strong>Clear Rules</strong></td><td>Sends <code>BEACON,CLEAR</code> and <code>SETPOINT,CLEAR</code> to remove all deployed rules from the node.</td></tr>
+</table>
 
 <div class="info-box orange">
   <p><strong>Limitation:</strong> Rules using Moving Average, Delta Rate, AND/OR/NOT gates, Latch, Pulse Relay, or Direct Message blocks cannot deploy to node &mdash; they can only run as gateway-evaluated rules. Each node supports a maximum of 4 setpoints (RAM only, lost on reboot).</p>
@@ -3329,8 +3400,8 @@ const int RELAY_PINS[]  = {2, 4, 5, 12, 13, 14};      <span class="comment">// D
     <td>Use T-Deck as communicator only. Pair with a repeater node for sensor/relay control.</td></tr>
   <tr><td>LoRa32 T3 (repeater)</td><td>ESP32 (not S3) has different light-sleep behaviour. Solar mode uses <code>esp_light_sleep_start()</code> which works on both, but power savings vary by chip.</td>
     <td>For lowest-power solar deployments, prefer Heltec V3/V4/XIAO on ESP32-S3.</td></tr>
-  <tr><td>Heltec V4</td><td><strong>GPIO 19 and 20 are USB D-/D+.</strong> Unlike V3 (which has a CP2102 UART chip), the V4 uses the ESP32-S3's native USB. Configuring GPIO 19 or 20 as sensor/relay pins kills the USB serial connection.</td>
-    <td>Default sensor pins are set to 33, 34, 38. These pins are also blocked in <code>isPinSafe()</code>. Do not reconfigure sensors to use pins 19 or 20.</td></tr>
+  <tr><td>Heltec V4</td><td><strong>GPIO 19/20 are USB D-/D+, GPIO 2/46/7 are GC1109 FEM.</strong> The V4 has no CP2102 &mdash; it uses ESP32-S3 native USB (HWCDC). Configuring any of these pins as sensor/relay pins will kill USB or disable the 28 dBm power amplifier.</td>
+    <td>Default sensor pins are 33, 34, 15. Default relay pins are 3, 4, 5, 6. All forbidden pins are blocked in <code>isPinSafe()</code>. See <a href="#heltec-v4" style="color:var(--cyan);">Section 43</a> for full details.</td></tr>
   <tr><td>Heltec V4</td><td>USB serial (HWCDC) takes ~60 seconds to start outputting data after boot. The first minute of serial output may be lost.</td>
     <td>Normal behaviour for ESP32-S3 native USB. The gateway GUI will receive data once the HWCDC connection establishes. Solar mode light sleep is disabled on V4 to keep USB alive.</td></tr>
 </table>
@@ -3530,8 +3601,157 @@ BEACON,REVERTED,Gate</pre>
 </div>
 </section>
 
+<!-- ═══════════════════════════════════════════════════════════ -->
+<section id="meshtastic-bridge">
+<h2>39. Meshtastic Bridge</h2>
+
+<p>The gateway GUI includes a built-in <strong>Meshtastic bridge</strong> that connects TiggyOpenMesh and Meshtastic networks via two USB serial ports. Messages, position reports, and SOS alerts are translated bidirectionally between the two mesh protocols.</p>
+
+<div class="info-box cyan">
+  <p><strong>Use case:</strong> Your TiggyOpenMesh sensor network can relay alerts and data to hikers carrying Meshtastic handhelds, or vice versa. No firmware changes needed on either side &mdash; the bridge runs entirely in the Python gateway GUI.</p>
+</div>
+
+<h3>Setup (GUI)</h3>
+<ol style="color:var(--dim); padding-left:20px;">
+  <li>Connect your TiggyOpenMesh repeater to a USB port (the normal gateway serial connection).</li>
+  <li>Connect a Meshtastic device to a <strong>second</strong> USB port.</li>
+  <li>In the gateway GUI, find the <strong>Meshtastic</strong> row below the Telegram row.</li>
+  <li>Click <strong>Detect</strong> to list available serial ports, select the Meshtastic device port.</li>
+  <li>Click <strong>Start Bridge</strong>.</li>
+</ol>
+
+<h3>What Gets Bridged</h3>
+<table>
+  <tr><th>Direction</th><th>Message Type</th><th>Translation</th></tr>
+  <tr><td>TOM &rarr; Mesh</td><td>Text messages</td><td>Sent as <code>[TOM &lt;nodeId&gt;] &lt;text&gt;</code> via Meshtastic text channel</td></tr>
+  <tr><td>TOM &rarr; Mesh</td><td>Position (POS)</td><td>Sent as Meshtastic position packet</td></tr>
+  <tr><td>TOM &rarr; Mesh</td><td>SOS alerts</td><td>Sent as Meshtastic text: <code>SOS ALERT from TOM node &lt;id&gt;</code></td></tr>
+  <tr><td>Mesh &rarr; TOM</td><td>Text messages</td><td>Broadcast as <code>[Mesh &lt;name&gt;] &lt;text&gt;</code> on TOM mesh</td></tr>
+  <tr><td>Mesh &rarr; TOM</td><td>Position</td><td>Injected as POS packet into TOM mesh</td></tr>
+  <tr><td>Mesh &rarr; TOM</td><td>Node info</td><td>Node names discovered and mapped to virtual TOM IDs (F000+)</td></tr>
+</table>
+
+<h3>Standalone CLI Mode</h3>
+<p>The bridge can also run standalone without the GUI:</p>
+<pre>python meshtastic_bridge.py --tom COM18 --mesh COM4 --key DebdaleLodge2401</pre>
+
+<h3>Deduplication</h3>
+<p>A 256-entry hash ring with 30-second TTL prevents packets from bouncing between the two networks. The <code>origin</code> field and <code>[TOM ]</code> / <code>[Mesh ]</code> prefixes provide additional loop detection.</p>
+
+<h3>Node ID Mapping</h3>
+<p>Meshtastic 32-bit node IDs are mapped to TOM 16-bit hex IDs using a persistent mapping file (<code>bridge_nodes.json</code>). Meshtastic nodes appear as <code>Fxxx</code> IDs on the TOM mesh.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<section id="telegram-gateway">
+<h2>40. Telegram Bot (Gateway GUI)</h2>
+
+<p>The gateway GUI includes a built-in <strong>Telegram bot</strong> that exposes your automation rules as chat commands. Unlike the Android app's Telegram forwarding (which forwards broadcast messages), this bot lets remote users <strong>query sensor values</strong> and <strong>trigger relay actions</strong> from anywhere via Telegram.</p>
+
+<div class="info-box cyan">
+  <p><strong>How it differs from the Android app:</strong> The Android app's Telegram feature forwards incoming mesh broadcasts to a chat. The gateway's Telegram bot lets users <em>send commands back</em> to the mesh. They complement each other.</p>
+</div>
+
+<h3>Setup</h3>
+<ol style="color:var(--dim); padding-left:20px;">
+  <li><strong>Create a bot</strong> via <a href="https://t.me/BotFather" style="color:var(--cyan);">@BotFather</a> on Telegram. Send <code>/newbot</code>, follow prompts, and copy the bot token.</li>
+  <li><strong>Get your Chat ID</strong> by messaging the bot and checking <code>https://api.telegram.org/bot&lt;TOKEN&gt;/getUpdates</code>.</li>
+  <li>In the gateway GUI, enter the <strong>Bot Token</strong> and <strong>Chat ID</strong> in the Telegram row.</li>
+  <li>Click <strong>Start Bot</strong>.</li>
+</ol>
+
+<h3>Rule-as-Command</h3>
+<p>Any automation rule whose name starts with <code>#</code> becomes a Telegram command. The bot matches the command to the rule and executes it:</p>
+<table>
+  <tr><th>Rule Name</th><th>Telegram Command</th><th>What Happens</th></tr>
+  <tr><td><code>#getwind</code></td><td><code>#getwind</code> or <code>/getwind</code></td><td>Reads the latest sensor values from the rule's Sensor Read blocks, applies any Scale transforms, and replies with formatted values.</td></tr>
+  <tr><td><code>#opendoor</code></td><td><code>#opendoor</code> or <code>/opendoor</code></td><td>Fires the rule's action blocks (Set Relay, Pulse Relay, etc.) and confirms.</td></tr>
+</table>
+
+<div class="info-box green">
+  <p><strong>Telegram Output block:</strong> If a rule contains a <strong>Telegram Output</strong> action block, the bot reads the formatted value from that block instead of raw sensor data. This lets you chain Sensor &rarr; Scale &rarr; Telegram Output for precisely formatted responses (e.g., &ldquo;Wind Speed: 12.3 m/s&rdquo;).</p>
+</div>
+
+<h3>Built-In Commands</h3>
+<table>
+  <tr><th>Command</th><th>Description</th></tr>
+  <tr><td><code>/help</code> or <code>#help</code></td><td>Lists all available commands (built-in + rule commands)</td></tr>
+  <tr><td><code>/status</code> or <code>#status</code></td><td>Shows all nodes with online/offline status, RSSI, and last-seen time</td></tr>
+  <tr><td><code>/nodes</code> or <code>#nodes</code></td><td>Lists all discovered nodes with friendly names</td></tr>
+</table>
+
+<h3>Security</h3>
+<p>The bot only responds to messages from the configured <strong>Chat ID</strong>. Messages from other chats or users are silently ignored. The bot token should be kept private.</p>
+
+<h3>Alert Sending</h3>
+<p>The automation engine can also push alerts <em>to</em> Telegram when rules trigger. The <code>send_alert_threadsafe()</code> method lets any rule fire a Telegram notification without blocking the GUI or radio threads.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<section id="sensor-dashboard">
+<h2>41. Sensor Dashboard</h2>
+
+<p>The gateway GUI's <strong>Sensors</strong> tab provides a full sensor monitoring dashboard with real-time visualisation of all SDATA values received from the mesh.</p>
+
+<h3>Dashboard Widgets</h3>
+<table>
+  <tr><th>Widget</th><th>Description</th></tr>
+  <tr><td style="color:var(--cyan);"><strong>Circular Gauges</strong></td><td>One gauge per sensor key (<code>nodeId:pin</code>). Shows the current value with a needle, colour gradient ring (green &rarr; orange &rarr; red), and min/max tracking labels. Auto-scales to the observed data range.</td></tr>
+  <tr><td style="color:var(--green);"><strong>Line Chart</strong></td><td>Matplotlib-based time-series chart showing sensor history. Configurable history length (default 120 samples). Multiple sensors can be plotted simultaneously.</td></tr>
+  <tr><td style="color:var(--orange);"><strong>CSV Export</strong></td><td>Click the export button to save all sensor data to a timestamped CSV file in <code>gateway/exports/</code>. Useful for offline analysis in Excel or Python.</td></tr>
+</table>
+
+<h3>Controls</h3>
+<table>
+  <tr><th>Button</th><th>Action</th></tr>
+  <tr><td>Pause / Resume</td><td>Freezes the display for inspection without losing incoming data</td></tr>
+  <tr><td>Clear</td><td>Clears all historical data from the dashboard (does not affect the underlying data store)</td></tr>
+  <tr><td>Export CSV</td><td>Saves data to <code>gateway/exports/sensors_YYYYMMDD_HHMMSS.csv</code></td></tr>
+</table>
+
+<h3>Data Flow</h3>
+<div class="flow">
+  <div class="flow-box">Node sends<br><code>SDATA,0010,34:2048</code></div>
+  <span class="flow-arrow">&rarr;</span>
+  <div class="flow-box">Gateway decrypts<br>(if via mesh MSG)</div>
+  <span class="flow-arrow">&rarr;</span>
+  <div class="flow-box">Stored in<br><code>sensor_data</code> dict</div>
+  <span class="flow-arrow">&rarr;</span>
+  <div class="flow-box">Dashboard<br>renders gauges</div>
+</div>
+
+<p>The dashboard shares the same <code>sensor_data</code> dictionary used by the Logic Builder engine. Both update in real time from the same data source.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<section id="hw-watchdog">
+<h2>42. Hardware Timer Watchdog</h2>
+
+<p>All three firmware targets (repeater, T-Deck, WiFi gateway) include a <strong>hardware timer watchdog</strong> that automatically reboots the device if the main loop hangs. This is completely independent of the RTOS task watchdog and catches low-level lockups that RTOS watchdogs miss (e.g., radio driver deadlocks, SPI bus hangs).</p>
+
+<h3>How It Works</h3>
+<table>
+  <tr><th>Parameter</th><th>Value</th></tr>
+  <tr><td>Timeout</td><td><strong>30 seconds</strong></td></tr>
+  <tr><td>Timer type</td><td>ESP32 hardware timer (independent of RTOS)</td></tr>
+  <tr><td>Pet location</td><td>Main <code>loop()</code> function &mdash; <code>timerWrite(swWdt, 0)</code> every iteration</td></tr>
+  <tr><td>Reset action</td><td>Hard reboot via timer ISR (cannot be blocked by stuck tasks)</td></tr>
+</table>
+
+<h3>Why Not RTOS WDT?</h3>
+<p>The RTOS task watchdog (TWDT) monitors whether tasks yield to the scheduler. But if the main loop is stuck inside a blocking radio call or SPI transaction, the RTOS scheduler still runs (it just can't preempt the stuck call on the same core). The hardware timer is independent of all software &mdash; if <code>loop()</code> does not pet it within 30 seconds, the ESP32 reboots unconditionally.</p>
+
+<h3>Implications</h3>
+<ul style="color:var(--dim); padding-left:20px;">
+  <li>The main loop must complete a full iteration (receive check, heartbeat, forward, GPIO, display) within 30 seconds. Under normal operation this takes ~50ms.</li>
+  <li>Blocking operations (long <code>delay()</code>, synchronous WiFi, etc.) must be avoided in the main loop.</li>
+  <li>If a device reboots unexpectedly, check the serial log for the boot reason &mdash; <code>rst:0x3 (SW_RESET)</code> or timer-related resets indicate a watchdog trigger.</li>
+</ul>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
 <section id="heltec-v4">
-<h2>39. Heltec WiFi LoRa 32 V4 — USB Notes</h2>
+<h2>43. Heltec WiFi LoRa 32 V4 — USB &amp; FEM Notes</h2>
 
 <p>The Heltec V4 uses the ESP32-S3's <strong>native USB</strong> (HWCDC) instead of an external UART chip like the V3's CP2102. This has important implications:</p>
 
@@ -3546,7 +3766,14 @@ BEACON,REVERTED,Gate</pre>
 </table>
 
 <h3>Forbidden Pins</h3>
-<p style="color:var(--dim);">GPIO 19 and 20 are the USB data lines on V4. They are hardcoded into the <code>isPinSafe()</code> forbidden list and cannot be configured as sensor or relay pins. Configuring them as GPIO will kill the USB connection immediately.</p>
+<p style="color:var(--dim);">The following pins are hardcoded into the <code>isPinSafe()</code> forbidden list and cannot be configured as sensor or relay pins:</p>
+<table>
+  <tr><th>Pin(s)</th><th>Function</th><th>Consequence if misconfigured</th></tr>
+  <tr><td style="color:var(--red);">GPIO 19, 20</td><td>USB D-/D+ (HWCDC)</td><td>Kills USB serial connection immediately</td></tr>
+  <tr><td style="color:var(--red);">GPIO 2</td><td>GC1109 FEM enable (HIGH = PA on)</td><td>Disables front-end module, TX power drops from 28 dBm to ~10 dBm</td></tr>
+  <tr><td style="color:var(--red);">GPIO 46</td><td>GC1109 PA TX enable (HIGH)</td><td>Disables power amplifier, severely reduces range</td></tr>
+  <tr><td style="color:var(--red);">GPIO 7</td><td>GC1109 PA power (ANALOG mode)</td><td>Disrupts PA power supply</td></tr>
+</table>
 
 <h3>Troubleshooting</h3>
 <ul style="color:var(--dim); padding-left:20px;">
@@ -3562,7 +3789,7 @@ BEACON,REVERTED,Gate</pre>
 <div style="background:var(--panel); border-top:1px solid var(--faint); padding:30px 40px; text-align:center; color:var(--faint); font-size:0.85em;">
   <p>TiggyOpenMesh v4.1 &mdash; MeshCore Architecture</p>
   <p>T-Deck Plus &bull; LoRa32 T3 V1.6.1 &bull; Heltec WiFi LoRa 32 V3 &bull; Heltec WiFi LoRa 32 V4 &bull; XIAO ESP32S3</p>
-  <p>39 sections &mdash; Hardware, Protocol, UI, BLE, Gateway, Logic Builder, Timers, Setpoints, Sensors, Pulse Counters, SOS, Map, Solar, Delivery, SF Change, Collision Detection, IO Expansion, GPS, Device Management, Signal Routing, iBeacon Scanner, Heltec V4 USB, Caveats</p>
+  <p>43 sections &mdash; Hardware, Protocol, UI, BLE, Gateway, Logic Builder, Timers, Setpoints, Sensors, Pulse Counters, SOS, Map, Solar, Delivery, SF Change, Collision Detection, IO Expansion, GPS, Device Management, Signal Routing, iBeacon Scanner, Meshtastic Bridge, Telegram Bot (Gateway), Sensor Dashboard, HW Watchdog, Heltec V4 USB/FEM, Caveats</p>
   <p style="margin-top:8px;">Documentation updated March 2026</p>
 </div>
 

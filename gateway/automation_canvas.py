@@ -63,7 +63,9 @@ def show_block_config(parent, block: Block, discovered_nodes: dict,
     cfg = block.config
     dialog = ctk.CTkToplevel(parent)
     dialog.title(f"Configure: {BLOCK_DEFS[bt]['label']}")
-    dialog.geometry("340x300")
+    # Size dialog based on block type — beacon needs more space for scan results
+    height = 500 if bt == BlockType.BEACON_DETECT else 300
+    dialog.geometry(f"420x{height}")
     dialog.configure(fg_color=COLORS["panel"])
     dialog.transient(parent)
     dialog.after(50, lambda: dialog.grab_set())  # Delay grab to avoid focus race
