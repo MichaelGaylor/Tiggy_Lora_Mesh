@@ -613,7 +613,7 @@ class GatewayGUIApp:
 
         # Event log
         self.logic_log = ctk.CTkLabel(self.logic_frame, text="Event log: (none)",
-                                        font=("Consolas", 10), text_color="#B0B0B0",
+                                        font=("Consolas", 13), text_color="#B0B0B0",
                                         anchor="w")
         self.logic_log.pack(fill="x", padx=10, pady=(0, 5))
 
