@@ -292,6 +292,8 @@ void checkBeacons();  // Forward declaration
 static void onScanComplete(BLEScanResults results) {
     beaconScanDone = true;
     beaconScanActive = false;
+    // DIAG: prove callback fires
+    Serial.println("BSCAN,CALLBACK," + String(results.getCount()));
 }
 
 // ─── Relay Timers (ephemeral, not persisted) ────────────────
@@ -530,13 +532,22 @@ void matchBeacon(BLEAdvertisedDevice& dev) {
     for (int i = 0; i < MAX_BEACON_RULES; i++) {
         BeaconRule& r = beaconRules[i];
         if (!r.active) continue;
+
+        // DIAG: show what we're comparing for active rules
+        bool macMatch = r.mac[0] && mac.equalsIgnoreCase(String(r.mac));
+        bool uuidMatch = r.uuid[0] && uuid.equalsIgnoreCase(String(r.uuid));
+        if (r.mac[0]) {
+            bleSend("BSCAN,CHECK," + mac + ",stored=" + String(r.mac) +
+                    ",rssi=" + String(rssi) + "/" + String(r.rssiThresh) +
+                    ",macMatch=" + String(macMatch) + ",uuidMatch=" + String(uuidMatch));
+        }
+
         if (rssi < r.rssiThresh) continue;
 
-        bool match = false;
-        if (r.uuid[0] && uuid.equalsIgnoreCase(String(r.uuid))) match = true;
-        if (r.mac[0] && mac.equalsIgnoreCase(String(r.mac))) match = true;
+        bool match = macMatch || uuidMatch;
         if (!match) continue;
 
+        bleSend("BSCAN,MATCHED," + String(r.name));
         r.lastSeen = now;
 
         // Cooldown — don't re-trigger too fast
@@ -576,8 +587,9 @@ void checkBeacons() {
     static unsigned long lastScanStart = 0;
     unsigned long now = millis();
 
-    // Watchdog: if scan callback was lost, force-reset after 10s
+    // Watchdog: if scan callback was lost, force-reset
     if (beaconScanActive && now - lastScanStart > (BEACON_SCAN_DURATION * 1000 + 5000)) {
+        bleSend("BSCAN,WATCHDOG,reset");
         pBLEScan->stop();
         beaconScanActive = false;
         beaconScanDone = false;
@@ -588,13 +600,16 @@ void checkBeacons() {
         beaconScanActive = true;
         pBLEScan->start(BEACON_SCAN_DURATION, onScanComplete, false);
         lastScanStart = now;
+        bleSend("BSCAN,START");
     }
 
     // Process completed scan results
     if (beaconScanDone) {
         beaconScanDone = false;
         BLEScanResults results = pBLEScan->getResults();
-        for (int i = 0; i < results.getCount(); i++) {
+        int count = results.getCount();
+        bleSend("BSCAN,RESULTS," + String(count));
+        for (int i = 0; i < count; i++) {
             BLEAdvertisedDevice dev = results.getDevice(i);
             matchBeacon(dev);
         }
