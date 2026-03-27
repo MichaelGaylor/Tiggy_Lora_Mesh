@@ -406,6 +406,21 @@ class AutomationCanvas:
         # Push wires behind blocks visually
         self.canvas.tag_lower("wire")
 
+        # Key legend (bottom-right)
+        kx, ky = 10, 10
+        self.canvas.create_polygon(kx, ky, kx+8, ky, kx+4, ky+7,
+                                    fill="#FF5252", outline="#FF5252", tags="legend")
+        self.canvas.create_text(kx+12, ky+3, text="Node", anchor="w",
+                                fill="#FF5252", font=("Consolas", 9), tags="legend")
+        self.canvas.create_polygon(kx+55, ky, kx+63, ky, kx+59, ky+7,
+                                    fill="#00E5FF", outline="#00E5FF", tags="legend")
+        self.canvas.create_text(kx+67, ky+3, text="GUI", anchor="w",
+                                fill="#00E5FF", font=("Consolas", 9), tags="legend")
+        self.canvas.create_polygon(kx+105, ky, kx+113, ky, kx+109, ky+7,
+                                    fill="#00E676", outline="#00E676", tags="legend")
+        self.canvas.create_text(kx+117, ky+3, text="Both", anchor="w",
+                                fill="#00E676", font=("Consolas", 9), tags="legend")
+
         # Update scroll region to fit all blocks
         self._update_scrollregion()
 
@@ -525,10 +540,11 @@ class AutomationCanvas:
         # Deploy badge icon (small colored dot: red=node, cyan=GUI, green=both)
         badge = DEPLOY_BADGE.get(block.block_type, "ND+GUI")
         badge_color = "#FF5252" if badge == "ND" else ("#00E5FF" if badge == "GUI" else "#00E676")
-        bx = x + BLOCK_W - 6
-        by = y + 6
-        b = self.canvas.create_oval(
-            bx - 5, by - 5, bx + 5, by + 5,
+        # Triangle badge: ▲ pointing up, top-right corner
+        bx = x + BLOCK_W - 12
+        by = y + 4
+        b = self.canvas.create_polygon(
+            bx, by, bx + 10, by, bx + 5, by + 9,
             fill=badge_color, outline=badge_color,
             tags=(f"block_{block.id}",))
         items.append(b)
