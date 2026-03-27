@@ -221,39 +221,25 @@
   .network-diagram {
     position: relative; width: 260px; height: 220px;
   }
+  .network-diagram svg { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; }
   .nd-node {
     position: absolute; width: 42px; height: 42px; border-radius: 50%;
     display: flex; align-items: center; justify-content: center;
-    font-size: .65rem; font-weight: 700; color: #fff;
+    font-size: .75rem; font-weight: 700; color: #fff;
     z-index: 2;
   }
   .nd-gateway {
     background: #2E7D32; top: 10px; left: 109px;
-    width: 48px; height: 48px; font-size: .7rem;
+    width: 48px; height: 48px; font-size: .8rem;
     box-shadow: 0 0 20px rgba(46,125,50,.35);
   }
-  .nd-n1 { background: #4CAF50; top: 80px; left: 30px; }
-  .nd-n2 { background: #4CAF50; top: 80px; left: 188px; }
-  .nd-n3 { background: #66BB6A; top: 155px; left: 0px; }
-  .nd-n4 { background: #66BB6A; top: 155px; left: 105px; }
-  .nd-n5 { background: #66BB6A; top: 155px; left: 210px; }
-  .nd-line {
-    position: absolute; background: rgba(76,175,80,.3); z-index: 1;
-  }
-  /* Gateway → N1 */
-  .nd-l1 { width: 90px; height: 2px; top: 76px; left: 62px; transform: rotate(40deg); transform-origin: right center; }
-  /* Gateway → N2 */
-  .nd-l2 { width: 90px; height: 2px; top: 76px; left: 148px; transform: rotate(-40deg); transform-origin: left center; }
-  /* N1 → N3 */
-  .nd-l3 { width: 70px; height: 2px; top: 140px; left: 20px; transform: rotate(50deg); transform-origin: right center; }
-  /* N1 → N4 */
-  .nd-l4 { width: 100px; height: 2px; top: 140px; left: 62px; transform: rotate(-12deg); transform-origin: left center; }
-  /* N2 → N4 */
-  .nd-l5 { width: 100px; height: 2px; top: 140px; left: 130px; transform: rotate(12deg); transform-origin: right center; }
-  /* N2 → N5 */
-  .nd-l6 { width: 70px; height: 2px; top: 140px; left: 200px; transform: rotate(-50deg); transform-origin: left center; }
+  .nd-n1 { background: #4CAF50; top: 85px; left: 30px; }
+  .nd-n2 { background: #4CAF50; top: 85px; left: 188px; }
+  .nd-n3 { background: #66BB6A; top: 160px; left: 0px; }
+  .nd-n4 { background: #66BB6A; top: 160px; left: 109px; }
+  .nd-n5 { background: #66BB6A; top: 160px; left: 218px; }
 
-  .nd-label { font-size: .7rem; color: #555; text-align: center; margin-top: 4px; }
+  .nd-label { font-size: .8rem; color: #555; text-align: center; margin-top: 4px; }
 
   /* ── Pricing ──────────────────────────────────────────────── */
   .pricing { background: #F5F7F5; }
@@ -642,13 +628,21 @@
       <div class="specs-visual">
         <h3>Self-Healing Mesh Topology</h3>
         <div class="network-diagram">
-          <!-- Connection lines (behind nodes) -->
-          <div class="nd-line nd-l1"></div>
-          <div class="nd-line nd-l2"></div>
-          <div class="nd-line nd-l3"></div>
-          <div class="nd-line nd-l4"></div>
-          <div class="nd-line nd-l5"></div>
-          <div class="nd-line nd-l6"></div>
+          <!-- SVG lines connecting nodes precisely -->
+          <svg viewBox="0 0 260 220">
+            <!-- GW(133,34) → N1(51,106) -->
+            <line x1="133" y1="38" x2="51" y2="106" stroke="#4CAF50" stroke-width="2" opacity=".4"/>
+            <!-- GW(133,34) → N2(209,106) -->
+            <line x1="133" y1="38" x2="209" y2="106" stroke="#4CAF50" stroke-width="2" opacity=".4"/>
+            <!-- N1(51,106) → N3(21,181) -->
+            <line x1="51" y1="110" x2="21" y2="181" stroke="#4CAF50" stroke-width="2" opacity=".3"/>
+            <!-- N1(51,106) → N4(130,181) -->
+            <line x1="51" y1="110" x2="130" y2="181" stroke="#4CAF50" stroke-width="2" opacity=".3"/>
+            <!-- N2(209,106) → N4(130,181) -->
+            <line x1="209" y1="110" x2="130" y2="181" stroke="#4CAF50" stroke-width="2" opacity=".3"/>
+            <!-- N2(209,106) → N5(239,181) -->
+            <line x1="209" y1="110" x2="239" y2="181" stroke="#4CAF50" stroke-width="2" opacity=".3"/>
+          </svg>
           <!-- Nodes -->
           <div class="nd-node nd-gateway">GW</div>
           <div class="nd-node nd-n1">N1</div>
