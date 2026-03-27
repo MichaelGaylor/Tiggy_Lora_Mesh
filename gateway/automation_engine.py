@@ -982,11 +982,13 @@ class AutomationEngine:
             self.send_serial("BEACON,CLEAR")
             self.send_serial(cmd)
         else:
-            self.send_serial(f"MSG,{node_id},BEACON,CLEAR")
-            self.send_serial(f"MSG,{node_id},{cmd}")
+            # Remote: use CMD prefix so handleCmd processes it (not chat)
+            self.send_serial(f"MSG,{node_id},CMD,BEACON,CLEAR")
+            self.send_serial(f"MSG,{node_id},CMD,{cmd}")
 
         self.deployed_beacons.add(name)
         rule.deployed = True
+        rule.deploy_mode = "firmware"
         self.save_rules()
         self._log("Deploy", f"BEACON,ADD sent: {name} ({beacon_id})")
         target = "local" if is_local else node_id

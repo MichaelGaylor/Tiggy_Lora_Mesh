@@ -1047,8 +1047,8 @@ class GatewayGUIApp:
             self._send_serial("BEACON,LIST")
             self._send_serial("SETPOINT,LIST")
         else:
-            self._send_serial(f"MSG,{node_id},BEACON,LIST")
-            self._send_serial(f"MSG,{node_id},SETPOINT,LIST")
+            self._send_serial(f"MSG,{node_id},CMD,BEACON,LIST")
+            self._send_serial(f"MSG,{node_id},CMD,SETPOINT,LIST")
         # Show a popup that will be populated when responses arrive
         popup = ctk.CTkToplevel(self.root)
         popup.title(f"Rules on {node_id}")
@@ -1066,7 +1066,7 @@ class GatewayGUIApp:
                 return
             found = False
             for _ts, name, msg in reversed(self.engine.event_log[-30:]):
-                if "BEACONLIST" in msg or "SETPOINTLIST" in msg or "OK,BEACON" in msg or "OK,SETPOINT" in msg:
+                if "BEACONS" in msg or "SETPOINTS" in msg or "OK,BEACON" in msg or "OK,SETPOINT" in msg:
                     result_text.delete("1.0", "end")
                     result_text.insert("end", f"Rules on {node_id}:\n\n{msg}\n")
                     found = True
@@ -1092,8 +1092,8 @@ class GatewayGUIApp:
             self._send_serial("BEACON,CLEAR")
             self._send_serial("SETPOINT,CLEAR")
         else:
-            self._send_serial(f"MSG,{node_id},BEACON,CLEAR")
-            self._send_serial(f"MSG,{node_id},SETPOINT,CLEAR")
+            self._send_serial(f"MSG,{node_id},CMD,BEACON,CLEAR")
+            self._send_serial(f"MSG,{node_id},CMD,SETPOINT,CLEAR")
         self.engine._log("Deploy", f"Cleared all rules on {node_id}")
 
     # ─── Topology Canvas Animation ──────────────────────────
