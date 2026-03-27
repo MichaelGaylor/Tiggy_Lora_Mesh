@@ -1,0 +1,767 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TiggyOpenMesh Farm Management System</title>
+<style>
+  /* ── Reset & Base ─────────────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, Oxygen, Ubuntu, sans-serif;
+    background: #FFFFFF;
+    color: #1a1a1a;
+    line-height: 1.65;
+    overflow-x: hidden;
+  }
+  a { color: #2E7D32; text-decoration: none; transition: color .2s; }
+  a:hover { color: #4CAF50; }
+
+  /* ── Utility ──────────────────────────────────────────────── */
+  .container { max-width: 1140px; margin: 0 auto; padding: 0 24px; }
+  .section { padding: 80px 0; }
+  .section-title {
+    font-size: 2.1rem; font-weight: 700; text-align: center;
+    margin-bottom: 12px; color: #1a1a1a;
+  }
+  .section-subtitle {
+    text-align: center; color: #555; font-size: 1.1rem;
+    max-width: 620px; margin: 0 auto 48px;
+  }
+
+  /* ── Navigation ───────────────────────────────────────────── */
+  nav {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+    background: rgba(255,255,255,.92); backdrop-filter: blur(12px);
+    border-bottom: 1px solid rgba(46,125,50,.15);
+    padding: 0 24px; height: 60px; display: flex; align-items: center;
+  }
+  nav .brand {
+    font-size: 1.15rem; font-weight: 700; color: #1a1a1a;
+    display: flex; align-items: center; gap: 10px;
+  }
+  nav .brand .dot { width: 10px; height: 10px; border-radius: 50%; background: #4CAF50;
+    box-shadow: 0 0 8px rgba(76,175,80,.5); animation: pulse-dot 2s infinite; }
+  @keyframes pulse-dot {
+    0%, 100% { box-shadow: 0 0 4px rgba(76,175,80,.4); }
+    50% { box-shadow: 0 0 16px rgba(76,175,80,.5), 0 0 32px rgba(76,175,80,.2); }
+  }
+  nav ul { list-style: none; display: flex; gap: 28px; margin-left: auto; }
+  nav ul li a { color: #555; font-size: .9rem; font-weight: 500; }
+  nav ul li a:hover { color: #2E7D32; }
+
+  /* ── Hero ──────────────────────────────────────────────────── */
+  .hero {
+    position: relative; min-height: 100vh; display: flex; align-items: center;
+    justify-content: center; text-align: center; overflow: hidden;
+    background: linear-gradient(135deg, #2E7D32 0%, #4CAF50 40%, #66BB6A 70%, #81C784 100%);
+  }
+  .hero::before {
+    content: ''; position: absolute; inset: 0;
+    background:
+      radial-gradient(circle at 20% 30%, rgba(255,255,255,.1) 0%, transparent 50%),
+      radial-gradient(circle at 80% 60%, rgba(255,255,255,.08) 0%, transparent 50%);
+    pointer-events: none;
+  }
+
+  /* ── CSS Mesh Network Visualisation ───────────────────────── */
+  .mesh-viz {
+    position: absolute; inset: 0; pointer-events: none; overflow: hidden;
+  }
+  .mesh-node {
+    position: absolute; width: 8px; height: 8px; border-radius: 50%;
+    background: rgba(255,255,255,.6); opacity: .35;
+    box-shadow: 0 0 6px rgba(255,255,255,.4);
+    animation: mesh-glow 4s ease-in-out infinite;
+  }
+  .mesh-node::after {
+    content: ''; position: absolute; top: 50%; left: 50%;
+    width: 20px; height: 20px; border-radius: 50%;
+    border: 1px solid rgba(255,255,255,.2);
+    transform: translate(-50%,-50%);
+  }
+  @keyframes mesh-glow {
+    0%,100% { opacity: .25; } 50% { opacity: .55; }
+  }
+  .mesh-node:nth-child(2) { animation-delay: .5s; }
+  .mesh-node:nth-child(3) { animation-delay: 1s; }
+  .mesh-node:nth-child(4) { animation-delay: 1.5s; }
+  .mesh-node:nth-child(5) { animation-delay: 2s; }
+  .mesh-node:nth-child(6) { animation-delay: 2.5s; }
+  .mesh-node:nth-child(7) { animation-delay: .8s; }
+  .mesh-node:nth-child(8) { animation-delay: 1.3s; }
+  .mesh-node:nth-child(9) { animation-delay: 3s; }
+  .mesh-node:nth-child(10) { animation-delay: 1.8s; }
+  .mesh-node:nth-child(11) { animation-delay: 0.3s; }
+  .mesh-node:nth-child(12) { animation-delay: 2.2s; }
+
+  .mesh-line {
+    position: absolute; height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,.25), transparent);
+    transform-origin: 0 0;
+  }
+
+  .hero-content { position: relative; z-index: 2; padding: 120px 24px 80px; }
+  .hero-badge {
+    display: inline-block; padding: 6px 18px; border-radius: 20px;
+    background: rgba(255,255,255,.2); border: 1px solid rgba(255,255,255,.35);
+    color: #fff; font-size: .85rem; font-weight: 600;
+    letter-spacing: .5px; margin-bottom: 24px;
+  }
+  .hero h1 {
+    font-size: clamp(2.4rem, 5.5vw, 3.8rem); font-weight: 800;
+    color: #fff; line-height: 1.15; margin-bottom: 16px;
+  }
+  .hero h1 .accent { color: #fff; text-shadow: 0 2px 8px rgba(0,0,0,.15); }
+  .hero .tagline {
+    font-size: clamp(1.05rem, 2.5vw, 1.35rem); color: rgba(255,255,255,.9);
+    max-width: 600px; margin: 0 auto 36px; font-weight: 400;
+  }
+  .hero-buttons { display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 14px 32px; border-radius: 8px; font-size: 1rem;
+    font-weight: 600; cursor: pointer; border: none; transition: all .25s;
+  }
+  .btn-primary {
+    background: #fff; color: #2E7D32;
+    box-shadow: 0 4px 20px rgba(0,0,0,.15);
+  }
+  .btn-primary:hover {
+    background: #F5F7F5; transform: translateY(-2px);
+    box-shadow: 0 8px 30px rgba(0,0,0,.2);
+  }
+  .btn-outline {
+    background: transparent; color: #fff;
+    border: 2px solid rgba(255,255,255,.6);
+  }
+  .btn-outline:hover {
+    background: rgba(255,255,255,.15); border-color: #fff;
+    transform: translateY(-2px);
+  }
+
+  /* ── Feature Cards (Key Selling Points) ───────────────────── */
+  .features-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 24px;
+  }
+  .feature-card {
+    background: #FFFFFF;
+    border: 1px solid rgba(46,125,50,.15); border-radius: 14px;
+    padding: 32px 24px; text-align: center; transition: all .3s;
+    box-shadow: 0 2px 12px rgba(0,0,0,.04);
+  }
+  .feature-card:hover {
+    border-color: rgba(46,125,50,.35);
+    transform: translateY(-4px);
+    box-shadow: 0 8px 32px rgba(46,125,50,.1);
+  }
+  .feature-icon {
+    width: 56px; height: 56px; border-radius: 14px; margin: 0 auto 18px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.6rem;
+    background: rgba(76,175,80,.08); border: 1px solid rgba(76,175,80,.2);
+  }
+  .feature-card h3 { font-size: 1.05rem; color: #1a1a1a; margin-bottom: 8px; }
+  .feature-card p { font-size: .9rem; color: #555; line-height: 1.55; }
+
+  /* ── Use-Case Sections ────────────────────────────────────── */
+  .use-cases { background: #F5F7F5; }
+  .use-case-grid {
+    display: grid; gap: 32px;
+    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  }
+  .use-case-card {
+    background: #FFFFFF;
+    border: 1px solid rgba(46,125,50,.1); border-radius: 16px;
+    padding: 36px 32px; transition: all .3s; position: relative; overflow: hidden;
+    box-shadow: 0 2px 12px rgba(0,0,0,.04);
+  }
+  .use-case-card::before {
+    content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+    background: linear-gradient(90deg, transparent, #4CAF50, transparent);
+    opacity: 0; transition: opacity .3s;
+  }
+  .use-case-card:hover { border-color: rgba(46,125,50,.25); transform: translateY(-3px); box-shadow: 0 8px 24px rgba(0,0,0,.06); }
+  .use-case-card:hover::before { opacity: 1; }
+  .use-case-header { display: flex; align-items: center; gap: 14px; margin-bottom: 20px; }
+  .use-case-emoji { font-size: 2rem; line-height: 1; }
+  .use-case-header h3 { font-size: 1.25rem; color: #1a1a1a; }
+  .use-case-card ul { list-style: none; display: flex; flex-direction: column; gap: 10px; }
+  .use-case-card li {
+    position: relative; padding-left: 22px; color: #555; font-size: .95rem;
+  }
+  .use-case-card li::before {
+    content: ''; position: absolute; left: 0; top: 8px;
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #4CAF50; opacity: .7;
+  }
+
+  /* ── Specs ─────────────────────────────────────────────────── */
+  .specs { background: #FFFFFF; }
+  .specs-wrapper {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 48px;
+    align-items: start;
+  }
+  .specs-table { width: 100%; border-collapse: collapse; }
+  .specs-table tr { border-bottom: 1px solid rgba(46,125,50,.1); }
+  .specs-table td { padding: 14px 16px; font-size: .95rem; }
+  .specs-table td:first-child { color: #555; font-weight: 500; width: 40%; }
+  .specs-table td:last-child { color: #1a1a1a; }
+  .specs-visual {
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 20px; padding: 24px;
+    background: #F5F7F5; border: 1px solid rgba(46,125,50,.1);
+    border-radius: 16px;
+  }
+  .specs-visual h3 { color: #1a1a1a; font-size: 1.1rem; }
+
+  /* CSS-only network diagram */
+  .network-diagram {
+    position: relative; width: 260px; height: 220px;
+  }
+  .nd-node {
+    position: absolute; width: 42px; height: 42px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: .65rem; font-weight: 700; color: #fff;
+    z-index: 2;
+  }
+  .nd-gateway {
+    background: #2E7D32; top: 10px; left: 109px;
+    width: 48px; height: 48px; font-size: .7rem;
+    box-shadow: 0 0 20px rgba(46,125,50,.35);
+  }
+  .nd-n1 { background: #4CAF50; top: 80px; left: 30px; }
+  .nd-n2 { background: #4CAF50; top: 80px; left: 188px; }
+  .nd-n3 { background: #66BB6A; top: 155px; left: 0px; }
+  .nd-n4 { background: #66BB6A; top: 155px; left: 105px; }
+  .nd-n5 { background: #66BB6A; top: 155px; left: 210px; }
+  .nd-line {
+    position: absolute; background: rgba(76,175,80,.3); z-index: 1;
+  }
+  /* Gateway → N1 */
+  .nd-l1 { width: 90px; height: 2px; top: 76px; left: 62px; transform: rotate(40deg); transform-origin: right center; }
+  /* Gateway → N2 */
+  .nd-l2 { width: 90px; height: 2px; top: 76px; left: 148px; transform: rotate(-40deg); transform-origin: left center; }
+  /* N1 → N3 */
+  .nd-l3 { width: 70px; height: 2px; top: 140px; left: 20px; transform: rotate(50deg); transform-origin: right center; }
+  /* N1 → N4 */
+  .nd-l4 { width: 100px; height: 2px; top: 140px; left: 62px; transform: rotate(-12deg); transform-origin: left center; }
+  /* N2 → N4 */
+  .nd-l5 { width: 100px; height: 2px; top: 140px; left: 130px; transform: rotate(12deg); transform-origin: right center; }
+  /* N2 → N5 */
+  .nd-l6 { width: 70px; height: 2px; top: 140px; left: 200px; transform: rotate(-50deg); transform-origin: left center; }
+
+  .nd-label { font-size: .7rem; color: #555; text-align: center; margin-top: 4px; }
+
+  /* ── Pricing ──────────────────────────────────────────────── */
+  .pricing { background: #F5F7F5; }
+  .pricing-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 28px; margin-bottom: 36px;
+  }
+  .pricing-card {
+    background: #FFFFFF;
+    border: 1px solid rgba(46,125,50,.12); border-radius: 16px;
+    padding: 36px 28px; text-align: center; transition: all .3s;
+    position: relative; box-shadow: 0 2px 12px rgba(0,0,0,.04);
+  }
+  .pricing-card.featured {
+    border-color: #4CAF50;
+    box-shadow: 0 4px 24px rgba(76,175,80,.15);
+  }
+  .pricing-card.featured::before {
+    content: 'Most Popular'; position: absolute; top: -12px; left: 50%;
+    transform: translateX(-50%); background: #4CAF50; color: #fff;
+    font-size: .75rem; font-weight: 700; padding: 4px 16px;
+    border-radius: 12px; letter-spacing: .3px;
+  }
+  .pricing-card:hover { transform: translateY(-4px); border-color: rgba(76,175,80,.35); box-shadow: 0 8px 24px rgba(0,0,0,.06); }
+  .pricing-card h3 { color: #1a1a1a; font-size: 1.2rem; margin-bottom: 6px; }
+  .pricing-desc { color: #555; font-size: .85rem; margin-bottom: 20px; }
+  .pricing-amount {
+    font-size: 2.8rem; font-weight: 800; color: #2E7D32;
+    margin-bottom: 4px; line-height: 1.1;
+  }
+  .pricing-amount .currency { font-size: 1.4rem; vertical-align: super; }
+  .pricing-amount .approx { font-size: .9rem; font-weight: 400; color: #555; }
+  .pricing-note { font-size: .8rem; color: #888; margin-bottom: 24px; }
+  .pricing-features { list-style: none; text-align: left; margin-bottom: 28px; }
+  .pricing-features li {
+    padding: 8px 0; border-bottom: 1px solid rgba(46,125,50,.08);
+    font-size: .9rem; color: #555; padding-left: 24px; position: relative;
+  }
+  .pricing-features li::before {
+    content: '\2713'; position: absolute; left: 0; color: #4CAF50; font-weight: 700;
+  }
+  .pricing-no-fees {
+    text-align: center; padding: 20px; background: rgba(76,175,80,.06);
+    border: 1px dashed rgba(76,175,80,.3); border-radius: 12px;
+    max-width: 520px; margin: 0 auto;
+  }
+  .pricing-no-fees p {
+    font-size: 1.15rem; font-weight: 700; color: #2E7D32;
+  }
+  .pricing-no-fees span { font-size: .9rem; color: #555; font-weight: 400; }
+
+  /* ── How It Works ─────────────────────────────────────────── */
+  .how-it-works { background: #FFFFFF; }
+  .steps-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 32px; }
+  .step {
+    text-align: center; padding: 24px 16px; position: relative;
+  }
+  .step-number {
+    width: 52px; height: 52px; border-radius: 50%;
+    background: rgba(76,175,80,.1); border: 2px solid rgba(76,175,80,.35);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.3rem; font-weight: 800; color: #2E7D32;
+    margin: 0 auto 16px;
+  }
+  .step h3 { color: #1a1a1a; font-size: 1.05rem; margin-bottom: 8px; }
+  .step p { color: #555; font-size: .9rem; }
+
+  /* ── CTA ───────────────────────────────────────────────────── */
+  .cta {
+    text-align: center; padding: 80px 24px;
+    background: linear-gradient(135deg, #2E7D32 0%, #4CAF50 50%, #66BB6A 100%);
+    position: relative; overflow: hidden;
+  }
+  .cta::before {
+    content: ''; position: absolute; inset: 0;
+    background: radial-gradient(circle at 50% 50%, rgba(255,255,255,.08) 0%, transparent 60%);
+    pointer-events: none;
+  }
+  .cta h2 {
+    font-size: 2.2rem; color: #fff; margin-bottom: 16px; position: relative; z-index: 1;
+  }
+  .cta p {
+    color: rgba(255,255,255,.9); font-size: 1.1rem; max-width: 540px;
+    margin: 0 auto 32px; position: relative; z-index: 1;
+  }
+  .cta .hero-buttons { position: relative; z-index: 1; }
+
+  /* ── Footer ────────────────────────────────────────────────── */
+  footer {
+    border-top: 1px solid rgba(46,125,50,.1); padding: 40px 24px;
+    text-align: center; background: #F5F7F5;
+  }
+  footer .brand {
+    font-size: 1.1rem; font-weight: 700; color: #1a1a1a;
+    display: inline-flex; align-items: center; gap: 8px; margin-bottom: 12px;
+  }
+  footer .brand .dot {
+    width: 8px; height: 8px; border-radius: 50%; background: #4CAF50;
+    box-shadow: 0 0 6px rgba(76,175,80,.4);
+  }
+  footer p { color: #888; font-size: .85rem; }
+  footer .links { margin: 12px 0; }
+  footer .links a { color: #555; font-size: .85rem; margin: 0 12px; }
+  footer .links a:hover { color: #2E7D32; }
+
+  /* ── Responsive ────────────────────────────────────────────── */
+  @media (max-width: 768px) {
+    nav ul { display: none; }
+    .specs-wrapper { grid-template-columns: 1fr; }
+    .use-case-grid { grid-template-columns: 1fr; }
+    .hero h1 { font-size: 2rem; }
+    .section { padding: 56px 0; }
+    .pricing-card.featured::before { top: -10px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ═══ Navigation ═══ -->
+<nav>
+  <div class="brand">
+    <span class="dot"></span>
+    TiggyOpenMesh
+  </div>
+  <ul>
+    <li><a href="#features">Features</a></li>
+    <li><a href="#use-cases">Use Cases</a></li>
+    <li><a href="#specs">Specs</a></li>
+    <li><a href="#pricing">Pricing</a></li>
+    <li><a href="#contact">Contact</a></li>
+  </ul>
+</nav>
+
+<!-- ═══ Hero ═══ -->
+<section class="hero">
+  <div class="mesh-viz">
+    <!-- Mesh nodes scattered across the hero -->
+    <div class="mesh-node" style="top:12%;left:8%"></div>
+    <div class="mesh-node" style="top:25%;left:22%"></div>
+    <div class="mesh-node" style="top:8%;left:40%"></div>
+    <div class="mesh-node" style="top:30%;left:55%"></div>
+    <div class="mesh-node" style="top:15%;left:75%"></div>
+    <div class="mesh-node" style="top:35%;left:90%"></div>
+    <div class="mesh-node" style="top:65%;left:5%"></div>
+    <div class="mesh-node" style="top:72%;left:30%"></div>
+    <div class="mesh-node" style="top:80%;left:60%"></div>
+    <div class="mesh-node" style="top:60%;left:85%"></div>
+    <div class="mesh-node" style="top:88%;left:15%"></div>
+    <div class="mesh-node" style="top:90%;left:78%"></div>
+    <!-- Mesh connection lines -->
+    <div class="mesh-line" style="top:14%;left:9%;width:160px;transform:rotate(5deg)"></div>
+    <div class="mesh-line" style="top:27%;left:24%;width:200px;transform:rotate(-4deg)"></div>
+    <div class="mesh-line" style="top:10%;left:42%;width:220px;transform:rotate(3deg)"></div>
+    <div class="mesh-line" style="top:32%;left:57%;width:180px;transform:rotate(-12deg)"></div>
+    <div class="mesh-line" style="top:67%;left:7%;width:200px;transform:rotate(-2deg)"></div>
+    <div class="mesh-line" style="top:74%;left:32%;width:240px;transform:rotate(3deg)"></div>
+    <div class="mesh-line" style="top:82%;left:62%;width:160px;transform:rotate(-18deg)"></div>
+    <div class="mesh-line" style="top:20%;left:10%;width:120px;transform:rotate(65deg)"></div>
+    <div class="mesh-line" style="top:42%;left:56%;width:200px;transform:rotate(60deg)"></div>
+    <div class="mesh-line" style="top:70%;left:6%;width:140px;transform:rotate(75deg)"></div>
+  </div>
+
+  <div class="hero-content">
+    <span class="hero-badge">Open Source LoRa Mesh for Agriculture</span>
+    <h1>Smart Farming<br><span class="accent">Without the Smart Price</span></h1>
+    <p class="tagline">
+      Monitor livestock, track equipment, automate gates and sensors &mdash;
+      all over a self-healing mesh network that needs no internet and no subscriptions.
+    </p>
+    <div class="hero-buttons">
+      <a href="#pricing" class="btn btn-primary">Get Started</a>
+      <a href="#use-cases" class="btn btn-outline">See Use Cases</a>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ Key Features ═══ -->
+<section class="section" id="features">
+  <div class="container">
+    <h2 class="section-title">Why Farmers Choose TiggyOpenMesh</h2>
+    <p class="section-subtitle">
+      Purpose-built for agricultural environments where reliability matters
+      and budgets are tight.
+    </p>
+    <div class="features-grid">
+      <div class="feature-card">
+        <div class="feature-icon" style="color:#2E7D32; font-size:1.5rem;">&#163;0</div>
+        <h3>No Subscription Fees</h3>
+        <p>Buy once, own forever. No monthly IoT platform costs, no cloud bills, no hidden charges. Your data stays on your farm.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">&#128246;</div>
+        <h3>No Internet Required</h3>
+        <p>LoRa mesh works anywhere &mdash; even the most remote farms with zero mobile signal. Your network, your rules.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">&#128279;</div>
+        <h3>Self-Healing Mesh</h3>
+        <p>Nodes automatically relay for each other. If one path fails, traffic reroutes. Range extends to 10km+ through multi-hop.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">&#128268;</div>
+        <h3>Open Source</h3>
+        <p>Fully open source. Customise to your exact needs. No vendor lock-in. Community supported and continuously improving.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">&#9728;&#65039;</div>
+        <h3>Solar Powered</h3>
+        <p>Low-power nodes run indefinitely on small solar panels. Deploy once in the field and forget about battery changes.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ Use Cases ═══ -->
+<section class="section use-cases" id="use-cases">
+  <div class="container">
+    <h2 class="section-title">Built for Real Farm Work</h2>
+    <p class="section-subtitle">
+      From livestock tracking to automated gates &mdash; practical solutions
+      that save time, money, and worry.
+    </p>
+    <div class="use-case-grid">
+
+      <div class="use-case-card">
+        <div class="use-case-header">
+          <span class="use-case-emoji">&#x1F404;</span>
+          <h3>Livestock Tracking</h3>
+        </div>
+        <ul>
+          <li>BLE beacon tags on animals &mdash; lightweight, waterproof</li>
+          <li>Know which field or zone animals are in at a glance</li>
+          <li>Instant alert if an animal leaves a geofenced area</li>
+          <li>Count animals as they pass through gates automatically</li>
+        </ul>
+      </div>
+
+      <div class="use-case-card">
+        <div class="use-case-header">
+          <span class="use-case-emoji">&#x1F69C;</span>
+          <h3>Vehicle &amp; Equipment Tracking</h3>
+        </div>
+        <ul>
+          <li>GPS tracking on tractors, ATVs, trailers and implements</li>
+          <li>Geofencing &mdash; alert if equipment leaves the farm boundary</li>
+          <li>Theft prevention &mdash; instant notification if moved after hours</li>
+          <li>Track usage hours and full location history</li>
+        </ul>
+      </div>
+
+      <div class="use-case-card">
+        <div class="use-case-header">
+          <span class="use-case-emoji">&#x1F321;&#xFE0F;</span>
+          <h3>Environmental Monitoring</h3>
+        </div>
+        <ul>
+          <li>Temperature sensors deployed across the entire farm</li>
+          <li>Soil moisture monitoring for irrigation decisions</li>
+          <li>Weather station data &mdash; wind speed, rainfall, humidity</li>
+          <li>Frost alerts &mdash; protect crops with early warning</li>
+        </ul>
+      </div>
+
+      <div class="use-case-card">
+        <div class="use-case-header">
+          <span class="use-case-emoji">&#x1F95B;</span>
+          <h3>Dairy &amp; Storage</h3>
+        </div>
+        <ul>
+          <li>Milk tank temperature monitoring &mdash; stay compliant</li>
+          <li>Grain silo level sensors &mdash; plan logistics ahead</li>
+          <li>Feed bin monitoring &mdash; know when to reorder</li>
+          <li>Cold storage temperature alerts &mdash; prevent spoilage</li>
+        </ul>
+      </div>
+
+      <div class="use-case-card">
+        <div class="use-case-header">
+          <span class="use-case-emoji">&#x1F6AA;</span>
+          <h3>Farm Automation</h3>
+        </div>
+        <ul>
+          <li>Remote gate control from your phone or PC</li>
+          <li>Automated pump control based on water levels</li>
+          <li>Lighting control for barns and outbuildings</li>
+          <li>Timer-based automation for feeding schedules</li>
+        </ul>
+      </div>
+
+      <div class="use-case-card">
+        <div class="use-case-header">
+          <span class="use-case-emoji">&#x1F4AC;</span>
+          <h3>Communication</h3>
+        </div>
+        <ul>
+          <li>Text messaging between farm workers &mdash; no phone signal needed</li>
+          <li>SOS emergency button on every node</li>
+          <li>Telegram bot &mdash; query any sensor from your phone</li>
+          <li>Hub web map &mdash; see all nodes on a live map</li>
+        </ul>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ═══ How It Works ═══ -->
+<section class="section how-it-works">
+  <div class="container">
+    <h2 class="section-title">Up and Running in Minutes</h2>
+    <p class="section-subtitle">No IT department required. If you can plug in a USB cable, you can deploy TiggyOpenMesh.</p>
+    <div class="steps-grid">
+      <div class="step">
+        <div class="step-number">1</div>
+        <h3>Flash the Firmware</h3>
+        <p>One-click firmware upload to your Heltec modules via USB. Takes under two minutes per node.</p>
+      </div>
+      <div class="step">
+        <div class="step-number">2</div>
+        <h3>Place Your Nodes</h3>
+        <p>Mount nodes in barns, on posts, or in the yard. Solar panel optional for remote locations.</p>
+      </div>
+      <div class="step">
+        <div class="step-number">3</div>
+        <h3>Connect a Gateway</h3>
+        <p>Plug one node into a PC or Raspberry Pi. The gateway GUI auto-discovers every node on the mesh.</p>
+      </div>
+      <div class="step">
+        <div class="step-number">4</div>
+        <h3>Build Your Rules</h3>
+        <p>Drag-and-drop Logic Builder: "If gate opens after 10pm, send Telegram alert." No code needed.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ Specs ═══ -->
+<section class="section specs" id="specs">
+  <div class="container">
+    <h2 class="section-title">Technical Specifications</h2>
+    <p class="section-subtitle">Enterprise-grade security and performance at a fraction of the cost.</p>
+    <div class="specs-wrapper">
+      <table class="specs-table">
+        <tr>
+          <td>Range (per hop)</td>
+          <td>1&ndash;3 km built-up &middot; 5&ndash;10 km line of sight</td>
+        </tr>
+        <tr>
+          <td>Mesh Hops</td>
+          <td>Up to 5 hops per message</td>
+        </tr>
+        <tr>
+          <td>Network Size</td>
+          <td>50&ndash;80 nodes per gateway</td>
+        </tr>
+        <tr>
+          <td>Encryption</td>
+          <td>AES-128-GCM end-to-end</td>
+        </tr>
+        <tr>
+          <td>Power</td>
+          <td>3.3V &middot; ~80 mA active &middot; solar compatible</td>
+        </tr>
+        <tr>
+          <td>Frequency</td>
+          <td>868 MHz (EU) &middot; 915 MHz (US)</td>
+        </tr>
+        <tr>
+          <td>Hardware</td>
+          <td>Heltec V3 (~&pound;15) &middot; T-Deck Plus (~&pound;45 with screen)</td>
+        </tr>
+        <tr>
+          <td>Sensors</td>
+          <td>I2C, UART, GPIO, BLE beacons, GPS</td>
+        </tr>
+        <tr>
+          <td>Gateway</td>
+          <td>Any PC, Raspberry Pi, or Linux server</td>
+        </tr>
+        <tr>
+          <td>Licence</td>
+          <td>Open source &mdash; free to use, modify, redistribute</td>
+        </tr>
+      </table>
+
+      <div class="specs-visual">
+        <h3>Self-Healing Mesh Topology</h3>
+        <div class="network-diagram">
+          <!-- Connection lines (behind nodes) -->
+          <div class="nd-line nd-l1"></div>
+          <div class="nd-line nd-l2"></div>
+          <div class="nd-line nd-l3"></div>
+          <div class="nd-line nd-l4"></div>
+          <div class="nd-line nd-l5"></div>
+          <div class="nd-line nd-l6"></div>
+          <!-- Nodes -->
+          <div class="nd-node nd-gateway">GW</div>
+          <div class="nd-node nd-n1">N1</div>
+          <div class="nd-node nd-n2">N2</div>
+          <div class="nd-node nd-n3">N3</div>
+          <div class="nd-node nd-n4">N4</div>
+          <div class="nd-node nd-n5">N5</div>
+        </div>
+        <p class="nd-label">Messages hop node-to-node &mdash; if N1 goes down,<br>N2 automatically reroutes through N4.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ Pricing ═══ -->
+<section class="section pricing" id="pricing">
+  <div class="container">
+    <h2 class="section-title">Simple, Honest Pricing</h2>
+    <p class="section-subtitle">Hardware cost only. No monthly fees. No subscriptions. Ever.</p>
+    <div class="pricing-grid">
+
+      <div class="pricing-card">
+        <h3>Starter Kit</h3>
+        <p class="pricing-desc">Perfect for a smallholding or trial</p>
+        <div class="pricing-amount">
+          <span class="approx">from </span><span class="currency">&pound;</span>80
+        </div>
+        <p class="pricing-note">One-off cost</p>
+        <ul class="pricing-features">
+          <li>1 Gateway node</li>
+          <li>3 Sensor/relay nodes</li>
+          <li>Gateway GUI software</li>
+          <li>USB cables &amp; antennas</li>
+          <li>Community support</li>
+        </ul>
+        <a href="#contact" class="btn btn-outline" style="width:100%;justify-content:center;color:#2E7D32;border-color:rgba(46,125,50,.4);">Get Started</a>
+      </div>
+
+      <div class="pricing-card featured">
+        <h3>Farm Pack</h3>
+        <p class="pricing-desc">Cover a full working farm</p>
+        <div class="pricing-amount">
+          <span class="approx">from </span><span class="currency">&pound;</span>250
+        </div>
+        <p class="pricing-note">One-off cost</p>
+        <ul class="pricing-features">
+          <li>1 Gateway node</li>
+          <li>10 Mesh nodes</li>
+          <li>Temperature &amp; soil sensors</li>
+          <li>BLE livestock beacons (x10)</li>
+          <li>Solar charging kits</li>
+          <li>Priority community support</li>
+        </ul>
+        <a href="#contact" class="btn btn-primary" style="width:100%;justify-content:center;background:#4CAF50;color:#fff;">Get Started</a>
+      </div>
+
+      <div class="pricing-card">
+        <h3>Enterprise</h3>
+        <p class="pricing-desc">Large estates &amp; multi-site operations</p>
+        <div class="pricing-amount">
+          <span class="approx">from </span><span class="currency">&pound;</span>1,200
+        </div>
+        <p class="pricing-note">One-off cost</p>
+        <ul class="pricing-features">
+          <li>Hub server (Raspberry Pi)</li>
+          <li>5 Gateways for full coverage</li>
+          <li>50 Mesh nodes</li>
+          <li>Full sensor suite</li>
+          <li>Telegram bot integration</li>
+          <li>Live web map dashboard</li>
+          <li>Direct support</li>
+        </ul>
+        <a href="#contact" class="btn btn-outline" style="width:100%;justify-content:center;color:#2E7D32;border-color:rgba(46,125,50,.4);">Contact Us</a>
+      </div>
+
+    </div>
+
+    <div class="pricing-no-fees">
+      <p>No monthly fees. No subscriptions. No cloud lock-in.</p>
+      <span>Your hardware, your data, your farm. Forever.</span>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ CTA ═══ -->
+<section class="cta" id="contact">
+  <h2>Ready to Modernise Your Farm?</h2>
+  <p>
+    Join farmers across the UK who are saving time, cutting costs, and
+    keeping full control of their data.
+  </p>
+  <div class="hero-buttons">
+    <a href="https://github.com/TiggyOpenMesh" class="btn btn-primary">View on GitHub</a>
+    <a href="mailto:info@tiggyopenmesh.com" class="btn btn-outline">Contact Us</a>
+  </div>
+</section>
+
+<!-- ═══ Footer ═══ -->
+<footer>
+  <div class="brand">
+    <span class="dot"></span>
+    TiggyOpenMesh
+  </div>
+  <div class="links">
+    <a href="https://github.com/TiggyOpenMesh">GitHub</a>
+    <a href="#specs">Documentation</a>
+    <a href="mailto:info@tiggyopenmesh.com">Contact</a>
+  </div>
+  <p>&copy; 2026 TiggyOpenMesh &mdash; Open Source LoRa Mesh for Agriculture</p>
+  <p style="margin-top:8px;font-size:.75rem;">
+    TiggyOpenMesh is an open-source project. Prices shown are indicative hardware costs only.
+  </p>
+</footer>
+
+</body>
+</html>
