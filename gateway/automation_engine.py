@@ -358,6 +358,14 @@ class AutomationEngine:
             with open(self.rules_path) as f:
                 data = json.load(f)
             self.rules = [Rule.from_dict(r) for r in data.get("rules", [])]
+            # Restore deployed_beacons from saved rules
+            for rule in self.rules:
+                if rule.deployed:
+                    for b in rule.blocks:
+                        if b.block_type == BlockType.BEACON_DETECT:
+                            name = b.config.get("name", "").strip()
+                            if name:
+                                self.deployed_beacons.add(name)
         except Exception:
             self.rules = []
 
