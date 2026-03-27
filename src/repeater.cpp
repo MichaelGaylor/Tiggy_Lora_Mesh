@@ -259,8 +259,8 @@ void broadcastGPS();
 // ─── iBeacon Scanner ─────────────────────────────────────────
 #define MAX_BEACON_RULES 8
 #define EEPROM_BEACON_ADDR 512  // After magic byte at 508
-#define BEACON_SCAN_DURATION 1  // seconds per scan
-#define BEACON_SCAN_INTERVAL 5000  // ms between scans
+#define BEACON_SCAN_DURATION 2  // seconds per scan
+#define BEACON_SCAN_INTERVAL 3000  // ms between scans
 
 struct BeaconRule {
     bool active;
@@ -575,6 +575,13 @@ void checkBeacons() {
 
     static unsigned long lastScanStart = 0;
     unsigned long now = millis();
+
+    // Watchdog: if scan callback was lost, force-reset after 10s
+    if (beaconScanActive && now - lastScanStart > (BEACON_SCAN_DURATION * 1000 + 5000)) {
+        pBLEScan->stop();
+        beaconScanActive = false;
+        beaconScanDone = false;
+    }
 
     // Start a new scan periodically
     if (!beaconScanActive && now - lastScanStart > BEACON_SCAN_INTERVAL) {
