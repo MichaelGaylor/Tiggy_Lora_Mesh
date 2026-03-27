@@ -168,6 +168,81 @@ void wakeDisplay() {
     lastInputTime = millis();
 }
 
+// ─── Touch Screen (GT911) ─────────────────────────────────
+#ifdef BOARD_TOUCH_INT
+struct TouchPoint { int16_t x, y; bool touched; };
+bool touchEnabled = false;
+
+void setupTouch() {
+    pinMode(BOARD_TOUCH_INT, INPUT);
+    // GT911 should be on the I2C bus already initialized for keyboard
+    // Verify it responds
+    Wire.beginTransmission(TOUCH_I2C_ADDR);
+    if (Wire.endTransmission() == 0) {
+        touchEnabled = true;
+        debugPrint("Touch screen: GT911 OK");
+    } else {
+        // Try alternate address
+        Wire.beginTransmission(0x14);
+        if (Wire.endTransmission() == 0) {
+            touchEnabled = true;
+            debugPrint("Touch screen: GT911 OK (alt addr 0x14)");
+        } else {
+            debugPrint("Touch screen: GT911 not found");
+        }
+    }
+}
+
+TouchPoint readTouch() {
+    if (!touchEnabled) return {0, 0, false};
+    // Read GT911 status register (0x814E)
+    Wire.beginTransmission(TOUCH_I2C_ADDR);
+    Wire.write(0x81); Wire.write(0x4E);
+    Wire.endTransmission(false);
+    Wire.requestFrom((uint8_t)TOUCH_I2C_ADDR, (uint8_t)1);
+    if (!Wire.available()) return {0, 0, false};
+    uint8_t status = Wire.read();
+    if (!(status & 0x80) || (status & 0x0F) == 0) {
+        return {0, 0, false};
+    }
+    // Read touch point 1 (0x8150: x_lo, x_hi, y_lo, y_hi)
+    Wire.beginTransmission(TOUCH_I2C_ADDR);
+    Wire.write(0x81); Wire.write(0x50);
+    Wire.endTransmission(false);
+    Wire.requestFrom((uint8_t)TOUCH_I2C_ADDR, (uint8_t)4);
+    if (Wire.available() < 4) return {0, 0, false};
+    int16_t x = Wire.read() | (Wire.read() << 8);
+    int16_t y = Wire.read() | (Wire.read() << 8);
+    // Clear status register
+    Wire.beginTransmission(TOUCH_I2C_ADDR);
+    Wire.write(0x81); Wire.write(0x4E); Wire.write(0x00);
+    Wire.endTransmission();
+    return {x, y, true};
+}
+#endif
+
+// ─── Speaker (simple tones) ──────────────────────────────
+#ifdef BOARD_SPEAKER_PIN
+bool soundEnabled = true;
+#define EEPROM_SOUND_ADDR 434
+
+void beepMessage()  { if (soundEnabled) tone(BOARD_SPEAKER_PIN, 1000, 100); }
+void beepConfirm()  { if (soundEnabled) tone(BOARD_SPEAKER_PIN, 2000, 50); }
+void beepAlert()    { if (soundEnabled) tone(BOARD_SPEAKER_PIN, 800, 300); }
+void beepSOS() {
+    if (!soundEnabled) return;
+    // SOS pattern: 3 short, 3 long, 3 short
+    for (int i = 0; i < 3; i++) { tone(BOARD_SPEAKER_PIN, 1200, 100); delay(200); }
+    for (int i = 0; i < 3; i++) { tone(BOARD_SPEAKER_PIN, 1200, 300); delay(400); }
+    for (int i = 0; i < 3; i++) { tone(BOARD_SPEAKER_PIN, 1200, 100); delay(200); }
+}
+#else
+void beepMessage() {}
+void beepConfirm() {}
+void beepAlert() {}
+void beepSOS() {}
+#endif
+
 // Text input
 String inputBuffer;
 String inputPrompt;
@@ -396,6 +471,7 @@ void handleAckRetry() {
   if (pendingAckID.length() == 0) return;
   if (ackReceived) {
     showNotification("Delivered!");
+    beepConfirm();
     pendingAckID = "";
     return;
   }
@@ -549,6 +625,7 @@ void handleMessage(const String& from, const String& plain, int rssi) {
       String displayText = decompressQuickMsg(actual);
       addChatMessage(from, displayText, rssi, false);
       lastSender = from;
+      beepMessage();
       if (currentMode == MESSAGING) drawChatView();
       else showNotification(from + ": " + displayText);
     }
@@ -569,6 +646,7 @@ void handleMessage(const String& from, const String& plain, int rssi) {
   }
   else if (plain.startsWith("SOS,")) {
     addChatMessage(from, "!! SOS EMERGENCY !!", rssi, false);
+    beepSOS();
     for (int i = 0; i < 4; i++) {
       display.fillScreen(COL_BAD); delay(150);
       display.fillScreen(COL_BG); delay(150);
@@ -2212,6 +2290,16 @@ void setup() {
   pinMode(BOARD_KB_INT, INPUT_PULLUP);
 
   setupTrackball();
+#ifdef BOARD_TOUCH_INT
+  setupTouch();
+#endif
+#ifdef BOARD_SPEAKER_PIN
+  // Load sound preference from EEPROM
+  uint8_t sndPref = EEPROM.read(EEPROM_SOUND_ADDR);
+  if (sndPref == 0) soundEnabled = false;
+  else if (sndPref == 0xFF) soundEnabled = true;  // Default: on
+  beepConfirm();  // Startup chirp
+#endif
   setupEEPROM();
   loadKeyFromEEPROM();
   loadIDsFromEEPROM();
@@ -2325,6 +2413,31 @@ void loop() {
 
   // Notification overlay
   drawNotification();
+
+  // Touch input — map to trackball/keyboard equivalents
+#ifdef BOARD_TOUCH_INT
+  static bool lastTouched = false;
+  TouchPoint tp = readTouch();
+  if (tp.touched && !lastTouched) {
+      wakeDisplay();
+      // Map touch zones to actions (320x240 landscape)
+      if (tp.y < 40) {
+          // Top bar tap → back/menu
+          if (currentMode != MENU) {
+              currentMode = MENU;
+          }
+      } else if (tp.y > 200) {
+          // Bottom area → could trigger text input
+      } else {
+          // Middle area — map to menu selection based on Y position
+          int item = (tp.y - 40) / 30;  // ~30px per menu item
+          // Simulate trackball down + click for menu navigation
+          tbDeltaDown += item;
+          tbDeltaUp = 0;  // Cancel any pending up
+      }
+  }
+  lastTouched = tp.touched;
+#endif
 
   // Mode dispatch
   switch (currentMode) {

@@ -81,6 +81,13 @@
 #define BOARD_TBALL_RIGHT   2
 #define BOARD_TBALL_CLICK   0
 
+// Touch Screen (GT911 on shared I2C bus)
+#define BOARD_TOUCH_INT     16
+#define TOUCH_I2C_ADDR      0x5D
+
+// Speaker (I2S DOUT pin — used for simple tone() beeps)
+#define BOARD_SPEAKER_PIN   6
+
 // SD Card
 #define BOARD_SDCARD_CS     39
 
