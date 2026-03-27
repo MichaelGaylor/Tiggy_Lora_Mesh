@@ -406,17 +406,17 @@ class GatewayGUIApp:
         tg_row = ctk.CTkFrame(self.root, fg_color="transparent")
         tg_row.pack(fill="x", padx=10, pady=(0, 2))
         ctk.CTkLabel(tg_row, text="Telegram:", text_color=COLORS["dim"],
-                     font=("Consolas", 10)).pack(side="left")
+                     font=("Consolas", 12)).pack(side="left")
         self.tg_token_entry = ctk.CTkEntry(tg_row, width=280, placeholder_text="Bot token",
-                                            font=("Consolas", 10))
+                                            font=("Consolas", 12))
         self.tg_token_entry.pack(side="left", padx=2)
         ctk.CTkLabel(tg_row, text="Chat ID:", text_color=COLORS["dim"],
-                     font=("Consolas", 10)).pack(side="left", padx=(5, 0))
+                     font=("Consolas", 12)).pack(side="left", padx=(5, 0))
         self.tg_chatid_entry = ctk.CTkEntry(tg_row, width=100, placeholder_text="123456789",
-                                              font=("Consolas", 10))
+                                              font=("Consolas", 12))
         self.tg_chatid_entry.pack(side="left", padx=2)
         self.tg_connect_btn = ctk.CTkButton(tg_row, text="Start Bot", width=80,
-                                              font=("Consolas", 10), fg_color=COLORS["accent"],
+                                              font=("Consolas", 12), fg_color=COLORS["accent"],
                                               text_color="#000", command=self._toggle_telegram)
         self.tg_connect_btn.pack(side="left", padx=5)
         self.tg_status_label = ctk.CTkLabel(tg_row, text="", font=("Consolas", 11))
@@ -433,15 +433,15 @@ class GatewayGUIApp:
         mesh_row = ctk.CTkFrame(self.root, fg_color="transparent")
         mesh_row.pack(fill="x", padx=10, pady=(0, 2))
         ctk.CTkLabel(mesh_row, text="Meshtastic:", text_color=COLORS["dim"],
-                     font=("Consolas", 10)).pack(side="left")
+                     font=("Consolas", 12)).pack(side="left")
         self.mesh_port_combo = ctk.CTkComboBox(mesh_row, width=200, values=["(none)"],
-                                                 font=("Consolas", 10))
+                                                 font=("Consolas", 12))
         self.mesh_port_combo.pack(side="left", padx=2)
-        ctk.CTkButton(mesh_row, text="Detect", width=55, font=("Consolas", 10),
+        ctk.CTkButton(mesh_row, text="Detect", width=55, font=("Consolas", 12),
                        fg_color=COLORS["panel"], text_color=COLORS["text"],
                        command=self._refresh_mesh_ports).pack(side="left", padx=2)
         self.mesh_bridge_btn = ctk.CTkButton(mesh_row, text="Start Bridge", width=90,
-                                               font=("Consolas", 10), fg_color=COLORS["accent"],
+                                               font=("Consolas", 12), fg_color=COLORS["accent"],
                                                text_color="#000", command=self._toggle_mesh_bridge)
         self.mesh_bridge_btn.pack(side="left", padx=5)
         self.mesh_status_label = ctk.CTkLabel(mesh_row, text="", font=("Consolas", 11))

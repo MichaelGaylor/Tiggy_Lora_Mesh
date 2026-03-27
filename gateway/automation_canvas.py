@@ -519,15 +519,17 @@ class AutomationCanvas:
         label = bdef.get("label", block.block_type.value)
         badge = DEPLOY_BADGE.get(block.block_type, "ND+GUI")
         badge_color = "#FF5252" if badge == "ND" else ("#00E5FF" if badge == "GUI" else "#00E676")
+        title_text = f"{label}  {badge}"
         t = self.canvas.create_text(
-            x + 8, y + 8, text=label, anchor="nw",
+            x + 8, y + 8, text=title_text, anchor="nw",
             fill=COLORS["text"], font=("Consolas", 11, "bold"),
             tags=(f"block_{block.id}",))
         items.append(t)
-        # Badge (small text, top-right area)
+        # Badge color overlay (just the badge part, positioned after title)
+        title_width = len(label) * 7 + 16  # Approximate character width
         b = self.canvas.create_text(
-            x + BLOCK_W - 18, y + 18, text=badge, anchor="e",
-            fill=badge_color, font=("Consolas", 11),
+            x + title_width, y + 8, text=badge, anchor="nw",
+            fill=badge_color, font=("Consolas", 9),
             tags=(f"block_{block.id}",))
         items.append(b)
 
