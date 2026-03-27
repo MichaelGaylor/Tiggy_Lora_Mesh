@@ -515,27 +515,27 @@ class AutomationCanvas:
             tags=(f"block_{block.id}", "block"))
         items.append(r)
 
-        # Title + deployment badge
+        # Title
         label = bdef.get("label", block.block_type.value)
-        badge = DEPLOY_BADGE.get(block.block_type, "ND+GUI")
-        badge_color = "#FF5252" if badge == "ND" else ("#00E5FF" if badge == "GUI" else "#00E676")
-        title_text = f"{label}  {badge}"
         t = self.canvas.create_text(
-            x + 8, y + 8, text=title_text, anchor="nw",
+            x + 8, y + 8, text=label, anchor="nw",
             fill=COLORS["text"], font=("Consolas", 11, "bold"),
             tags=(f"block_{block.id}",))
         items.append(t)
-        # Badge color overlay (just the badge part, positioned after title)
-        title_width = len(label) * 7 + 16  # Approximate character width
-        b = self.canvas.create_text(
-            x + title_width, y + 8, text=badge, anchor="nw",
-            fill=badge_color, font=("Consolas", 9),
+        # Deploy badge icon (small colored dot: red=node, cyan=GUI, green=both)
+        badge = DEPLOY_BADGE.get(block.block_type, "ND+GUI")
+        badge_color = "#FF5252" if badge == "ND" else ("#00E5FF" if badge == "GUI" else "#00E676")
+        bx = x + BLOCK_W - 6
+        by = y + 6
+        b = self.canvas.create_oval(
+            bx - 5, by - 5, bx + 5, by + 5,
+            fill=badge_color, outline=badge_color,
             tags=(f"block_{block.id}",))
         items.append(b)
 
-        # Status dot
+        # Status dot (below deploy badge)
         dot = self.canvas.create_oval(
-            x + BLOCK_W - 14, y + 5, x + BLOCK_W - 6, y + 13,
+            x + BLOCK_W - 14, y + 17, x + BLOCK_W - 6, y + 25,
             fill=STATUS_COLORS.get(block.status, "#444"),
             outline=STATUS_COLORS.get(block.status, "#444"),
             tags=(f"block_{block.id}", f"{block.id}_status_dot"))
