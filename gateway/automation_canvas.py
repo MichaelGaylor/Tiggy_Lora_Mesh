@@ -124,19 +124,35 @@ def show_block_config(parent, block: Block, discovered_nodes: dict,
         row += 1
 
     # Build fields based on block type
-    if bt == BlockType.SENSOR_READ:
-        add_node_combo("Node ID:", "node_id")
-        # Filter pins: sensor_data first, then node's PINS config, then GUI defaults
-        node_id = cfg.get("node_id", "")
-        known_pins = []
+    # Helper: get pins for a node from sensor_data, node_pin_configs, or defaults
+    def _get_node_pins(node_id, pin_type="sensor"):
+        # 1. From sensor_data (pins that have returned data)
         if engine and hasattr(engine, 'sensor_data') and node_id:
             prefix = f"{node_id}:"
-            known_pins = sorted({k.split(":")[1] for k in engine.sensor_data if k.startswith(prefix)})
-        if not known_pins and node_id and hasattr(self, 'node_pin_configs'):
-            node_cfg = self.node_pin_configs.get(node_id)
-            if node_cfg and len(node_cfg) >= 2:
-                known_pins = sorted(node_cfg[1])  # sensor pins from PINS response
-        pins = known_pins if known_pins else (sensor_pins if sensor_pins else [])
+            found = sorted({k.split(":")[1] for k in engine.sensor_data if k.startswith(prefix)})
+            if found:
+                return found
+        # 2. From node_pin_configs (PINS response from node)
+        npc = getattr(engine, 'node_pin_configs', None)
+        if npc and node_id in npc:
+            cfg_tuple = npc[node_id]
+            if pin_type == "relay" and len(cfg_tuple) >= 1:
+                return sorted(cfg_tuple[0])
+            elif pin_type == "sensor" and len(cfg_tuple) >= 2:
+                return sorted(cfg_tuple[1])
+            elif pin_type == "all" and len(cfg_tuple) >= 2:
+                return sorted(set(cfg_tuple[0] + cfg_tuple[1]))
+        # 3. Fallback to GUI defaults
+        if pin_type == "relay":
+            return relay_pins if relay_pins else []
+        elif pin_type == "all":
+            return sorted(set((relay_pins or []) + (sensor_pins or [])))
+        return sensor_pins if sensor_pins else []
+
+    if bt == BlockType.SENSOR_READ:
+        add_node_combo("Node ID:", "node_id")
+        node_id = cfg.get("node_id", "")
+        pins = _get_node_pins(node_id, "sensor")
         if pins:
             add_combo("Pin:", "pin", pins, str(cfg.get("pin", pins[0] if pins else "0")))
         else:
@@ -145,15 +161,8 @@ def show_block_config(parent, block: Block, discovered_nodes: dict,
 
     elif bt == BlockType.DIGITAL_READ:
         add_node_combo("Node ID:", "node_id")
-        # Any GPIO can be digital input — show all relay+sensor pins
         node_id = cfg.get("node_id", "")
-        all_pins = []
-        if node_id and hasattr(self, 'node_pin_configs'):
-            node_cfg = self.node_pin_configs.get(node_id)
-            if node_cfg:
-                all_pins = sorted(set(node_cfg[0] + node_cfg[1]))  # relay + sensor pins
-        pins = all_pins if all_pins else (relay_pins or []) + (sensor_pins or [])
-        pins = sorted(set(pins))
+        pins = _get_node_pins(node_id, "all")  # Any GPIO works for digital
         if pins:
             add_combo("Pin:", "pin", pins, str(cfg.get("pin", pins[0] if pins else "0")))
         else:
@@ -162,15 +171,8 @@ def show_block_config(parent, block: Block, discovered_nodes: dict,
 
     elif bt == BlockType.PULSE_INPUT:
         add_node_combo("Node ID:", "node_id")
-        # Pulse pins — same as digital, any GPIO works
         node_id = cfg.get("node_id", "")
-        all_pins = []
-        if node_id and hasattr(self, 'node_pin_configs'):
-            node_cfg = self.node_pin_configs.get(node_id)
-            if node_cfg:
-                all_pins = sorted(set(node_cfg[0] + node_cfg[1]))
-        pins = all_pins if all_pins else (relay_pins or []) + (sensor_pins or [])
-        pins = sorted(set(pins))
+        pins = _get_node_pins(node_id, "all")  # Any GPIO works for pulse
         if pins:
             add_combo("Pin:", "pin", pins, str(cfg.get("pin", pins[0] if pins else "0")))
         else:

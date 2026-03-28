@@ -892,6 +892,7 @@ class GatewayGUIApp:
                     if hb_from not in self.node_pin_configs and self.node_relay_pins:
                         self.node_pin_configs[hb_from] = (self.node_relay_pins, self.node_sensor_pins)
                         self.auto_canvas.node_pin_configs = self.node_pin_configs
+                        self.engine.node_pin_configs = self.node_pin_configs
                     # Also query actual pin config via mesh (may override defaults)
                     if hb_from != self.local_id and hb_from not in self._queried_nodes:
                         self._queried_nodes.add(hb_from)
@@ -1622,6 +1623,7 @@ class GatewayGUIApp:
                 self.auto_canvas.relay_pins = r
                 self.auto_canvas.sensor_pins = s
                 self.auto_canvas.node_pin_configs = self.node_pin_configs
+                self.engine.node_pin_configs = self.node_pin_configs
                 break
 
     def _parse_beacon_event(self, text: str, triggered: bool):
