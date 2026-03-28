@@ -21,6 +21,8 @@ from typing import Any, Callable, Optional
 class BlockType(str, Enum):
     # Inputs
     SENSOR_READ = "sensor_read"
+    DIGITAL_READ = "digital_read"
+    PULSE_INPUT = "pulse_input"
     BEACON_DETECT = "beacon_detect"
     CONSTANT = "constant"
     # Transforms
@@ -51,6 +53,20 @@ BLOCK_DEFS = {
         "inputs": [],
         "outputs": [("value", "number")],
         "defaults": {"node_id": "", "pin": 0, "label": ""},
+    },
+    BlockType.DIGITAL_READ: {
+        "category": "input",
+        "label": "Digital Read",
+        "inputs": [],
+        "outputs": [("state", "bool")],
+        "defaults": {"node_id": "", "pin": 0, "label": ""},
+    },
+    BlockType.PULSE_INPUT: {
+        "category": "input",
+        "label": "Pulse Input",
+        "inputs": [],
+        "outputs": [("rate", "number")],
+        "defaults": {"node_id": "", "pin": 0, "label": "", "unit": "pulses/s"},
     },
     BlockType.BEACON_DETECT: {
         "category": "input",
@@ -506,6 +522,44 @@ class AutomationEngine:
             block.status = "stale"
             return {"value": None}
 
+        if bt == BlockType.DIGITAL_READ:
+            node_id = cfg.get("node_id", "")
+            pin = cfg.get("pin", 0)
+            key = f"{node_id}:{pin}"
+            readings = self.sensor_data.get(key, [])
+            if readings:
+                val = readings[-1][1]
+                age = now - readings[-1][0]
+                if age > self.STALE_THRESHOLD:
+                    block.error = f"Stale ({int(age)}s)"
+                    block.status = "stale"
+                else:
+                    block.error = ""
+                    block.status = "active"
+                return {"state": bool(val)}  # Non-zero = True
+            block.error = "No data"
+            block.status = "stale"
+            return {"state": None}
+
+        if bt == BlockType.PULSE_INPUT:
+            node_id = cfg.get("node_id", "")
+            pin = cfg.get("pin", 0)
+            key = f"{node_id}:{pin}"
+            readings = self.sensor_data.get(key, [])
+            if readings:
+                val = readings[-1][1]
+                age = now - readings[-1][0]
+                if age > self.STALE_THRESHOLD:
+                    block.error = f"Stale ({int(age)}s)"
+                    block.status = "stale"
+                else:
+                    block.error = ""
+                    block.status = "active"
+                return {"rate": val}  # Pulse rate (pulses/sec from firmware)
+            block.error = "No data"
+            block.status = "stale"
+            return {"rate": None}
+
         if bt == BlockType.BEACON_DETECT:
             beacon_id = cfg.get("beacon_id", "")
             beacon_name = cfg.get("name", "").strip()
@@ -828,7 +882,7 @@ class AutomationEngine:
             if not rule.enabled:
                 continue
             for block in rule.blocks:
-                if block.block_type == BlockType.SENSOR_READ:
+                if block.block_type in (BlockType.SENSOR_READ, BlockType.DIGITAL_READ, BlockType.PULSE_INPUT):
                     nid = block.config.get("node_id", "")
                     if nid:
                         current = needed.get(nid, 999.0)

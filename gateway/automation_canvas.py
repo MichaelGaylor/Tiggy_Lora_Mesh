@@ -46,7 +46,8 @@ DEPLOY_BADGE = {
 # All others default to "ND+GUI" (both)
 
 CATEGORY_BLOCKS = {
-    "Input": [BlockType.SENSOR_READ, BlockType.BEACON_DETECT, BlockType.CONSTANT],
+    "Input": [BlockType.SENSOR_READ, BlockType.DIGITAL_READ, BlockType.PULSE_INPUT,
+              BlockType.BEACON_DETECT, BlockType.CONSTANT],
     "Transform": [BlockType.SCALE, BlockType.MOVING_AVG, BlockType.DELTA_RATE],
     "Condition": [BlockType.COMPARE, BlockType.AND_GATE, BlockType.OR_GATE,
                   BlockType.NOT_GATE, BlockType.DEBOUNCE, BlockType.MONOSTABLE,
@@ -141,6 +142,41 @@ def show_block_config(parent, block: Block, discovered_nodes: dict,
         else:
             add_field("Pin:", "pin", "0")
         add_field("Label:", "label", "")
+
+    elif bt == BlockType.DIGITAL_READ:
+        add_node_combo("Node ID:", "node_id")
+        # Any GPIO can be digital input — show all relay+sensor pins
+        node_id = cfg.get("node_id", "")
+        all_pins = []
+        if node_id and hasattr(self, 'node_pin_configs'):
+            node_cfg = self.node_pin_configs.get(node_id)
+            if node_cfg:
+                all_pins = sorted(set(node_cfg[0] + node_cfg[1]))  # relay + sensor pins
+        pins = all_pins if all_pins else (relay_pins or []) + (sensor_pins or [])
+        pins = sorted(set(pins))
+        if pins:
+            add_combo("Pin:", "pin", pins, str(cfg.get("pin", pins[0] if pins else "0")))
+        else:
+            add_field("Pin:", "pin", "0")
+        add_field("Label:", "label", "")
+
+    elif bt == BlockType.PULSE_INPUT:
+        add_node_combo("Node ID:", "node_id")
+        # Pulse pins — same as digital, any GPIO works
+        node_id = cfg.get("node_id", "")
+        all_pins = []
+        if node_id and hasattr(self, 'node_pin_configs'):
+            node_cfg = self.node_pin_configs.get(node_id)
+            if node_cfg:
+                all_pins = sorted(set(node_cfg[0] + node_cfg[1]))
+        pins = all_pins if all_pins else (relay_pins or []) + (sensor_pins or [])
+        pins = sorted(set(pins))
+        if pins:
+            add_combo("Pin:", "pin", pins, str(cfg.get("pin", pins[0] if pins else "0")))
+        else:
+            add_field("Pin:", "pin", "0")
+        add_field("Label:", "label", "")
+        add_field("Unit:", "unit", "pulses/s")
 
     elif bt == BlockType.BEACON_DETECT:
         add_node_combo("Detect at Node:", "node_id")
@@ -643,6 +679,17 @@ class AutomationCanvas:
             pin = cfg.get("pin", "?")
             lbl = cfg.get("label", "")
             return f"{nid}:pin{pin}" + (f' "{lbl}"' if lbl else "")
+        if bt == BlockType.DIGITAL_READ:
+            nid = cfg.get("node_id", "?")
+            pin = cfg.get("pin", "?")
+            lbl = cfg.get("label", "")
+            return f"{nid}:pin{pin}" + (f' "{lbl}"' if lbl else "")
+        if bt == BlockType.PULSE_INPUT:
+            nid = cfg.get("node_id", "?")
+            pin = cfg.get("pin", "?")
+            unit = cfg.get("unit", "pulses/s")
+            lbl = cfg.get("label", "")
+            return f"{nid}:pin{pin} {unit}" + (f' "{lbl}"' if lbl else "")
         if bt == BlockType.BEACON_DETECT:
             bid = cfg.get("beacon_id", "?")
             name = cfg.get("name", "")
