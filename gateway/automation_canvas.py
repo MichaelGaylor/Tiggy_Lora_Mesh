@@ -270,7 +270,8 @@ def show_block_config(parent, block: Block, discovered_nodes: dict,
 
     elif bt == BlockType.SET_RELAY:
         add_node_combo("Node ID:", "node_id")
-        pins = relay_pins if relay_pins else []
+        node_id = cfg.get("node_id", "")
+        pins = _get_node_pins(node_id, "relay")
         if pins:
             add_combo("Pin:", "pin", pins, str(cfg.get("pin", pins[0] if pins else "0")))
         else:
@@ -279,7 +280,8 @@ def show_block_config(parent, block: Block, discovered_nodes: dict,
 
     elif bt == BlockType.PULSE_RELAY:
         add_node_combo("Node ID:", "node_id")
-        pins = relay_pins if relay_pins else []
+        node_id = cfg.get("node_id", "")
+        pins = _get_node_pins(node_id, "relay")
         if pins:
             add_combo("Pin:", "pin", pins, str(cfg.get("pin", pins[0] if pins else "0")))
         else:
