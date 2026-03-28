@@ -125,12 +125,16 @@ def show_block_config(parent, block: Block, discovered_nodes: dict,
     # Build fields based on block type
     if bt == BlockType.SENSOR_READ:
         add_node_combo("Node ID:", "node_id")
-        # Filter pins: show only pins seen in sensor_data for the selected node
+        # Filter pins: sensor_data first, then node's PINS config, then GUI defaults
         node_id = cfg.get("node_id", "")
         known_pins = []
         if engine and hasattr(engine, 'sensor_data') and node_id:
             prefix = f"{node_id}:"
             known_pins = sorted({k.split(":")[1] for k in engine.sensor_data if k.startswith(prefix)})
+        if not known_pins and node_id and hasattr(self, 'node_pin_configs'):
+            node_cfg = self.node_pin_configs.get(node_id)
+            if node_cfg and len(node_cfg) >= 2:
+                known_pins = sorted(node_cfg[1])  # sensor pins from PINS response
         pins = known_pins if known_pins else (sensor_pins if sensor_pins else [])
         if pins:
             add_combo("Pin:", "pin", pins, str(cfg.get("pin", pins[0] if pins else "0")))

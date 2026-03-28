@@ -257,8 +257,8 @@
 // Plenty available since ESP32-S3 has many GPIOs
 #define USER_GPIO_COUNT     6
 #define DEFAULT_RELAY_PINS  { 2, 3, 4, 5, 6, 7 }
-#define DEFAULT_SENSOR_PINS { 19, 20, 33 }
-#define SENSOR_PIN_COUNT    3
+#define DEFAULT_SENSOR_PINS { 3, 4, 5, 6, 15, 16 }  // Valid ADC on ESP32-S3 (NOT 19/20=USB, NOT 33=no ADC)
+#define SENSOR_PIN_COUNT    6
 
 // ═══════════════════════════════════════════════════════════════
 #elif defined(BOARD_HELTEC_V4)
@@ -341,9 +341,9 @@
 //   GPIO 19/20 = USB D-/D+ (kills USB serial)
 //   GPIO 38/39 = GPS header connector (hardwired to GNSS SH1.25)
 #define USER_GPIO_COUNT     6
-#define DEFAULT_RELAY_PINS  { 2, 3, 4, 5, 6, 7 }
-#define DEFAULT_SENSOR_PINS { 15 }       // Only pin 15 is ADC on ESP32-S3 (pins 33,34 are NOT analog)
-#define SENSOR_PIN_COUNT    1
+#define DEFAULT_RELAY_PINS  { 3, 4, 5, 6 }           // NOT 2(FEM_EN), NOT 7(FEM_POWER)
+#define DEFAULT_SENSOR_PINS { 3, 4, 5, 6, 15, 16 }  // Valid ADC, NOT 2/7(FEM), NOT 19/20(USB), NOT 38/39(GPS)
+#define SENSOR_PIN_COUNT    6
 
 // ═══════════════════════════════════════════════════════════════
 #elif defined(BOARD_XIAO_S3)
@@ -437,8 +437,8 @@
 // GPIO1,3,8,9,10,33,34,44 used by Wio-SX1262 — leave alone
 #define USER_GPIO_COUNT     4
 #define DEFAULT_RELAY_PINS  { 2, 4, 5, 6 }
-#define DEFAULT_SENSOR_PINS { 43, 44 }
-#define SENSOR_PIN_COUNT    2
+#define DEFAULT_SENSOR_PINS { 2, 4, 5, 6 }  // Valid ADC1 on ESP32-S3 (NOT 43/44=no ADC)
+#define SENSOR_PIN_COUNT    4
 
 // ═══════════════════════════════════════════════════════════════
 #elif defined(BOARD_HELTEC_V2)
