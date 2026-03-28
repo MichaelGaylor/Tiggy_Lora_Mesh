@@ -278,6 +278,7 @@ struct BeaconRule {
     // Runtime only (not saved)
     unsigned long lastTrigger;
     unsigned long lastSeen;
+    unsigned long lastMeshKeepalive;
     bool triggered;
 };
 
@@ -474,7 +475,7 @@ bool bleConnected = false;
 
 // ─── Forward Declarations ────────────────────────────────────
 void bleSend(const String& line);
-void processBleCommand(const String& line);
+void processBleCommand(const String& line, bool fromSerial = false);
 void saveConfig();
 void loadConfig();
 void setupGPIO();
@@ -604,8 +605,12 @@ void matchBeacon(BLEAdvertisedDevice& dev) {
 
         if (r.triggered && r.revertMs > 0) {
             // Already triggered with REVERT active — don't re-fire the action
-            // Notify local serial/BLE only (NOT mesh — broadcasts flood the radio)
             bleSend("BEACON,TRIGGERED," + String(r.name) + ",KEEPALIVE");
+            // Mesh KEEPALIVE every 30s so remote GUI stays updated (not every scan)
+            if (now - r.lastMeshKeepalive > 30000) {
+                notifyBeaconEvent("BEACON,TRIGGERED," + String(r.name) + ",KEEPALIVE", true);
+                r.lastMeshKeepalive = now;
+            }
         } else {
             executeBeaconAction(r);
         }
@@ -923,7 +928,28 @@ bool isPinSafe(int pin) {
 #endif
         BOARD_I2C_SDA, BOARD_I2C_SCL,
         0,  // boot
-        19, 20  // USB D-/D+ on ESP32-S3 — touching these kills native USB
+        19, 20,  // USB D-/D+ on ESP32-S3
+#ifdef VEXT_CTRL
+        VEXT_CTRL,
+#endif
+#ifdef ADC_CTRL
+        ADC_CTRL,
+#endif
+#ifdef RADIO_FEM_EN
+        RADIO_FEM_EN,
+#endif
+#ifdef RADIO_FEM_TXEN
+        RADIO_FEM_TXEN,
+#endif
+#ifdef RADIO_FEM_POWER
+        RADIO_FEM_POWER,
+#endif
+#if BOARD_LED >= 0
+        BOARD_LED,
+#endif
+#if defined(BOARD_GPS_TX) && BOARD_GPS_TX >= 0
+        BOARD_GPS_TX, BOARD_GPS_RX,
+#endif
     };
     for (int f : forbidden) { if (f >= 0 && pin == f) return false; }
     if (pin < 0 || pin > 48) return false;
@@ -1660,6 +1686,7 @@ volatile uint8_t bleCmdTail = 0;
 class BleTxCB : public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic* c) override {
         String data = c->getValue().c_str();
+        if (bleRxBuffer.length() + data.length() > 512) bleRxBuffer = "";  // Prevent unbounded growth
         bleRxBuffer += data;
         while (bleRxBuffer.indexOf('\n') >= 0) {
             int nl = bleRxBuffer.indexOf('\n');
@@ -1734,11 +1761,11 @@ void bleSend(const String& line) {
     }
 }
 
-void processBleCommand(const String& line) {
+void processBleCommand(const String& line, bool fromSerial) {
     debugPrint("BLE CMD: " + line);
 
-    // Setup mode: only allow BLEPIN, STATUS, REBOOT, and EEPROM,RESET until PIN is changed
-    if (blePinIsDefault &&
+    // Setup mode: only enforce PIN for BLE connections, not serial (physical access = trusted)
+    if (blePinIsDefault && !fromSerial &&
         !line.startsWith("BLEPIN,") && line != "STATUS" &&
         line != "REBOOT" && line != "EEPROM,RESET") {
         bleSend("ERR,SETUP_MODE,SET_PIN_FIRST");
@@ -2300,7 +2327,7 @@ void handleSerialConfig() {
              line.startsWith("CMD,") || line.startsWith("MSG,") ||
              line.startsWith("SETPOINT,") || line.startsWith("AUTOPOLL,") ||
              line.startsWith("BEACON,") || line.startsWith("BLEPIN,")) {
-        processBleCommand(line);
+        processBleCommand(line, true);  // fromSerial=true: skip BLE PIN check
     }
     else Serial.println("Commands: ID xxxx | KEY xxx... | RELAY 2,4,12 | SENSOR 34,36 | GPS <tx>,<rx> | GPS OFF | STATUS | SAVE | RESET | GATEWAY ON/OFF | AUTOPOLL <id> <sec> | PINMODE <pin> PULSE|AUTO"
 #if defined(RADIO_SX1262)
@@ -2591,7 +2618,7 @@ void loadConfig() {
 
     // Pin config version check — if version doesn't match, reset to defaults
     // This catches old EEPROM with wrong pins (e.g., 19/20/33 on ESP32-S3)
-    #define PIN_CONFIG_VERSION 3  // Increment when defaults change
+    #define PIN_CONFIG_VERSION 4  // Increment when defaults change
     #define EEPROM_PIN_VER_ADDR (EEPROM_GPIO_ADDR + 30)
     uint8_t pinVer = EEPROM.read(EEPROM_PIN_VER_ADDR);
     if (pinVer != PIN_CONFIG_VERSION) {

@@ -257,8 +257,8 @@
 // Plenty available since ESP32-S3 has many GPIOs
 #define USER_GPIO_COUNT     6
 #define DEFAULT_RELAY_PINS  { 2, 3, 4, 5, 6, 7 }
-#define DEFAULT_SENSOR_PINS { 3, 4, 5, 6, 15, 16 }  // Valid ADC on ESP32-S3 (NOT 19/20=USB, NOT 33=no ADC)
-#define SENSOR_PIN_COUNT    6
+#define DEFAULT_SENSOR_PINS { 15, 16 }  // ADC pins not in relay list (NOT 19/20=USB, NOT 33=no ADC)
+#define SENSOR_PIN_COUNT    2
 
 // ═══════════════════════════════════════════════════════════════
 #elif defined(BOARD_HELTEC_V4)
@@ -341,9 +341,9 @@
 //   GPIO 19/20 = USB D-/D+ (kills USB serial)
 //   GPIO 38/39 = GPS header connector (hardwired to GNSS SH1.25)
 #define USER_GPIO_COUNT     6
-#define DEFAULT_RELAY_PINS  { 3, 4, 5, 6 }           // NOT 2(FEM_EN), NOT 7(FEM_POWER)
-#define DEFAULT_SENSOR_PINS { 3, 4, 5, 6, 15, 16 }  // Valid ADC, NOT 2/7(FEM), NOT 19/20(USB), NOT 38/39(GPS)
-#define SENSOR_PIN_COUNT    6
+#define DEFAULT_RELAY_PINS  { 3, 4, 5, 6 }   // NOT 2(FEM_EN), NOT 7(FEM_POWER)
+#define DEFAULT_SENSOR_PINS { 15, 16 }       // ADC pins not in relay list
+#define SENSOR_PIN_COUNT    2
 
 // ═══════════════════════════════════════════════════════════════
 #elif defined(BOARD_XIAO_S3)

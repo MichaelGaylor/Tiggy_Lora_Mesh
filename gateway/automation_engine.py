@@ -588,7 +588,7 @@ class AutomationEngine:
                 block.error = f"Waiting for {node_id}"
                 block.status = "active"
                 return {"detected": False, "rssi": 0}
-            if triggered and age < 15:
+            if triggered and age < 45:  # 30s mesh KEEPALIVE + 15s margin
                 block.error = ""
                 block.status = "triggered"
                 return {"detected": True, "rssi": entry.get("rssi", 0)}
