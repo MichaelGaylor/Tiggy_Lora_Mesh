@@ -2278,6 +2278,7 @@ void saveBeaconRules() {
         EEPROM.put(addr + 76, beaconRules[i].message);
         EEPROM.put(addr + 108, beaconRules[i].cooldownMs);
         EEPROM.put(addr + 110, beaconRules[i].revertMs);
+        EEPROM.put(addr + 112, beaconRules[i].targetNode);
     }
     EEPROM.commit();
 }
@@ -2298,6 +2299,8 @@ void loadBeaconRules() {
         EEPROM.get(addr + 76, beaconRules[i].message);
         EEPROM.get(addr + 108, beaconRules[i].cooldownMs);
         EEPROM.get(addr + 110, beaconRules[i].revertMs);
+        EEPROM.get(addr + 112, beaconRules[i].targetNode);
+        beaconRules[i].targetNode[4] = '\0';  // Ensure null-terminated
         beaconRules[i].lastTrigger = 0;
         beaconRules[i].lastSeen = 0;
         beaconRules[i].triggered = false;
