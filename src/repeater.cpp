@@ -2589,6 +2589,19 @@ void loadConfig() {
     if (sensorCount > MAX_SENSOR_PINS_CFG) sensorCount = 0;
     EEPROM.get(EEPROM_GPIO_ADDR + 2 + MAX_RELAY_PINS_CFG, sensorPins);
 
+    // Pin config version check — if version doesn't match, reset to defaults
+    // This catches old EEPROM with wrong pins (e.g., 19/20/33 on ESP32-S3)
+    #define PIN_CONFIG_VERSION 3  // Increment when defaults change
+    #define EEPROM_PIN_VER_ADDR (EEPROM_GPIO_ADDR + 30)
+    uint8_t pinVer = EEPROM.read(EEPROM_PIN_VER_ADDR);
+    if (pinVer != PIN_CONFIG_VERSION) {
+        uint8_t d[] = DEFAULT_RELAY_PINS; relayCount = sizeof(d)/sizeof(d[0]); memcpy(relayPins, d, relayCount);
+        uint8_t s[] = DEFAULT_SENSOR_PINS; sensorCount = sizeof(s)/sizeof(s[0]); memcpy(sensorPins, s, sensorCount);
+        EEPROM.write(EEPROM_PIN_VER_ADDR, PIN_CONFIG_VERSION);
+        EEPROM.commit();
+        debugPrint("Pin config updated to v" + String(PIN_CONFIG_VERSION) + " — reset to board defaults");
+    }
+
     // Load solar mode flag
     uint8_t solarByte = EEPROM.read(EEPROM_SOLAR_ADDR);
     solarMode = (solarByte == 1);
