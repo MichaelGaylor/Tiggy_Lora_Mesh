@@ -310,6 +310,52 @@ struct RelayTimer {
 };
 RelayTimer timers[MAX_TIMERS];
 
+void bleSend(const String& line);  // Forward declaration for deadman
+
+// ─── Dead-man's Switch (auto-revert relay if no refresh) ────
+#define MAX_DEADMANS 6
+#define DEADMAN_TIMEOUT_MS 120000  // 2 minutes
+struct RelayDeadman {
+    bool active = false;
+    uint8_t pin;
+    uint8_t activeState;
+    unsigned long lastRefresh;
+};
+RelayDeadman deadmans[MAX_DEADMANS];
+
+void checkDeadmans() {
+    unsigned long now = millis();
+    for (int i = 0; i < MAX_DEADMANS; i++) {
+        RelayDeadman& dm = deadmans[i];
+        if (!dm.active) continue;
+        if (now - dm.lastRefresh > DEADMAN_TIMEOUT_MS) {
+            digitalWrite(dm.pin, dm.activeState ? LOW : HIGH);
+            dm.active = false;
+            debugPrint("DEADMAN: pin " + String(dm.pin) + " reverted (no refresh)");
+            bleSend("DEADMAN,REVERTED," + String(dm.pin));
+        }
+    }
+}
+
+void refreshDeadman(uint8_t pin, uint8_t state) {
+    for (int i = 0; i < MAX_DEADMANS; i++) {
+        if (deadmans[i].active && deadmans[i].pin == pin) {
+            deadmans[i].lastRefresh = millis();
+            return;
+        }
+    }
+    // New entry
+    for (int i = 0; i < MAX_DEADMANS; i++) {
+        if (!deadmans[i].active) {
+            deadmans[i].active = true;
+            deadmans[i].pin = pin;
+            deadmans[i].activeState = state;
+            deadmans[i].lastRefresh = millis();
+            return;
+        }
+    }
+}
+
 // ─── On-Node Setpoints ──────────────────────────────────────
 // Action types:
 //   0 = RELAY  — send CMD,SET to targetNode (or local digitalWrite if target is self)
@@ -1377,6 +1423,7 @@ void handleCmd(const String& from, const String& cmdBody) {
         if (!isPinSafe(pin)) return;
         pinMode(pin, OUTPUT);
         digitalWrite(pin, val ? HIGH : LOW);
+        refreshDeadman(pin, val);  // Start/refresh dead-man's switch
         mesh.cmdsExecuted++;
         // Send response back over mesh
         String mid = mesh.generateMsgID();
@@ -2955,8 +3002,9 @@ void loop() {
     // 10. Auto-poll periodic sensor reporting
     executeAutoPoll();
 
-    // 11. iBeacon scanner
+    // 11. iBeacon scanner + dead-man's switch
     checkBeacons();
+    checkDeadmans();
 
     // 12. Button → manual heartbeat
 #if defined(BOARD_BUTTON) && BOARD_BUTTON >= 0

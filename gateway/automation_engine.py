@@ -321,6 +321,7 @@ class AutomationEngine:
         self.local_node_id = ""  # Set by gateway GUI after connecting
         self.beacon_data: dict[str, dict] = {}  # beacon_name → {timestamp, rssi, triggered}
         self.deployed_beacons: set[str] = set()  # beacon IDs that have been deployed
+        self._pending_relay_cmds: list[dict] = []  # Awaiting ACK [{node, pin, sent_at}]
         self.rules: list[Rule] = []
         self.rules_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rules.json")
 
@@ -415,6 +416,9 @@ class AutomationEngine:
 
         # Drain one command from the queue if spacing allows
         self._drain_queue(now)
+
+        # Check for relay commands that never got ACKed
+        self._check_relay_timeouts(now)
 
         self._ensure_data_freshness(now)
 
@@ -793,11 +797,28 @@ class AutomationEngine:
         self._cmd_timestamps.append(now)
         block.status = "triggered"
         self._log(rule_name, log_msg)
+        # Track relay commands for ACK timeout alert
+        if "CMD,SET" in cmd or "CMD,PULSE" in cmd:
+            self._pending_relay_cmds.append({"cmd": cmd, "sent_at": now})
 
     @property
     def queue_depth(self) -> int:
         """Number of commands waiting to be sent."""
         return len(self._cmd_queue)
+
+    def _check_relay_timeouts(self, now: float):
+        """Alert if relay commands got no ACK within 15 seconds."""
+        for pending in list(self._pending_relay_cmds):
+            if now - pending["sent_at"] > 15.0:
+                msg = f"No ACK for relay command: {pending['cmd'][:40]}"
+                self._log("Alert", msg)
+                if hasattr(self, 'telegram_bridge') and self.telegram_bridge:
+                    try:
+                        self.telegram_bridge.send_alert_threadsafe(
+                            f"ALERT: {msg}")
+                    except Exception:
+                        pass
+                self._pending_relay_cmds.remove(pending)
 
     def _ensure_data_freshness(self, now: float):
         """Auto-poll nodes referenced by active rules at the rule's eval_interval."""
