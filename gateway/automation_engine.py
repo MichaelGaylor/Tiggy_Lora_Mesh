@@ -338,6 +338,7 @@ class AutomationEngine:
         self.beacon_data: dict[str, dict] = {}  # beacon_name → {timestamp, rssi, triggered}
         self.deployed_beacons: set[str] = set()  # beacon IDs that have been deployed
         self._pending_relay_cmds: list[dict] = []  # Awaiting ACK [{node, pin, sent_at}]
+        self.node_pin_configs: dict[str, tuple[list[str], list[str]]] = {}  # nodeId → (relay_pins, sensor_pins)
         self.rules: list[Rule] = []
         self.rules_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rules.json")
 
