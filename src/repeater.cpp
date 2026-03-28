@@ -471,6 +471,17 @@ void broadcastGPS() {
 // SECTION: iBeacon Scanner
 // ═══════════════════════════════════════════════════════════════
 
+// Broadcast beacon event over mesh so remote gateway GUI can see it
+void broadcastBeaconEvent(const String& event) {
+    bleSend(event);  // Local serial/BLE
+    // Also broadcast over mesh for remote gateways
+    String mid = mesh.generateMsgID();
+    String hex = mesh.encryptMsg("CMD,BEACONEVT," + event);
+    String payload = String(mesh.localID) + ",FFFF," + mid + "," +
+                     String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+    mesh.transmitPacket(0xFFFF, payload);
+}
+
 void executeBeaconAction(BeaconRule& r) {
     if (r.actionType == 0) {
         // Relay action — local or remote
@@ -490,7 +501,7 @@ void executeBeaconAction(BeaconRule& r) {
             debugPrint("BEACON: " + String(r.name) + " -> pin " + String(r.relayPin) + "=" + String(r.relayState));
         }
         r.triggered = true;
-        bleSend("BEACON,TRIGGERED," + String(r.name) + ",RELAY," + String(r.relayPin));
+        broadcastBeaconEvent("BEACON,TRIGGERED," + String(r.name) + ",RELAY," + String(r.relayPin));
     } else {
         // Broadcast message over mesh
         String mid = mesh.generateMsgID();
@@ -500,7 +511,7 @@ void executeBeaconAction(BeaconRule& r) {
         mesh.transmitPacket(0xFFFF, payload);
         r.triggered = true;
         debugPrint("BEACON: " + String(r.name) + " -> broadcast: " + String(r.message));
-        bleSend("BEACON,TRIGGERED," + String(r.name) + ",MSG," + String(r.message));
+        broadcastBeaconEvent("BEACON,TRIGGERED," + String(r.name) + ",MSG," + String(r.message));
     }
 }
 
@@ -546,7 +557,7 @@ void matchBeacon(BLEAdvertisedDevice& dev) {
         if (r.triggered && r.revertMs > 0) {
             // Already triggered with REVERT active — don't re-fire the action
             // but DO notify the GUI so monostable/beacon_data stays alive
-            bleSend("BEACON,TRIGGERED," + String(r.name) + ",KEEPALIVE");
+            broadcastBeaconEvent("BEACON,TRIGGERED," + String(r.name) + ",KEEPALIVE");
         } else {
             executeBeaconAction(r);
         }
@@ -1474,6 +1485,10 @@ void handleCmd(const String& from, const String& cmdBody) {
     }
     else if (action == "STATUS") {
         processBleCommand("STATUS");
+    }
+    else if (action == "BEACONEVT") {
+        // Beacon event from remote node — forward to local serial/BLE for GUI
+        bleSend(rest);
     }
 }
 
