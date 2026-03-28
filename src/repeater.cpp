@@ -518,14 +518,16 @@ void broadcastGPS() {
 // ═══════════════════════════════════════════════════════════════
 
 // Broadcast beacon event over mesh so remote gateway GUI can see it
-void broadcastBeaconEvent(const String& event) {
-    bleSend(event);  // Local serial/BLE
-    // Also broadcast over mesh for remote gateways
-    String mid = mesh.generateMsgID();
-    String hex = mesh.encryptMsg("CMD,BEACONEVT," + event);
-    String payload = String(mesh.localID) + ",FFFF," + mid + "," +
-                     String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
-    mesh.transmitPacket(0xFFFF, payload);
+// Notify beacon event — local only (bleSend), plus ONE mesh broadcast on edge events
+void notifyBeaconEvent(const String& event, bool meshBroadcast = false) {
+    bleSend(event);
+    if (meshBroadcast) {
+        String mid = mesh.generateMsgID();
+        String hex = mesh.encryptMsg("CMD,BEACONEVT," + event);
+        String payload = String(mesh.localID) + ",FFFF," + mid + "," +
+                         String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+        mesh.transmitPacket(0xFFFF, payload);
+    }
 }
 
 void executeBeaconAction(BeaconRule& r) {
@@ -547,7 +549,7 @@ void executeBeaconAction(BeaconRule& r) {
             debugPrint("BEACON: " + String(r.name) + " -> pin " + String(r.relayPin) + "=" + String(r.relayState));
         }
         r.triggered = true;
-        broadcastBeaconEvent("BEACON,TRIGGERED," + String(r.name) + ",RELAY," + String(r.relayPin));
+        notifyBeaconEvent("BEACON,TRIGGERED," + String(r.name) + ",RELAY," + String(r.relayPin), true);  // Edge: broadcast once
     } else {
         // Broadcast message over mesh
         String mid = mesh.generateMsgID();
@@ -557,7 +559,7 @@ void executeBeaconAction(BeaconRule& r) {
         mesh.transmitPacket(0xFFFF, payload);
         r.triggered = true;
         debugPrint("BEACON: " + String(r.name) + " -> broadcast: " + String(r.message));
-        broadcastBeaconEvent("BEACON,TRIGGERED," + String(r.name) + ",MSG," + String(r.message));
+        notifyBeaconEvent("BEACON,TRIGGERED," + String(r.name) + ",MSG," + String(r.message), true);  // Edge: broadcast once
     }
 }
 
@@ -602,8 +604,8 @@ void matchBeacon(BLEAdvertisedDevice& dev) {
 
         if (r.triggered && r.revertMs > 0) {
             // Already triggered with REVERT active — don't re-fire the action
-            // but DO notify the GUI so monostable/beacon_data stays alive
-            broadcastBeaconEvent("BEACON,TRIGGERED," + String(r.name) + ",KEEPALIVE");
+            // Notify local serial/BLE only (NOT mesh — broadcasts flood the radio)
+            bleSend("BEACON,TRIGGERED," + String(r.name) + ",KEEPALIVE");
         } else {
             executeBeaconAction(r);
         }
@@ -622,7 +624,7 @@ void checkBeaconReverts() {
             digitalWrite(r.relayPin, r.relayState ? LOW : HIGH);  // Opposite state
             r.triggered = false;
             debugPrint("BEACON: " + String(r.name) + " -> REVERTED pin " + String(r.relayPin));
-            bleSend("BEACON,REVERTED," + String(r.name));
+            notifyBeaconEvent("BEACON,REVERTED," + String(r.name), true);  // Edge: broadcast once
         }
     }
 }
@@ -2347,7 +2349,12 @@ void loadBeaconRules() {
         EEPROM.get(addr + 108, beaconRules[i].cooldownMs);
         EEPROM.get(addr + 110, beaconRules[i].revertMs);
         EEPROM.get(addr + 112, beaconRules[i].targetNode);
-        beaconRules[i].targetNode[4] = '\0';  // Ensure null-terminated
+        beaconRules[i].targetNode[4] = '\0';
+        // Validate: must be 4 hex chars or empty — old EEPROM has garbage here
+        if (beaconRules[i].targetNode[0] &&
+            !mesh.isValidNodeID(String(beaconRules[i].targetNode))) {
+            beaconRules[i].targetNode[0] = '\0';  // Clear garbage → local relay
+        }
         beaconRules[i].lastTrigger = 0;
         beaconRules[i].lastSeen = 0;
         beaconRules[i].triggered = false;

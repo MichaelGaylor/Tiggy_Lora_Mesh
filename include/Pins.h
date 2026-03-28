@@ -342,8 +342,8 @@
 //   GPIO 38/39 = GPS header connector (hardwired to GNSS SH1.25)
 #define USER_GPIO_COUNT     6
 #define DEFAULT_RELAY_PINS  { 2, 3, 4, 5, 6, 7 }
-#define DEFAULT_SENSOR_PINS { 33, 34, 15 }
-#define SENSOR_PIN_COUNT    3
+#define DEFAULT_SENSOR_PINS { 15 }       // Only pin 15 is ADC on ESP32-S3 (pins 33,34 are NOT analog)
+#define SENSOR_PIN_COUNT    1
 
 // ═══════════════════════════════════════════════════════════════
 #elif defined(BOARD_XIAO_S3)

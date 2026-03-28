@@ -965,7 +965,7 @@ class AutomationEngine:
             relay_node = relays[0].config.get("node_id", "").strip()
             relay_pin = relays[0].config.get("pin", 2)
             action = relays[0].config.get("action", 1)
-            cooldown = 5
+            cooldown = int(rule.action_gap * 1000)  # From GUI "Min action gap" in ms
             # Include target node if relay is on a different node than the scanner
             if relay_node and relay_node != node_id:
                 action_part = f"RELAY,{relay_node},{relay_pin},{action},{cooldown}"
