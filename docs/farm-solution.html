@@ -3,759 +3,682 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>TiggyOpenMesh Farm Management System</title>
+<title>TiggyOpenMesh — Farm Connectivity</title>
 <style>
-  /* ── Reset & Base ─────────────────────────────────────────── */
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  html { scroll-behavior: smooth; }
-  body {
-    font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, Oxygen, Ubuntu, sans-serif;
-    background: #FFFFFF;
-    color: #1a1a1a;
-    line-height: 1.65;
-    overflow-x: hidden;
-  }
-  a { color: #2E7D32; text-decoration: none; transition: color .2s; }
-  a:hover { color: #4CAF50; }
+/* ── Reset & Base ─────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+body {
+  font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, Oxygen, Ubuntu, sans-serif;
+  background: #FFFFFF; color: #1a1a1a; line-height: 1.65; overflow-x: hidden;
+}
+a { color: #2E7D32; text-decoration: none; transition: color .2s; }
+a:hover { color: #4CAF50; }
 
-  /* ── Utility ──────────────────────────────────────────────── */
-  .container { max-width: 1140px; margin: 0 auto; padding: 0 24px; }
-  .section { padding: 80px 0; }
-  .section-title {
-    font-size: 2.1rem; font-weight: 700; text-align: center;
-    margin-bottom: 12px; color: #1a1a1a;
-  }
-  .section-subtitle {
-    text-align: center; color: #555; font-size: 1.1rem;
-    max-width: 620px; margin: 0 auto 48px;
-  }
+/* ── Utility ──────────────────────────────────────────────── */
+.container { max-width: 1100px; margin: 0 auto; padding: 0 24px; }
+.section { padding: 80px 0; }
+.section-alt { background: #f6faf6; }
+.section-title {
+  font-size: 2rem; font-weight: 700; text-align: center;
+  margin-bottom: 12px; color: #1a1a1a;
+}
+.section-subtitle {
+  text-align: center; color: #555; font-size: 1.08rem;
+  max-width: 600px; margin: 0 auto 48px;
+}
 
-  /* ── Navigation ───────────────────────────────────────────── */
-  nav {
-    position: fixed; top: 0; left: 0; right: 0; z-index: 100;
-    background: rgba(255,255,255,.92); backdrop-filter: blur(12px);
-    border-bottom: 1px solid rgba(46,125,50,.15);
-    padding: 0 24px; height: 60px; display: flex; align-items: center;
-  }
-  nav .brand {
-    font-size: 1.15rem; font-weight: 700; color: #1a1a1a;
-    display: flex; align-items: center; gap: 10px;
-  }
-  nav .brand .dot { width: 10px; height: 10px; border-radius: 50%; background: #4CAF50;
-    box-shadow: 0 0 8px rgba(76,175,80,.5); animation: pulse-dot 2s infinite; }
-  @keyframes pulse-dot {
-    0%, 100% { box-shadow: 0 0 4px rgba(76,175,80,.4); }
-    50% { box-shadow: 0 0 16px rgba(76,175,80,.5), 0 0 32px rgba(76,175,80,.2); }
-  }
-  nav ul { list-style: none; display: flex; gap: 28px; margin-left: auto; }
-  nav ul li a { color: #555; font-size: .9rem; font-weight: 500; }
-  nav ul li a:hover { color: #2E7D32; }
+/* ── Navigation ───────────────────────────────────────────── */
+nav {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+  background: rgba(255,255,255,.94); backdrop-filter: blur(12px);
+  border-bottom: 1px solid rgba(46,125,50,.15);
+  padding: 0 24px; height: 58px; display: flex; align-items: center;
+  justify-content: space-between;
+}
+nav .brand {
+  font-size: 1.12rem; font-weight: 700; color: #1a1a1a;
+  display: flex; align-items: center; gap: 10px;
+}
+nav .brand .dot {
+  width: 10px; height: 10px; border-radius: 50%; background: #4CAF50;
+  box-shadow: 0 0 8px rgba(76,175,80,.5); animation: pulse-dot 2s infinite;
+}
+nav .back-link {
+  font-size: .95rem; font-weight: 500; color: #2E7D32;
+  display: flex; align-items: center; gap: 6px;
+}
+nav .back-link:hover { color: #4CAF50; }
+@keyframes pulse-dot {
+  0%, 100% { box-shadow: 0 0 4px rgba(76,175,80,.4); }
+  50% { box-shadow: 0 0 16px rgba(76,175,80,.5), 0 0 32px rgba(76,175,80,.2); }
+}
 
-  /* ── Hero ──────────────────────────────────────────────────── */
-  .hero {
-    position: relative; min-height: 100vh; display: flex; align-items: center;
-    justify-content: center; text-align: center; overflow: hidden;
-    background: linear-gradient(135deg, #2E7D32 0%, #4CAF50 40%, #66BB6A 70%, #81C784 100%);
-  }
-  .hero::before {
-    content: ''; position: absolute; inset: 0;
-    background:
-      radial-gradient(circle at 20% 30%, rgba(255,255,255,.1) 0%, transparent 50%),
-      radial-gradient(circle at 80% 60%, rgba(255,255,255,.08) 0%, transparent 50%);
-    pointer-events: none;
-  }
+/* ── Hero ─────────────────────────────────────────────────── */
+.hero {
+  padding: 140px 24px 80px; text-align: center;
+  background: linear-gradient(180deg, #f0f9f0 0%, #fff 100%);
+}
+.hero h1 { font-size: 3rem; font-weight: 800; color: #1a1a1a; margin-bottom: 16px; }
+.hero h1 span { color: #2E7D32; }
+.hero p { font-size: 1.18rem; color: #555; max-width: 540px; margin: 0 auto 40px; }
+.hero-svg-wrap { max-width: 700px; margin: 0 auto; }
+.hero-svg-wrap svg { width: 100%; height: auto; }
 
-  /* ── CSS Mesh Network Visualisation ───────────────────────── */
-  .mesh-viz {
-    position: absolute; inset: 0; pointer-events: none; overflow: hidden;
-  }
-  .mesh-node {
-    position: absolute; width: 8px; height: 8px; border-radius: 50%;
-    background: rgba(255,255,255,.6); opacity: .35;
-    box-shadow: 0 0 6px rgba(255,255,255,.4);
-    animation: mesh-glow 4s ease-in-out infinite;
-  }
-  .mesh-node::after {
-    content: ''; position: absolute; top: 50%; left: 50%;
-    width: 20px; height: 20px; border-radius: 50%;
-    border: 1px solid rgba(255,255,255,.2);
-    transform: translate(-50%,-50%);
-  }
-  @keyframes mesh-glow {
-    0%,100% { opacity: .25; } 50% { opacity: .55; }
-  }
-  .mesh-node:nth-child(2) { animation-delay: .5s; }
-  .mesh-node:nth-child(3) { animation-delay: 1s; }
-  .mesh-node:nth-child(4) { animation-delay: 1.5s; }
-  .mesh-node:nth-child(5) { animation-delay: 2s; }
-  .mesh-node:nth-child(6) { animation-delay: 2.5s; }
-  .mesh-node:nth-child(7) { animation-delay: .8s; }
-  .mesh-node:nth-child(8) { animation-delay: 1.3s; }
-  .mesh-node:nth-child(9) { animation-delay: 3s; }
-  .mesh-node:nth-child(10) { animation-delay: 1.8s; }
-  .mesh-node:nth-child(11) { animation-delay: 0.3s; }
-  .mesh-node:nth-child(12) { animation-delay: 2.2s; }
+/* SVG animated lines */
+.mesh-line {
+  stroke: #81C784; stroke-width: 2; fill: none;
+  stroke-dasharray: 8 6; animation: dash-flow 1.8s linear infinite;
+}
+@keyframes dash-flow { to { stroke-dashoffset: -28; } }
 
-  .mesh-line {
-    position: absolute; height: 1px;
-    background: linear-gradient(90deg, transparent, rgba(255,255,255,.25), transparent);
-    transform-origin: 0 0;
-  }
+/* SVG animated data dots */
+.data-dot { fill: #FF9800; }
+.data-dot-1 { animation: flow-1 4s linear infinite; }
+.data-dot-2 { animation: flow-2 5s linear infinite; }
+.data-dot-3 { animation: flow-3 4.5s linear infinite; }
+.data-dot-4 { animation: flow-4 3.8s linear infinite; }
+.data-dot-5 { animation: flow-5 4.2s linear infinite; }
 
-  .hero-content { position: relative; z-index: 2; padding: 120px 24px 80px; }
-  .hero-badge {
-    display: inline-block; padding: 6px 18px; border-radius: 20px;
-    background: rgba(255,255,255,.2); border: 1px solid rgba(255,255,255,.35);
-    color: #fff; font-size: .85rem; font-weight: 600;
-    letter-spacing: .5px; margin-bottom: 24px;
-  }
-  .hero h1 {
-    font-size: clamp(2.4rem, 5.5vw, 3.8rem); font-weight: 800;
-    color: #fff; line-height: 1.15; margin-bottom: 16px;
-  }
-  .hero h1 .accent { color: #fff; text-shadow: 0 2px 8px rgba(0,0,0,.15); }
-  .hero .tagline {
-    font-size: clamp(1.05rem, 2.5vw, 1.35rem); color: rgba(255,255,255,.9);
-    max-width: 600px; margin: 0 auto 36px; font-weight: 400;
-  }
-  .hero-buttons { display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; }
-  .btn {
-    display: inline-flex; align-items: center; gap: 8px;
-    padding: 14px 32px; border-radius: 8px; font-size: 1rem;
-    font-weight: 600; cursor: pointer; border: none; transition: all .25s;
-  }
-  .btn-primary {
-    background: #fff; color: #2E7D32;
-    box-shadow: 0 4px 20px rgba(0,0,0,.15);
-  }
-  .btn-primary:hover {
-    background: #F5F7F5; transform: translateY(-2px);
-    box-shadow: 0 8px 30px rgba(0,0,0,.2);
-  }
-  .btn-outline {
-    background: transparent; color: #fff;
-    border: 2px solid rgba(255,255,255,.6);
-  }
-  .btn-outline:hover {
-    background: rgba(255,255,255,.15); border-color: #fff;
-    transform: translateY(-2px);
-  }
+/* Node pulse rings */
+.node-ring {
+  fill: none; stroke: #4CAF50; stroke-width: 1.5; opacity: 0;
+  animation: ring-pulse 3s ease-out infinite;
+}
+.node-ring-d1 { animation-delay: 0s; }
+.node-ring-d2 { animation-delay: 1s; }
+.node-ring-d3 { animation-delay: 1.5s; }
+.node-ring-d4 { animation-delay: 0.5s; }
+@keyframes ring-pulse {
+  0% { r: 14; opacity: .6; }
+  100% { r: 28; opacity: 0; }
+}
 
-  /* ── Feature Cards (Key Selling Points) ───────────────────── */
-  .features-grid {
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 24px;
-  }
-  .feature-card {
-    background: #FFFFFF;
-    border: 1px solid rgba(46,125,50,.15); border-radius: 14px;
-    padding: 32px 24px; text-align: center; transition: all .3s;
-    box-shadow: 0 2px 12px rgba(0,0,0,.04);
-  }
-  .feature-card:hover {
-    border-color: rgba(46,125,50,.35);
-    transform: translateY(-4px);
-    box-shadow: 0 8px 32px rgba(46,125,50,.1);
-  }
-  .feature-icon {
-    width: 56px; height: 56px; border-radius: 14px; margin: 0 auto 18px;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 1.6rem;
-    background: rgba(76,175,80,.08); border: 1px solid rgba(76,175,80,.2);
-  }
-  .feature-card h3 { font-size: 1.05rem; color: #1a1a1a; margin-bottom: 8px; }
-  .feature-card p { font-size: .9rem; color: #555; line-height: 1.55; }
+/* Node icons */
+.node-icon { fill: #2E7D32; }
+.node-label { font-size: 11px; fill: #333; font-family: inherit; text-anchor: middle; font-weight: 600; }
 
-  /* ── Use-Case Sections ────────────────────────────────────── */
-  .use-cases { background: #F5F7F5; }
-  .use-case-grid {
-    display: grid; gap: 32px;
-    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
-  }
-  .use-case-card {
-    background: #FFFFFF;
-    border: 1px solid rgba(46,125,50,.1); border-radius: 16px;
-    padding: 36px 32px; transition: all .3s; position: relative; overflow: hidden;
-    box-shadow: 0 2px 12px rgba(0,0,0,.04);
-  }
-  .use-case-card::before {
-    content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;
-    background: linear-gradient(90deg, transparent, #4CAF50, transparent);
-    opacity: 0; transition: opacity .3s;
-  }
-  .use-case-card:hover { border-color: rgba(46,125,50,.25); transform: translateY(-3px); box-shadow: 0 8px 24px rgba(0,0,0,.06); }
-  .use-case-card:hover::before { opacity: 1; }
-  .use-case-header { display: flex; align-items: center; gap: 14px; margin-bottom: 20px; }
-  .use-case-emoji { font-size: 2rem; line-height: 1; }
-  .use-case-header h3 { font-size: 1.25rem; color: #1a1a1a; }
-  .use-case-card ul { list-style: none; display: flex; flex-direction: column; gap: 10px; }
-  .use-case-card li {
-    position: relative; padding-left: 22px; color: #555; font-size: .95rem;
-  }
-  .use-case-card li::before {
-    content: ''; position: absolute; left: 0; top: 8px;
-    width: 8px; height: 8px; border-radius: 50%;
-    background: #4CAF50; opacity: .7;
-  }
+/* ── Steps ────────────────────────────────────────────────── */
+.steps-grid {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 36px;
+}
+.step-card {
+  text-align: center; padding: 36px 20px;
+  border-radius: 16px; background: #fff;
+  border: 1px solid #e8f5e9;
+  box-shadow: 0 2px 12px rgba(0,0,0,.04);
+}
+.step-num {
+  width: 52px; height: 52px; border-radius: 50%;
+  background: #e8f5e9; color: #2E7D32;
+  font-size: 1.4rem; font-weight: 800;
+  display: inline-flex; align-items: center; justify-content: center;
+  margin-bottom: 18px;
+}
+.step-card h3 { font-size: 1.15rem; margin-bottom: 8px; color: #1a1a1a; }
+.step-card p { color: #666; font-size: .96rem; }
 
-  /* ── Specs ─────────────────────────────────────────────────── */
-  .specs { background: #FFFFFF; }
-  .specs-wrapper {
-    display: grid; grid-template-columns: 1fr 1fr; gap: 48px;
-    align-items: start;
-  }
-  .specs-table { width: 100%; border-collapse: collapse; }
-  .specs-table tr { border-bottom: 1px solid rgba(46,125,50,.1); }
-  .specs-table td { padding: 14px 16px; font-size: .95rem; }
-  .specs-table td:first-child { color: #555; font-weight: 500; width: 40%; }
-  .specs-table td:last-child { color: #1a1a1a; }
-  .specs-visual {
-    display: flex; flex-direction: column; align-items: center;
-    justify-content: center; gap: 20px; padding: 24px;
-    background: #F5F7F5; border: 1px solid rgba(46,125,50,.1);
-    border-radius: 16px;
-  }
-  .specs-visual h3 { color: #1a1a1a; font-size: 1.1rem; }
+/* ── Use Cases ────────────────────────────────────────────── */
+.use-case {
+  display: flex; align-items: center; gap: 48px;
+  padding: 48px 0;
+}
+.use-case:nth-child(even) { flex-direction: row-reverse; }
+.use-case-icon {
+  flex: 0 0 120px; height: 120px;
+  background: #e8f5e9; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+}
+.use-case-icon svg { width: 56px; height: 56px; }
+.use-case-text { flex: 1; }
+.use-case-text h3 { font-size: 1.4rem; margin-bottom: 10px; color: #2E7D32; }
+.use-case-text p { color: #555; font-size: 1.02rem; line-height: 1.7; }
 
-  /* CSS-only network diagram */
-  .network-diagram {
-    position: relative; width: 260px; height: 220px;
-  }
-  .network-diagram svg { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; }
-  .nd-node {
-    position: absolute; width: 42px; height: 42px; border-radius: 50%;
-    display: flex; align-items: center; justify-content: center;
-    font-size: .75rem; font-weight: 700; color: #fff;
-    z-index: 2;
-  }
-  .nd-gateway {
-    background: #2E7D32; top: 10px; left: 109px;
-    width: 48px; height: 48px; font-size: .8rem;
-    box-shadow: 0 0 20px rgba(46,125,50,.35);
-  }
-  .nd-n1 { background: #4CAF50; top: 85px; left: 30px; }
-  .nd-n2 { background: #4CAF50; top: 85px; left: 188px; }
-  .nd-n3 { background: #66BB6A; top: 160px; left: 0px; }
-  .nd-n4 { background: #66BB6A; top: 160px; left: 109px; }
-  .nd-n5 { background: #66BB6A; top: 160px; left: 218px; }
+/* ── Self-Healing ─────────────────────────────────────────── */
+.heal-svg-wrap { max-width: 520px; margin: 0 auto; }
+.heal-svg-wrap svg { width: 100%; height: auto; }
 
-  .nd-label { font-size: .8rem; color: #555; text-align: center; margin-top: 4px; }
+.heal-node { transition: opacity 1s; }
+.heal-old-route { stroke: #ccc; stroke-width: 2; stroke-dasharray: 6 4; opacity: 0; }
+.heal-new-route { stroke: #4CAF50; stroke-width: 2.5; stroke-dasharray: 8 5; opacity: 0; }
 
-  /* ── Pricing ──────────────────────────────────────────────── */
-  .pricing { background: #F5F7F5; }
-  .pricing-grid {
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-    gap: 28px; margin-bottom: 36px;
-  }
-  .pricing-card {
-    background: #FFFFFF;
-    border: 1px solid rgba(46,125,50,.12); border-radius: 16px;
-    padding: 36px 28px; text-align: center; transition: all .3s;
-    position: relative; box-shadow: 0 2px 12px rgba(0,0,0,.04);
-  }
-  .pricing-card.featured {
-    border-color: #4CAF50;
-    box-shadow: 0 4px 24px rgba(76,175,80,.15);
-  }
-  .pricing-card.featured::before {
-    content: 'Most Popular'; position: absolute; top: -12px; left: 50%;
-    transform: translateX(-50%); background: #4CAF50; color: #fff;
-    font-size: .75rem; font-weight: 700; padding: 4px 16px;
-    border-radius: 12px; letter-spacing: .3px;
-  }
-  .pricing-card:hover { transform: translateY(-4px); border-color: rgba(76,175,80,.35); box-shadow: 0 8px 24px rgba(0,0,0,.06); }
-  .pricing-card h3 { color: #1a1a1a; font-size: 1.2rem; margin-bottom: 6px; }
-  .pricing-desc { color: #555; font-size: .85rem; margin-bottom: 20px; }
-  .pricing-amount {
-    font-size: 2.8rem; font-weight: 800; color: #2E7D32;
-    margin-bottom: 4px; line-height: 1.1;
-  }
-  .pricing-amount .currency { font-size: 1.4rem; vertical-align: super; }
-  .pricing-amount .approx { font-size: .9rem; font-weight: 400; color: #555; }
-  .pricing-note { font-size: .8rem; color: #888; margin-bottom: 24px; }
-  .pricing-features { list-style: none; text-align: left; margin-bottom: 28px; }
-  .pricing-features li {
-    padding: 8px 0; border-bottom: 1px solid rgba(46,125,50,.08);
-    font-size: .9rem; color: #555; padding-left: 24px; position: relative;
-  }
-  .pricing-features li::before {
-    content: '\2713'; position: absolute; left: 0; color: #4CAF50; font-weight: 700;
-  }
-  .pricing-no-fees {
-    text-align: center; padding: 20px; background: rgba(76,175,80,.06);
-    border: 1px dashed rgba(76,175,80,.3); border-radius: 12px;
-    max-width: 520px; margin: 0 auto;
-  }
-  .pricing-no-fees p {
-    font-size: 1.15rem; font-weight: 700; color: #2E7D32;
-  }
-  .pricing-no-fees span { font-size: .9rem; color: #555; font-weight: 400; }
+/* heal animation states */
+.heal-active .heal-fail-node { opacity: .15; }
+.heal-active .heal-old-route { opacity: .3; }
+.heal-active .heal-new-route { opacity: 1; animation: dash-flow 1.6s linear infinite; }
+.heal-active .heal-new-dot { animation: heal-dot-flow 2.5s linear infinite; }
 
-  /* ── How It Works ─────────────────────────────────────────── */
-  .how-it-works { background: #FFFFFF; }
-  .steps-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 32px; }
-  .step {
-    text-align: center; padding: 24px 16px; position: relative;
-  }
-  .step-number {
-    width: 52px; height: 52px; border-radius: 50%;
-    background: rgba(76,175,80,.1); border: 2px solid rgba(76,175,80,.35);
-    display: flex; align-items: center; justify-content: center;
-    font-size: 1.3rem; font-weight: 800; color: #2E7D32;
-    margin: 0 auto 16px;
-  }
-  .step h3 { color: #1a1a1a; font-size: 1.05rem; margin-bottom: 8px; }
-  .step p { color: #555; font-size: .9rem; }
+/* ── Fees ─────────────────────────────────────────────────── */
+.fees-box {
+  text-align: center; max-width: 600px; margin: 0 auto;
+  padding: 48px 32px; border-radius: 20px;
+  background: linear-gradient(135deg, #e8f5e9 0%, #f1f8e9 100%);
+  border: 2px solid #c8e6c9;
+}
+.fees-box h2 { font-size: 2rem; color: #2E7D32; margin-bottom: 12px; }
+.fees-box .tagline { font-size: 1.3rem; font-weight: 700; color: #1a1a1a; margin-bottom: 8px; }
+.fees-box p { color: #555; font-size: 1.02rem; }
 
-  /* ── CTA ───────────────────────────────────────────────────── */
-  .cta {
-    text-align: center; padding: 80px 24px;
-    background: linear-gradient(135deg, #2E7D32 0%, #4CAF50 50%, #66BB6A 100%);
-    position: relative; overflow: hidden;
-  }
-  .cta::before {
-    content: ''; position: absolute; inset: 0;
-    background: radial-gradient(circle at 50% 50%, rgba(255,255,255,.08) 0%, transparent 60%);
-    pointer-events: none;
-  }
-  .cta h2 {
-    font-size: 2.2rem; color: #fff; margin-bottom: 16px; position: relative; z-index: 1;
-  }
-  .cta p {
-    color: rgba(255,255,255,.9); font-size: 1.1rem; max-width: 540px;
-    margin: 0 auto 32px; position: relative; z-index: 1;
-  }
-  .cta .hero-buttons { position: relative; z-index: 1; }
+/* ── Phone Mockup ─────────────────────────────────────────── */
+.phone-wrap { display: flex; justify-content: center; }
+.phone {
+  width: 300px; border-radius: 28px; overflow: hidden;
+  border: 3px solid #222; background: #fff;
+  box-shadow: 0 12px 40px rgba(0,0,0,.12);
+}
+.phone-header {
+  background: #0088cc; color: #fff; padding: 14px 16px;
+  font-weight: 700; font-size: .95rem;
+  display: flex; align-items: center; gap: 10px;
+}
+.phone-header .tg-icon { width: 28px; height: 28px; border-radius: 50%; background: #fff;
+  display: flex; align-items: center; justify-content: center; }
+.phone-header .tg-icon svg { width: 16px; height: 16px; }
+.phone-body { padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+.msg {
+  padding: 10px 14px; border-radius: 14px; font-size: .88rem;
+  max-width: 85%; line-height: 1.5;
+}
+.msg-out {
+  background: #e8f5e9; align-self: flex-end; border-bottom-right-radius: 4px;
+  color: #1a1a1a;
+}
+.msg-in {
+  background: #f0f0f0; align-self: flex-start; border-bottom-left-radius: 4px;
+  color: #1a1a1a;
+}
+.msg-time { font-size: .7rem; color: #999; margin-top: 2px; }
 
-  /* ── Footer ────────────────────────────────────────────────── */
-  footer {
-    border-top: 1px solid rgba(46,125,50,.1); padding: 40px 24px;
-    text-align: center; background: #F5F7F5;
-  }
-  footer .brand {
-    font-size: 1.1rem; font-weight: 700; color: #1a1a1a;
-    display: inline-flex; align-items: center; gap: 8px; margin-bottom: 12px;
-  }
-  footer .brand .dot {
-    width: 8px; height: 8px; border-radius: 50%; background: #4CAF50;
-    box-shadow: 0 0 6px rgba(76,175,80,.4);
-  }
-  footer p { color: #888; font-size: .85rem; }
-  footer .links { margin: 12px 0; }
-  footer .links a { color: #555; font-size: .85rem; margin: 0 12px; }
-  footer .links a:hover { color: #2E7D32; }
+/* ── Range ────────────────────────────────────────────────── */
+.range-visual {
+  display: flex; align-items: center; justify-content: center;
+  gap: 0; margin: 40px auto 16px; max-width: 600px;
+}
+.range-node {
+  width: 48px; height: 48px; border-radius: 50%;
+  background: #2E7D32; display: flex; align-items: center;
+  justify-content: center; position: relative; z-index: 2;
+}
+.range-node svg { width: 22px; height: 22px; }
+.range-hop {
+  flex: 1; height: 3px; background: repeating-linear-gradient(
+    90deg, #81C784 0, #81C784 8px, transparent 8px, transparent 14px
+  );
+  position: relative;
+}
+.range-hop-label {
+  position: absolute; top: -22px; left: 50%; transform: translateX(-50%);
+  font-size: .78rem; color: #2E7D32; font-weight: 600; white-space: nowrap;
+}
 
-  /* ── Responsive ────────────────────────────────────────────── */
-  @media (max-width: 768px) {
-    nav ul { display: none; }
-    .specs-wrapper { grid-template-columns: 1fr; }
-    .use-case-grid { grid-template-columns: 1fr; }
-    .hero h1 { font-size: 2rem; }
-    .section { padding: 56px 0; }
-    .pricing-card.featured::before { top: -10px; }
+/* ── CTA ──────────────────────────────────────────────────── */
+.cta-section { text-align: center; padding: 80px 24px; }
+.cta-section h2 { font-size: 2rem; margin-bottom: 12px; color: #1a1a1a; }
+.cta-section p { color: #555; margin-bottom: 32px; font-size: 1.05rem; }
+.btn-cta {
+  display: inline-block; padding: 16px 40px;
+  background: #2E7D32; color: #fff; font-size: 1.1rem; font-weight: 700;
+  border-radius: 50px; border: none; cursor: pointer;
+  box-shadow: 0 4px 16px rgba(46,125,50,.3);
+  transition: transform .2s, box-shadow .2s, background .2s;
+}
+.btn-cta:hover {
+  background: #4CAF50; color: #fff;
+  transform: translateY(-2px); box-shadow: 0 6px 24px rgba(46,125,50,.35);
+}
+
+/* ── Footer ───────────────────────────────────────────────── */
+footer {
+  text-align: center; padding: 32px 24px;
+  border-top: 1px solid #e8f5e9; color: #888; font-size: .9rem;
+}
+
+/* ── Scroll Reveal ────────────────────────────────────────── */
+.reveal {
+  opacity: 0; transform: translateY(30px);
+  transition: opacity .7s ease, transform .7s ease;
+}
+.reveal.visible {
+  opacity: 1; transform: translateY(0);
+}
+
+/* ── Responsive ───────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .hero h1 { font-size: 2.1rem; }
+  .steps-grid { grid-template-columns: 1fr; gap: 20px; }
+  .use-case, .use-case:nth-child(even) {
+    flex-direction: column; text-align: center; gap: 20px;
   }
+  .range-visual { flex-wrap: wrap; }
+  nav { padding: 0 16px; }
+  .section { padding: 56px 0; }
+}
 </style>
 </head>
 <body>
 
-<!-- ═══ Navigation ═══ -->
+<!-- ═══ NAV ═══ -->
 <nav>
-  <div class="brand">
-    <span class="dot"></span>
-    TiggyOpenMesh
-  </div>
-  <ul>
-    <li><a href="#features">Features</a></li>
-    <li><a href="#use-cases">Use Cases</a></li>
-    <li><a href="#specs">Specs</a></li>
-    <li><a href="#pricing">Pricing</a></li>
-    <li><a href="#contact">Contact</a></li>
-  </ul>
+  <div class="brand"><span class="dot"></span> TiggyOpenMesh</div>
+  <a href="https://www.tiggyengineering.com/index.html" class="back-link">
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M10 12L6 8l4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    Tiggy Engineering
+  </a>
 </nav>
 
-<!-- ═══ Hero ═══ -->
+<!-- ═══ HERO ═══ -->
 <section class="hero">
-  <div class="mesh-viz">
-    <!-- Mesh nodes scattered across the hero -->
-    <div class="mesh-node" style="top:12%;left:8%"></div>
-    <div class="mesh-node" style="top:25%;left:22%"></div>
-    <div class="mesh-node" style="top:8%;left:40%"></div>
-    <div class="mesh-node" style="top:30%;left:55%"></div>
-    <div class="mesh-node" style="top:15%;left:75%"></div>
-    <div class="mesh-node" style="top:35%;left:90%"></div>
-    <div class="mesh-node" style="top:65%;left:5%"></div>
-    <div class="mesh-node" style="top:72%;left:30%"></div>
-    <div class="mesh-node" style="top:80%;left:60%"></div>
-    <div class="mesh-node" style="top:60%;left:85%"></div>
-    <div class="mesh-node" style="top:88%;left:15%"></div>
-    <div class="mesh-node" style="top:90%;left:78%"></div>
-    <!-- Mesh connection lines -->
-    <div class="mesh-line" style="top:14%;left:9%;width:160px;transform:rotate(5deg)"></div>
-    <div class="mesh-line" style="top:27%;left:24%;width:200px;transform:rotate(-4deg)"></div>
-    <div class="mesh-line" style="top:10%;left:42%;width:220px;transform:rotate(3deg)"></div>
-    <div class="mesh-line" style="top:32%;left:57%;width:180px;transform:rotate(-12deg)"></div>
-    <div class="mesh-line" style="top:67%;left:7%;width:200px;transform:rotate(-2deg)"></div>
-    <div class="mesh-line" style="top:74%;left:32%;width:240px;transform:rotate(3deg)"></div>
-    <div class="mesh-line" style="top:82%;left:62%;width:160px;transform:rotate(-18deg)"></div>
-    <div class="mesh-line" style="top:20%;left:10%;width:120px;transform:rotate(65deg)"></div>
-    <div class="mesh-line" style="top:42%;left:56%;width:200px;transform:rotate(60deg)"></div>
-    <div class="mesh-line" style="top:70%;left:6%;width:140px;transform:rotate(75deg)"></div>
-  </div>
+  <h1>Your Farm. <span>Connected.</span></h1>
+  <p>Small, solar-powered nodes that talk to each other across your land &mdash; so you always know what's happening, wherever you are.</p>
 
-  <div class="hero-content">
-    <span class="hero-badge">Open Source LoRa Mesh for Agriculture</span>
-    <h1>Smart Farming<br><span class="accent">Without the Smart Price</span></h1>
-    <p class="tagline">
-      Monitor livestock, track equipment, automate gates and sensors &mdash;
-      all over a self-healing mesh network that needs no internet and no subscriptions.
-    </p>
-    <div class="hero-buttons">
-      <a href="#pricing" class="btn btn-primary">Get Started</a>
-      <a href="#use-cases" class="btn btn-outline">See Use Cases</a>
-    </div>
-  </div>
-</section>
+  <div class="hero-svg-wrap">
+    <svg viewBox="0 0 700 340" xmlns="http://www.w3.org/2000/svg">
+      <!-- Connection lines -->
+      <line class="mesh-line" x1="140" y1="100" x2="350" y2="70"/>
+      <line class="mesh-line" x1="350" y1="70" x2="560" y2="110"/>
+      <line class="mesh-line" x1="140" y1="100" x2="260" y2="240"/>
+      <line class="mesh-line" x1="350" y1="70" x2="260" y2="240"/>
+      <line class="mesh-line" x1="350" y1="70" x2="480" y2="250"/>
+      <line class="mesh-line" x1="560" y1="110" x2="480" y2="250"/>
+      <line class="mesh-line" x1="260" y1="240" x2="480" y2="250"/>
 
-<!-- ═══ Key Features ═══ -->
-<section class="section" id="features">
-  <div class="container">
-    <h2 class="section-title">Why Farmers Choose TiggyOpenMesh</h2>
-    <p class="section-subtitle">
-      Purpose-built for agricultural environments where reliability matters
-      and budgets are tight.
-    </p>
-    <div class="features-grid">
-      <div class="feature-card">
-        <div class="feature-icon" style="color:#2E7D32; font-size:1.5rem;">&#163;0</div>
-        <h3>No Subscription Fees</h3>
-        <p>Buy once, own forever. No monthly IoT platform costs, no cloud bills, no hidden charges. Your data stays on your farm.</p>
-      </div>
-      <div class="feature-card">
-        <div class="feature-icon">&#128246;</div>
-        <h3>No Internet Required</h3>
-        <p>LoRa mesh works anywhere &mdash; even the most remote farms with zero mobile signal. Your network, your rules.</p>
-      </div>
-      <div class="feature-card">
-        <div class="feature-icon">&#128279;</div>
-        <h3>Self-Healing Mesh</h3>
-        <p>Nodes automatically relay for each other. If one path fails, traffic reroutes. Range extends to 10km+ through multi-hop.</p>
-      </div>
-      <div class="feature-card">
-        <div class="feature-icon">&#128268;</div>
-        <h3>Open Source</h3>
-        <p>Fully open source. Customise to your exact needs. No vendor lock-in. Community supported and continuously improving.</p>
-      </div>
-      <div class="feature-card">
-        <div class="feature-icon">&#9728;&#65039;</div>
-        <h3>Solar Powered</h3>
-        <p>Low-power nodes run indefinitely on small solar panels. Deploy once in the field and forget about battery changes.</p>
-      </div>
-    </div>
-  </div>
-</section>
+      <!-- Data dots flowing along lines -->
+      <circle class="data-dot data-dot-1" r="4">
+        <animateMotion dur="4s" repeatCount="indefinite" path="M140,100 L350,70"/>
+      </circle>
+      <circle class="data-dot data-dot-2" r="4">
+        <animateMotion dur="5s" repeatCount="indefinite" path="M350,70 L560,110"/>
+      </circle>
+      <circle class="data-dot data-dot-3" r="4">
+        <animateMotion dur="4.5s" repeatCount="indefinite" path="M260,240 L350,70"/>
+      </circle>
+      <circle class="data-dot data-dot-4" r="4">
+        <animateMotion dur="3.8s" repeatCount="indefinite" path="M560,110 L480,250"/>
+      </circle>
+      <circle class="data-dot data-dot-5" r="4">
+        <animateMotion dur="4.2s" repeatCount="indefinite" path="M260,240 L480,250"/>
+      </circle>
 
-<!-- ═══ Use Cases ═══ -->
-<section class="section use-cases" id="use-cases">
-  <div class="container">
-    <h2 class="section-title">Built for Real Farm Work</h2>
-    <p class="section-subtitle">
-      From livestock tracking to automated gates &mdash; practical solutions
-      that save time, money, and worry.
-    </p>
-    <div class="use-case-grid">
+      <!-- Node: Farmhouse -->
+      <circle class="node-ring node-ring-d1" cx="140" cy="100" r="14"/>
+      <circle cx="140" cy="100" r="18" fill="#fff" stroke="#2E7D32" stroke-width="2.5"/>
+      <g transform="translate(128,88)">
+        <path class="node-icon" d="M12,2 L2,10 L2,22 L22,22 L22,10 Z M9,22 L9,15 L15,15 L15,22" fill="#2E7D32" stroke="#2E7D32" stroke-width="0.5"/>
+      </g>
+      <text class="node-label" x="140" y="136">Farmhouse</text>
 
-      <div class="use-case-card">
-        <div class="use-case-header">
-          <span class="use-case-emoji">&#x1F404;</span>
-          <h3>Livestock Tracking</h3>
-        </div>
-        <ul>
-          <li>BLE beacon tags on animals &mdash; lightweight, waterproof</li>
-          <li>Know which field or zone animals are in at a glance</li>
-          <li>Instant alert if an animal leaves a geofenced area</li>
-          <li>Count animals as they pass through gates automatically</li>
-        </ul>
-      </div>
+      <!-- Node: Barn -->
+      <circle class="node-ring node-ring-d2" cx="350" cy="70" r="14"/>
+      <circle cx="350" cy="70" r="18" fill="#fff" stroke="#2E7D32" stroke-width="2.5"/>
+      <g transform="translate(338,58)">
+        <path class="node-icon" d="M2,12 L12,2 L22,12 L22,22 L2,22 Z M8,22 L8,16 L16,16 L16,22" fill="#2E7D32"/>
+      </g>
+      <text class="node-label" x="350" y="106">Barn</text>
 
-      <div class="use-case-card">
-        <div class="use-case-header">
-          <span class="use-case-emoji">&#x1F69C;</span>
-          <h3>Vehicle &amp; Equipment Tracking</h3>
-        </div>
-        <ul>
-          <li>GPS tracking on tractors, ATVs, trailers and implements</li>
-          <li>Geofencing &mdash; alert if equipment leaves the farm boundary</li>
-          <li>Theft prevention &mdash; instant notification if moved after hours</li>
-          <li>Track usage hours and full location history</li>
-        </ul>
-      </div>
+      <!-- Node: Gate -->
+      <circle class="node-ring node-ring-d3" cx="560" cy="110" r="14"/>
+      <circle cx="560" cy="110" r="18" fill="#fff" stroke="#2E7D32" stroke-width="2.5"/>
+      <g transform="translate(548,98)">
+        <rect class="node-icon" x="3" y="6" width="4" height="12" rx="1"/>
+        <rect class="node-icon" x="17" y="6" width="4" height="12" rx="1"/>
+        <line x1="7" y1="10" x2="17" y2="10" stroke="#2E7D32" stroke-width="2"/>
+        <line x1="7" y1="14" x2="17" y2="14" stroke="#2E7D32" stroke-width="2"/>
+      </g>
+      <text class="node-label" x="560" y="146">Gate</text>
 
-      <div class="use-case-card">
-        <div class="use-case-header">
-          <span class="use-case-emoji">&#x1F321;&#xFE0F;</span>
-          <h3>Environmental Monitoring</h3>
-        </div>
-        <ul>
-          <li>Temperature sensors deployed across the entire farm</li>
-          <li>Soil moisture monitoring for irrigation decisions</li>
-          <li>Weather station data &mdash; wind speed, rainfall, humidity</li>
-          <li>Frost alerts &mdash; protect crops with early warning</li>
-        </ul>
-      </div>
+      <!-- Node: Tractor -->
+      <circle class="node-ring node-ring-d4" cx="260" cy="240" r="14"/>
+      <circle cx="260" cy="240" r="18" fill="#fff" stroke="#2E7D32" stroke-width="2.5"/>
+      <g transform="translate(248,228)">
+        <rect class="node-icon" x="4" y="6" width="14" height="10" rx="2"/>
+        <circle cx="7" cy="19" r="3" fill="none" stroke="#2E7D32" stroke-width="2"/>
+        <circle cx="18" cy="19" r="4" fill="none" stroke="#2E7D32" stroke-width="2"/>
+      </g>
+      <text class="node-label" x="260" y="276">Tractor</text>
 
-      <div class="use-case-card">
-        <div class="use-case-header">
-          <span class="use-case-emoji">&#x1F95B;</span>
-          <h3>Dairy &amp; Storage</h3>
-        </div>
-        <ul>
-          <li>Milk tank temperature monitoring &mdash; stay compliant</li>
-          <li>Grain silo level sensors &mdash; plan logistics ahead</li>
-          <li>Feed bin monitoring &mdash; know when to reorder</li>
-          <li>Cold storage temperature alerts &mdash; prevent spoilage</li>
-        </ul>
-      </div>
-
-      <div class="use-case-card">
-        <div class="use-case-header">
-          <span class="use-case-emoji">&#x1F6AA;</span>
-          <h3>Farm Automation</h3>
-        </div>
-        <ul>
-          <li>Remote gate control from your phone or PC</li>
-          <li>Automated pump control based on water levels</li>
-          <li>Lighting control for barns and outbuildings</li>
-          <li>Timer-based automation for feeding schedules</li>
-        </ul>
-      </div>
-
-      <div class="use-case-card">
-        <div class="use-case-header">
-          <span class="use-case-emoji">&#x1F4AC;</span>
-          <h3>Communication</h3>
-        </div>
-        <ul>
-          <li>Text messaging between farm workers &mdash; no phone signal needed</li>
-          <li>SOS emergency button on every node</li>
-          <li>Telegram bot &mdash; query any sensor from your phone</li>
-          <li>Hub web map &mdash; see all nodes on a live map</li>
-        </ul>
-      </div>
-
-    </div>
+      <!-- Node: Water Trough -->
+      <circle class="node-ring node-ring-d2" cx="480" cy="250" r="14"/>
+      <circle cx="480" cy="250" r="18" fill="#fff" stroke="#2E7D32" stroke-width="2.5"/>
+      <g transform="translate(468,238)">
+        <path class="node-icon" d="M4,8 Q12,20 20,8" fill="none" stroke="#2E7D32" stroke-width="2.5" stroke-linecap="round"/>
+        <path class="node-icon" d="M6,14 L6,20 L18,20 L18,14" fill="#2E7D32" opacity=".3"/>
+      </g>
+      <text class="node-label" x="480" y="286">Water Trough</text>
+    </svg>
   </div>
 </section>
 
-<!-- ═══ How It Works ═══ -->
-<section class="section how-it-works">
+<!-- ═══ 3 STEPS ═══ -->
+<section class="section section-alt">
   <div class="container">
-    <h2 class="section-title">Up and Running in Minutes</h2>
-    <p class="section-subtitle">No IT department required. If you can plug in a USB cable, you can deploy TiggyOpenMesh.</p>
+    <h2 class="section-title reveal">Up and running in three steps</h2>
+    <p class="section-subtitle reveal">No engineers. No wiring. No Wi-Fi needed.</p>
     <div class="steps-grid">
-      <div class="step">
-        <div class="step-number">1</div>
-        <h3>Flash the Firmware</h3>
-        <p>One-click firmware upload to your Heltec modules via USB. Takes under two minutes per node.</p>
+      <div class="step-card reveal">
+        <div class="step-num">1</div>
+        <h3>Place the nodes</h3>
+        <p>Put a small weatherproof unit at each spot you want to cover &mdash; barn, gate, trough, vehicle. Solar-powered, so no cables.</p>
       </div>
-      <div class="step">
-        <div class="step-number">2</div>
-        <h3>Place Your Nodes</h3>
-        <p>Mount nodes in barns, on posts, or in the yard. Solar panel optional for remote locations.</p>
+      <div class="step-card reveal">
+        <div class="step-num">2</div>
+        <h3>They connect themselves</h3>
+        <p>Each node finds its neighbours and forms a network automatically. No setup, no passwords, no internet required.</p>
       </div>
-      <div class="step">
-        <div class="step-number">3</div>
-        <h3>Connect a Gateway</h3>
-        <p>Plug one node into a PC or Raspberry Pi. The gateway GUI auto-discovers every node on the mesh.</p>
-      </div>
-      <div class="step">
-        <div class="step-number">4</div>
-        <h3>Build Your Rules</h3>
-        <p>Drag-and-drop Logic Builder: "If gate opens after 10pm, send Telegram alert." No code needed.</p>
+      <div class="step-card reveal">
+        <div class="step-num">3</div>
+        <h3>See everything on your phone</h3>
+        <p>Get alerts, check sensors, and control things from anywhere &mdash; on your phone, tablet, or computer.</p>
       </div>
     </div>
   </div>
 </section>
 
-<!-- ═══ Specs ═══ -->
-<section class="section specs" id="specs">
+<!-- ═══ USE CASES ═══ -->
+<section class="section">
   <div class="container">
-    <h2 class="section-title">Technical Specifications</h2>
-    <p class="section-subtitle">Enterprise-grade security and performance at a fraction of the cost.</p>
-    <div class="specs-wrapper">
-      <table class="specs-table">
-        <tr>
-          <td>Range (per hop)</td>
-          <td>1&ndash;3 km built-up &middot; 5&ndash;10 km line of sight</td>
-        </tr>
-        <tr>
-          <td>Mesh Hops</td>
-          <td>Up to 5 hops per message</td>
-        </tr>
-        <tr>
-          <td>Network Size</td>
-          <td>50&ndash;80 nodes per gateway</td>
-        </tr>
-        <tr>
-          <td>Encryption</td>
-          <td>AES-128-GCM end-to-end</td>
-        </tr>
-        <tr>
-          <td>Power</td>
-          <td>3.3V &middot; ~80 mA active &middot; solar compatible</td>
-        </tr>
-        <tr>
-          <td>Frequency</td>
-          <td>868 MHz (EU) &middot; 915 MHz (US)</td>
-        </tr>
-        <tr>
-          <td>Hardware</td>
-          <td>Heltec V3 (~&pound;15) &middot; T-Deck Plus (~&pound;45 with screen)</td>
-        </tr>
-        <tr>
-          <td>Sensors</td>
-          <td>I2C, UART, GPIO, BLE beacons, GPS</td>
-        </tr>
-        <tr>
-          <td>Gateway</td>
-          <td>Any PC, Raspberry Pi, or Linux server</td>
-        </tr>
-        <tr>
-          <td>Licence</td>
-          <td>Open source &mdash; free to use, modify, redistribute</td>
-        </tr>
-      </table>
+    <h2 class="section-title reveal">What can it do for your farm?</h2>
+    <p class="section-subtitle reveal">Real problems. Simple solutions.</p>
 
-      <div class="specs-visual">
-        <h3>Self-Healing Mesh Topology</h3>
-        <div class="network-diagram">
-          <!-- SVG lines connecting nodes precisely -->
-          <svg viewBox="0 0 260 220">
-            <!-- GW(133,34) → N1(51,106) -->
-            <line x1="133" y1="38" x2="51" y2="106" stroke="#4CAF50" stroke-width="2" opacity=".4"/>
-            <!-- GW(133,34) → N2(209,106) -->
-            <line x1="133" y1="38" x2="209" y2="106" stroke="#4CAF50" stroke-width="2" opacity=".4"/>
-            <!-- N1(51,106) → N3(21,181) -->
-            <line x1="51" y1="110" x2="21" y2="181" stroke="#4CAF50" stroke-width="2" opacity=".3"/>
-            <!-- N1(51,106) → N4(130,181) -->
-            <line x1="51" y1="110" x2="130" y2="181" stroke="#4CAF50" stroke-width="2" opacity=".3"/>
-            <!-- N2(209,106) → N4(130,181) -->
-            <line x1="209" y1="110" x2="130" y2="181" stroke="#4CAF50" stroke-width="2" opacity=".3"/>
-            <!-- N2(209,106) → N5(239,181) -->
-            <line x1="209" y1="110" x2="239" y2="181" stroke="#4CAF50" stroke-width="2" opacity=".3"/>
-          </svg>
-          <!-- Nodes -->
-          <div class="nd-node nd-gateway">GW</div>
-          <div class="nd-node nd-n1">N1</div>
-          <div class="nd-node nd-n2">N2</div>
-          <div class="nd-node nd-n3">N3</div>
-          <div class="nd-node nd-n4">N4</div>
-          <div class="nd-node nd-n5">N5</div>
-        </div>
-        <p class="nd-label">Messages hop node-to-node &mdash; if N1 goes down,<br>N2 automatically reroutes through N4.</p>
+    <!-- 1 Animals -->
+    <div class="use-case reveal">
+      <div class="use-case-icon">
+        <svg viewBox="0 0 56 56" fill="none"><path d="M28 10c-6 0-12 4-14 10s0 14 6 18c2 1.5 5 2 8 2s6-.5 8-2c6-4 8-12 6-18S34 10 28 10z" stroke="#2E7D32" stroke-width="2.5" fill="#e8f5e9"/><circle cx="22" cy="24" r="2" fill="#2E7D32"/><circle cx="34" cy="24" r="2" fill="#2E7D32"/><path d="M24 32c2 2 6 2 8 0" stroke="#2E7D32" stroke-width="2" stroke-linecap="round"/><ellipse cx="16" cy="16" rx="4" ry="6" fill="#c8e6c9" stroke="#2E7D32" stroke-width="1.5"/><ellipse cx="40" cy="16" rx="4" ry="6" fill="#c8e6c9" stroke="#2E7D32" stroke-width="1.5"/></svg>
+      </div>
+      <div class="use-case-text">
+        <h3>Know Where Your Animals Are</h3>
+        <p>Attach small tags to livestock and get their location on your phone. Set up invisible boundaries &mdash; if animals leave an area, you get an instant alert. No more driving out just to check.</p>
+      </div>
+    </div>
+
+    <!-- 2 Equipment -->
+    <div class="use-case reveal">
+      <div class="use-case-icon">
+        <svg viewBox="0 0 56 56" fill="none"><rect x="10" y="20" width="22" height="16" rx="3" stroke="#2E7D32" stroke-width="2.5" fill="#e8f5e9"/><circle cx="16" cy="40" r="5" stroke="#2E7D32" stroke-width="2.5" fill="#c8e6c9"/><circle cx="38" cy="40" r="7" stroke="#2E7D32" stroke-width="2.5" fill="#c8e6c9"/><path d="M32,24 L42,20 L42,32 L32,36Z" stroke="#2E7D32" stroke-width="2" fill="#e8f5e9"/></svg>
+      </div>
+      <div class="use-case-text">
+        <h3>Protect Your Equipment</h3>
+        <p>Know exactly where your tractors, trailers, and ATVs are at all times. Set up zones &mdash; get alerted the moment something moves when it shouldn't. Deters theft and speeds recovery.</p>
+      </div>
+    </div>
+
+    <!-- 3 Monitor -->
+    <div class="use-case reveal">
+      <div class="use-case-icon">
+        <svg viewBox="0 0 56 56" fill="none"><rect x="12" y="12" width="32" height="24" rx="4" stroke="#2E7D32" stroke-width="2.5" fill="#e8f5e9"/><polyline points="18,30 24,22 30,28 38,18" stroke="#4CAF50" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/><line x1="28" y1="36" x2="28" y2="42" stroke="#2E7D32" stroke-width="2.5"/><line x1="20" y1="42" x2="36" y2="42" stroke="#2E7D32" stroke-width="2.5" stroke-linecap="round"/></svg>
+      </div>
+      <div class="use-case-text">
+        <h3>Monitor Everything</h3>
+        <p>Temperature in the lambing shed. Water level in the trough. Wind speed on the hill. All reported back to you automatically, with alerts if anything goes out of range.</p>
+      </div>
+    </div>
+
+    <!-- 4 Automate -->
+    <div class="use-case reveal">
+      <div class="use-case-icon">
+        <svg viewBox="0 0 56 56" fill="none"><circle cx="28" cy="28" r="16" stroke="#2E7D32" stroke-width="2.5" fill="#e8f5e9"/><path d="M28 18v10l7 5" stroke="#2E7D32" stroke-width="2.5" stroke-linecap="round"/><path d="M12 28h-4M48 28h-4M28 8V4M28 52v-4" stroke="#81C784" stroke-width="2" stroke-linecap="round"/></svg>
+      </div>
+      <div class="use-case-text">
+        <h3>Automate the Boring Stuff</h3>
+        <p>Set timers to open gates at dawn, run pumps for an hour each morning, or turn on lights at dusk. Control it all from your phone &mdash; or let the system handle it on a schedule.</p>
+      </div>
+    </div>
+
+    <!-- 5 Messaging -->
+    <div class="use-case reveal">
+      <div class="use-case-icon">
+        <svg viewBox="0 0 56 56" fill="none"><rect x="8" y="10" width="40" height="28" rx="6" stroke="#2E7D32" stroke-width="2.5" fill="#e8f5e9"/><path d="M16 44l6-6h-6z" fill="#e8f5e9" stroke="#2E7D32" stroke-width="2.5" stroke-linejoin="round"/><line x1="18" y1="20" x2="38" y2="20" stroke="#81C784" stroke-width="2.5" stroke-linecap="round"/><line x1="18" y1="26" x2="32" y2="26" stroke="#81C784" stroke-width="2.5" stroke-linecap="round"/><line x1="18" y1="32" x2="28" y2="32" stroke="#81C784" stroke-width="2.5" stroke-linecap="round"/></svg>
+      </div>
+      <div class="use-case-text">
+        <h3>Talk to Your Team</h3>
+        <p>Send short messages between nodes &mdash; phone to phone, across the farm &mdash; without needing mobile signal or Wi-Fi. Handy when you're in a dead spot and need to coordinate.</p>
       </div>
     </div>
   </div>
 </section>
 
-<!-- ═══ Pricing ═══ -->
-<section class="section pricing" id="pricing">
+<!-- ═══ SELF-HEALING MESH ═══ -->
+<section class="section section-alt">
   <div class="container">
-    <h2 class="section-title">Simple, Honest Pricing</h2>
-    <p class="section-subtitle">Hardware cost only. No monthly fees. No subscriptions. Ever.</p>
-    <div class="pricing-grid">
+    <h2 class="section-title reveal">The network looks after itself</h2>
+    <p class="section-subtitle reveal">If a node goes down, messages find another way around. No single point of failure.</p>
+    <div class="heal-svg-wrap reveal">
+      <svg id="healSvg" viewBox="0 0 520 280" xmlns="http://www.w3.org/2000/svg">
+        <!-- Original routes -->
+        <line class="mesh-line" x1="80" y1="80" x2="260" y2="60" style="animation-delay:-.3s"/>
+        <line class="mesh-line" x1="260" y1="60" x2="440" y2="80" style="animation-delay:-.7s"/>
+        <line class="mesh-line" x1="80" y1="80" x2="160" y2="200" style="animation-delay:-.5s"/>
+        <line class="mesh-line" x1="260" y1="60" x2="160" y2="200"/>
+        <line class="mesh-line" x1="260" y1="60" x2="360" y2="200" style="animation-delay:-.2s"/>
+        <line class="mesh-line" x1="440" y1="80" x2="360" y2="200" style="animation-delay:-.9s"/>
+        <line class="mesh-line" x1="160" y1="200" x2="360" y2="200" style="animation-delay:-.4s"/>
 
-      <div class="pricing-card">
-        <h3>Starter Kit</h3>
-        <p class="pricing-desc">Perfect for a smallholding or trial</p>
-        <div class="pricing-amount">
-          <span class="approx">from </span><span class="currency">&pound;</span>80
-        </div>
-        <p class="pricing-note">One-off cost</p>
-        <ul class="pricing-features">
-          <li>1 Gateway node</li>
-          <li>3 Sensor/relay nodes</li>
-          <li>Gateway GUI software</li>
-          <li>USB cables &amp; antennas</li>
-          <li>Community support</li>
-        </ul>
-        <a href="#contact" class="btn btn-outline" style="width:100%;justify-content:center;color:#2E7D32;border-color:rgba(46,125,50,.4);">Get Started</a>
-      </div>
+        <!-- Old route through failed node (shown faded during heal) -->
+        <line class="heal-old-route" x1="80" y1="80" x2="260" y2="60"/>
+        <line class="heal-old-route" x1="260" y1="60" x2="440" y2="80"/>
 
-      <div class="pricing-card featured">
-        <h3>Farm Pack</h3>
-        <p class="pricing-desc">Cover a full working farm</p>
-        <div class="pricing-amount">
-          <span class="approx">from </span><span class="currency">&pound;</span>250
-        </div>
-        <p class="pricing-note">One-off cost</p>
-        <ul class="pricing-features">
-          <li>1 Gateway node</li>
-          <li>10 Mesh nodes</li>
-          <li>Temperature &amp; soil sensors</li>
-          <li>BLE livestock beacons (x10)</li>
-          <li>Solar charging kits</li>
-          <li>Priority community support</li>
-        </ul>
-        <a href="#contact" class="btn btn-primary" style="width:100%;justify-content:center;background:#4CAF50;color:#fff;">Get Started</a>
-      </div>
+        <!-- New bypass route -->
+        <line class="heal-new-route" x1="80" y1="80" x2="160" y2="200"/>
+        <line class="heal-new-route" x1="160" y1="200" x2="360" y2="200"/>
+        <line class="heal-new-route" x1="360" y1="200" x2="440" y2="80"/>
 
-      <div class="pricing-card">
-        <h3>Enterprise</h3>
-        <p class="pricing-desc">Large estates &amp; multi-site operations</p>
-        <div class="pricing-amount">
-          <span class="approx">from </span><span class="currency">&pound;</span>1,200
-        </div>
-        <p class="pricing-note">One-off cost</p>
-        <ul class="pricing-features">
-          <li>Hub server (Raspberry Pi)</li>
-          <li>5 Gateways for full coverage</li>
-          <li>50 Mesh nodes</li>
-          <li>Full sensor suite</li>
-          <li>Telegram bot integration</li>
-          <li>Live web map dashboard</li>
-          <li>Direct support</li>
-        </ul>
-        <a href="#contact" class="btn btn-outline" style="width:100%;justify-content:center;color:#2E7D32;border-color:rgba(46,125,50,.4);">Contact Us</a>
-      </div>
+        <!-- New route data dots -->
+        <circle class="data-dot heal-new-dot" r="4" opacity="0">
+          <animateMotion dur="2.5s" repeatCount="indefinite" path="M80,80 L160,200 L360,200 L440,80"/>
+        </circle>
 
+        <!-- Nodes -->
+        <circle cx="80" cy="80" r="16" fill="#fff" stroke="#2E7D32" stroke-width="2.5"/>
+        <text class="node-label" x="80" y="84" font-size="16">A</text>
+
+        <g class="heal-node heal-fail-node">
+          <circle cx="260" cy="60" r="16" fill="#fff" stroke="#2E7D32" stroke-width="2.5"/>
+          <text class="node-label" x="260" y="64" font-size="16">B</text>
+        </g>
+        <!-- X mark shown during failure -->
+        <g class="heal-fail-x" opacity="0">
+          <circle cx="260" cy="60" r="16" fill="#ffebee" stroke="#c62828" stroke-width="2"/>
+          <line x1="252" y1="52" x2="268" y2="68" stroke="#c62828" stroke-width="2.5" stroke-linecap="round"/>
+          <line x1="268" y1="52" x2="252" y2="68" stroke="#c62828" stroke-width="2.5" stroke-linecap="round"/>
+        </g>
+
+        <circle cx="440" cy="80" r="16" fill="#fff" stroke="#2E7D32" stroke-width="2.5"/>
+        <text class="node-label" x="440" y="84" font-size="16">C</text>
+
+        <circle cx="160" cy="200" r="16" fill="#fff" stroke="#2E7D32" stroke-width="2.5"/>
+        <text class="node-label" x="160" y="204" font-size="16">D</text>
+
+        <circle cx="360" cy="200" r="16" fill="#fff" stroke="#2E7D32" stroke-width="2.5"/>
+        <text class="node-label" x="360" y="204" font-size="16">E</text>
+
+        <!-- Labels -->
+        <text x="260" y="270" text-anchor="middle" font-size="12" fill="#888" font-family="inherit" class="heal-status-text">Node B fails &mdash; network re-routes automatically</text>
+      </svg>
     </div>
+  </div>
+</section>
 
-    <div class="pricing-no-fees">
-      <p>No monthly fees. No subscriptions. No cloud lock-in.</p>
-      <span>Your hardware, your data, your farm. Forever.</span>
+<!-- ═══ NO MONTHLY FEES ═══ -->
+<section class="section">
+  <div class="container">
+    <div class="fees-box reveal">
+      <h2>No Monthly Fees</h2>
+      <div class="tagline">Buy the hardware. That's it.</div>
+      <p>No subscriptions, no SIM cards, no cloud services to pay for. The network runs on your land, under your control, forever.</p>
     </div>
+  </div>
+</section>
+
+<!-- ═══ PHONE ALERTS ═══ -->
+<section class="section section-alt">
+  <div class="container">
+    <h2 class="section-title reveal">Alerts straight to your phone</h2>
+    <p class="section-subtitle reveal">Connect your mesh to Telegram and get instant notifications wherever you have signal.</p>
+    <div class="phone-wrap reveal">
+      <div class="phone">
+        <div class="phone-header">
+          <div class="tg-icon">
+            <svg viewBox="0 0 24 24" fill="#0088cc"><path d="M12 0C5.37 0 0 5.37 0 12s5.37 12 12 12 12-5.37 12-12S18.63 0 12 0zm5.53 8.15l-1.8 8.5c-.13.6-.5.75-.99.47l-2.74-2.02-1.32 1.27c-.15.15-.27.27-.55.27l.2-2.78 5.07-4.58c.22-.2-.05-.3-.34-.13l-6.27 3.95-2.7-.84c-.59-.19-.6-.59.12-.87l10.55-4.07c.49-.18.92.12.76.87z"/></svg>
+          </div>
+          Farm Alerts
+        </div>
+        <div class="phone-body">
+          <div class="msg msg-in">
+            <strong>Lambing Shed</strong><br>
+            Temperature dropped to 4&deg;C<br>
+            <span class="msg-time">07:12</span>
+          </div>
+          <div class="msg msg-out">
+            /heater on<br>
+            <span class="msg-time">07:13</span>
+          </div>
+          <div class="msg msg-in">
+            <strong>Lambing Shed</strong><br>
+            Heater ON. Temp rising &mdash; now 8&deg;C<br>
+            <span class="msg-time">07:24</span>
+          </div>
+          <div class="msg msg-in">
+            <strong>Top Field Gate</strong><br>
+            Gate opened<br>
+            <span class="msg-time">08:01</span>
+          </div>
+          <div class="msg msg-in">
+            <strong>Water Trough</strong><br>
+            Level low &mdash; 15%<br>
+            <span class="msg-time">09:30</span>
+          </div>
+          <div class="msg msg-out">
+            /pump on 30m<br>
+            <span class="msg-time">09:31</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ RANGE ═══ -->
+<section class="section">
+  <div class="container">
+    <h2 class="section-title reveal">Cover your whole farm</h2>
+    <p class="section-subtitle reveal">Each node reaches 1&ndash;3 km. Messages hop from node to node, so the more you add, the further your network goes.</p>
+    <div class="range-visual reveal">
+      <div class="range-node">
+        <svg viewBox="0 0 24 24" fill="white"><path d="M12,2 L2,10 L2,22 L22,22 L22,10Z"/></svg>
+      </div>
+      <div class="range-hop">
+        <span class="range-hop-label">1&ndash;3 km</span>
+      </div>
+      <div class="range-node">
+        <svg viewBox="0 0 24 24" fill="white"><rect x="6" y="10" width="12" height="10" rx="1"/><path d="M4,10 L12,3 L20,10"/></svg>
+      </div>
+      <div class="range-hop">
+        <span class="range-hop-label">1&ndash;3 km</span>
+      </div>
+      <div class="range-node">
+        <svg viewBox="0 0 24 24" fill="white"><rect x="4" y="8" width="6" height="12" rx="1"/><rect x="14" y="8" width="6" height="12" rx="1"/><line x1="10" y1="12" x2="14" y2="12" stroke="white" stroke-width="1.5"/><line x1="10" y1="16" x2="14" y2="16" stroke="white" stroke-width="1.5"/></svg>
+      </div>
+      <div class="range-hop">
+        <span class="range-hop-label">1&ndash;3 km</span>
+      </div>
+      <div class="range-node">
+        <svg viewBox="0 0 24 24" fill="white"><path d="M4,8 Q12,20 20,8" stroke="white" stroke-width="1.5" fill="none"/><rect x="6" y="14" width="12" height="6" rx="1"/></svg>
+      </div>
+    </div>
+    <p style="text-align:center; color:#888; font-size:.9rem; margin-top:8px;" class="reveal">Farmhouse &rarr; Barn &rarr; Gate &rarr; Far field &mdash; all connected</p>
   </div>
 </section>
 
 <!-- ═══ CTA ═══ -->
-<section class="cta" id="contact">
-  <h2>Ready to Modernise Your Farm?</h2>
-  <p>
-    Join farmers across the UK who are saving time, cutting costs, and
-    keeping full control of their data.
-  </p>
-  <div class="hero-buttons">
-    <a href="https://github.com/TiggyOpenMesh" class="btn btn-primary">View on GitHub</a>
-    <a href="mailto:info@tiggyopenmesh.com" class="btn btn-outline">Contact Us</a>
-  </div>
+<section class="cta-section section-alt">
+  <h2 class="reveal">Ready to connect your farm?</h2>
+  <p class="reveal">Get in touch and we'll help you work out what you need.</p>
+  <a href="https://www.tiggyengineering.com" class="btn-cta reveal">Contact Tiggy Engineering</a>
 </section>
 
-<!-- ═══ Footer ═══ -->
+<!-- ═══ FOOTER ═══ -->
 <footer>
-  <div class="brand">
-    <span class="dot"></span>
-    TiggyOpenMesh
-  </div>
-  <div class="links">
-    <a href="https://github.com/TiggyOpenMesh">GitHub</a>
-    <a href="#specs">Documentation</a>
-    <a href="mailto:info@tiggyopenmesh.com">Contact</a>
-  </div>
-  <p>&copy; 2026 TiggyOpenMesh &mdash; Open Source LoRa Mesh for Agriculture</p>
-  <p style="margin-top:8px;font-size:.75rem;">
-    TiggyOpenMesh is an open-source project. Prices shown are indicative hardware costs only.
-  </p>
+  <p>Designed and made in the UK</p>
 </footer>
+
+<!-- ═══ SCRIPTS ═══ -->
+<script>
+// Scroll reveal
+(function() {
+  var els = document.querySelectorAll('.reveal');
+  function check() {
+    var trigger = window.innerHeight * 0.88;
+    els.forEach(function(el) {
+      if (el.getBoundingClientRect().top < trigger) {
+        el.classList.add('visible');
+      }
+    });
+  }
+  window.addEventListener('scroll', check, {passive: true});
+  window.addEventListener('resize', check);
+  check();
+})();
+
+// Self-healing animation loop
+(function() {
+  var svg = document.getElementById('healSvg');
+  if (!svg) return;
+  var failNode = svg.querySelector('.heal-fail-node');
+  var failX = svg.querySelector('.heal-fail-x');
+  var oldRoutes = svg.querySelectorAll('.heal-old-route');
+  var newRoutes = svg.querySelectorAll('.heal-new-route');
+  var newDot = svg.querySelector('.heal-new-dot');
+  var origLines = svg.querySelectorAll('.mesh-line');
+
+  function reset() {
+    failNode.style.opacity = '1';
+    failX.setAttribute('opacity', '0');
+    oldRoutes.forEach(function(l) { l.style.opacity = '0'; });
+    newRoutes.forEach(function(l) { l.style.opacity = '0'; l.style.animation = 'none'; });
+    newDot.setAttribute('opacity', '0');
+    origLines.forEach(function(l) { l.style.opacity = '1'; });
+  }
+
+  function heal() {
+    // Fade out failed node
+    failNode.style.opacity = '.12';
+    failX.setAttribute('opacity', '1');
+    // Dim original lines through B
+    origLines[0].style.opacity = '.15';
+    origLines[1].style.opacity = '.15';
+    origLines[3].style.opacity = '.15';
+    origLines[4].style.opacity = '.15';
+    // Show old route faded
+    oldRoutes.forEach(function(l) { l.style.opacity = '.25'; });
+    // After brief pause, show new routes
+    setTimeout(function() {
+      newRoutes.forEach(function(l) {
+        l.style.opacity = '1';
+        l.style.animation = 'dash-flow 1.6s linear infinite';
+      });
+      newDot.setAttribute('opacity', '1');
+    }, 600);
+  }
+
+  // Run cycle: normal 3s -> heal 4s -> reset
+  function cycle() {
+    reset();
+    setTimeout(function() {
+      heal();
+      setTimeout(cycle, 4000);
+    }, 3000);
+  }
+
+  // Start when element scrolls into view
+  var started = false;
+  var observer = new IntersectionObserver(function(entries) {
+    if (entries[0].isIntersecting && !started) {
+      started = true;
+      cycle();
+    }
+  }, {threshold: 0.3});
+  observer.observe(svg);
+})();
+</script>
 
 </body>
 </html>
