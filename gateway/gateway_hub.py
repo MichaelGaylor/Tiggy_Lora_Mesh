@@ -103,6 +103,10 @@ class GatewayHub:
         self.encrypted_packets: list[dict] = []
         self.MAX_ENCRYPTED_PACKETS = 500
 
+        # Latest decoded sensor values for web gauge feature
+        # Key: "nodeId:pin" e.g. "5041:15"
+        self.sensor_latest: dict[str, dict] = {}
+
         # Gateway registry (persisted to disk so offline gateways appear on map)
         self.registry_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gateways.json")
         self.registry: dict[str, dict] = {}  # id -> {name, lat, lon, ...}
@@ -290,6 +294,18 @@ class GatewayHub:
                 "total_connections": self.total_connections,
             }))
 
+        # ─── Sensor Value (for web gauge) ────────────────────
+        elif msg_type == "sensor":
+            key = f"{msg.get('node', '')}:{msg.get('pin', '')}"
+            self.sensor_latest[key] = {
+                "value": msg.get("value", 0),
+                "ts": time.time(),
+                "node": msg.get("node", ""),
+                "pin": msg.get("pin", ""),
+                "label": msg.get("label", ""),
+                "unit": msg.get("unit", ""),
+            }
+
     async def broadcast_event(self, msg: dict, exclude=None):
         """Send an event to all authenticated gateways."""
         raw = json.dumps(msg)
@@ -389,6 +405,280 @@ class GatewayHub:
         packets = [p for p in self.encrypted_packets if p["ts"] > since]
         return web.json_response({"packets": packets})
 
+    async def handle_api_sensor(self, request):
+        """GET /api/sensor/{node}/{pin} — latest decoded sensor value as JSON."""
+        node = request.match_info["node"]
+        pin = request.match_info["pin"]
+        key = f"{node}:{pin}"
+        data = self.sensor_latest.get(key, {})
+        if not data:
+            return web.json_response({"error": "No data"}, status=404)
+        return web.json_response(data)
+
+    async def handle_gauge(self, request):
+        """GET /gauge/{node}/{pin} — self-contained HTML gauge page for any sensor."""
+        node = request.match_info["node"]
+        pin = request.match_info["pin"]
+        label = request.query.get("label", f"Node {node} Pin {pin}")
+        unit = request.query.get("unit", "")
+        min_val = request.query.get("min", "0")
+        max_val = request.query.get("max", "1024")
+        html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>{label} — TiggyOpenMesh Gauge</title>
+<style>
+  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+  body {{
+    background: #0a0a0a;
+    color: #e0e0e0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    overflow: hidden;
+  }}
+  .label {{
+    font-size: 1.4rem;
+    font-weight: 600;
+    color: #b0b0b0;
+    margin-bottom: 0.5rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+  }}
+  .gauge-wrap {{
+    position: relative;
+    width: 300px;
+    height: 300px;
+  }}
+  @media (min-width: 500px) {{
+    .gauge-wrap {{ width: 380px; height: 380px; }}
+    .label {{ font-size: 1.6rem; }}
+  }}
+  .gauge-wrap svg {{
+    width: 100%;
+    height: 100%;
+  }}
+  .arc-bg {{
+    fill: none;
+    stroke: #1a1a1a;
+    stroke-width: 18;
+    stroke-linecap: round;
+  }}
+  .arc-fg {{
+    fill: none;
+    stroke: url(#gaugeGrad);
+    stroke-width: 18;
+    stroke-linecap: round;
+    transition: stroke-dashoffset 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+  }}
+  .tick-marks {{
+    fill: none;
+    stroke: #333;
+    stroke-width: 1.5;
+  }}
+  .value-text {{
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    text-align: center;
+  }}
+  .value-num {{
+    font-size: 4rem;
+    font-weight: 700;
+    color: #00E676;
+    line-height: 1;
+    transition: color 0.3s;
+  }}
+  @media (min-width: 500px) {{
+    .value-num {{ font-size: 5rem; }}
+  }}
+  .value-unit {{
+    font-size: 1.2rem;
+    color: #888;
+    margin-top: 0.2rem;
+  }}
+  .range-labels {{
+    display: flex;
+    justify-content: space-between;
+    width: 260px;
+    margin-top: -1.5rem;
+    font-size: 0.85rem;
+    color: #555;
+  }}
+  @media (min-width: 500px) {{
+    .range-labels {{ width: 330px; }}
+  }}
+  .status {{
+    margin-top: 1.5rem;
+    font-size: 0.9rem;
+    color: #555;
+    text-align: center;
+  }}
+  .status.stale {{ color: #FF5252; }}
+  .brand {{
+    position: fixed;
+    bottom: 1rem;
+    font-size: 0.75rem;
+    color: #333;
+    letter-spacing: 0.05em;
+  }}
+  .waiting {{
+    color: #555;
+    font-size: 1.5rem;
+    animation: pulse 2s ease-in-out infinite;
+  }}
+  @keyframes pulse {{
+    0%, 100% {{ opacity: 0.4; }}
+    50% {{ opacity: 1; }}
+  }}
+</style>
+</head>
+<body>
+<div class="label" id="label">{label}</div>
+<div class="gauge-wrap">
+  <svg viewBox="0 0 200 200">
+    <defs>
+      <linearGradient id="gaugeGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+        <stop offset="0%" stop-color="#00E676"/>
+        <stop offset="70%" stop-color="#00E676"/>
+        <stop offset="100%" stop-color="#FFEA00"/>
+      </linearGradient>
+    </defs>
+    <!-- tick marks -->
+    <g class="tick-marks" id="ticks"></g>
+    <!-- background arc -->
+    <path class="arc-bg" id="arcBg"/>
+    <!-- foreground arc (value) -->
+    <path class="arc-fg" id="arcFg"/>
+  </svg>
+  <div class="value-text">
+    <div class="value-num" id="valNum">--</div>
+    <div class="value-unit" id="valUnit">{unit}</div>
+  </div>
+</div>
+<div class="range-labels">
+  <span id="minLabel">{min_val}</span>
+  <span id="maxLabel">{max_val}</span>
+</div>
+<div class="status" id="status">Connecting...</div>
+<div class="brand">TiggyOpenMesh</div>
+
+<script>
+(function() {{
+  const MIN = {min_val};
+  const MAX = {max_val};
+  const API = "/api/sensor/{node}/{pin}";
+
+  // Arc geometry — 240-degree sweep, centred at bottom
+  const CX = 100, CY = 100, R = 80;
+  const START_ANGLE = 150;   // degrees (from 12 o'clock CW)
+  const SWEEP = 240;
+
+  function polarToCart(cx, cy, r, deg) {{
+    const rad = (deg - 90) * Math.PI / 180;
+    return {{ x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) }};
+  }}
+
+  function describeArc(cx, cy, r, startDeg, endDeg) {{
+    const s = polarToCart(cx, cy, r, startDeg);
+    const e = polarToCart(cx, cy, r, endDeg);
+    const large = (endDeg - startDeg) > 180 ? 1 : 0;
+    return `M ${{s.x}} ${{s.y}} A ${{r}} ${{r}} 0 ${{large}} 1 ${{e.x}} ${{e.y}}`;
+  }}
+
+  // Draw background arc
+  const bgPath = describeArc(CX, CY, R, START_ANGLE, START_ANGLE + SWEEP);
+  document.getElementById('arcBg').setAttribute('d', bgPath);
+
+  // Draw tick marks
+  const tickG = document.getElementById('ticks');
+  for (let i = 0; i <= 10; i++) {{
+    const deg = START_ANGLE + (SWEEP * i / 10);
+    const inner = polarToCart(CX, CY, R - 12, deg);
+    const outer = polarToCart(CX, CY, R - 8, deg);
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    line.setAttribute('x1', inner.x);
+    line.setAttribute('y1', inner.y);
+    line.setAttribute('x2', outer.x);
+    line.setAttribute('y2', outer.y);
+    if (i % 5 === 0) {{ line.style.strokeWidth = '2.5'; line.style.stroke = '#555'; }}
+    tickG.appendChild(line);
+  }}
+
+  // Compute total arc length for dash-offset animation
+  const arcFg = document.getElementById('arcFg');
+  arcFg.setAttribute('d', bgPath);
+  const totalLen = arcFg.getTotalLength();
+  arcFg.style.strokeDasharray = totalLen;
+  arcFg.style.strokeDashoffset = totalLen;  // fully hidden
+
+  const valNum = document.getElementById('valNum');
+  const statusEl = document.getElementById('status');
+  let lastTs = 0;
+
+  function setGauge(value) {{
+    const clamped = Math.max(MIN, Math.min(MAX, value));
+    const frac = (clamped - MIN) / (MAX - MIN || 1);
+    arcFg.style.strokeDashoffset = totalLen * (1 - frac);
+    valNum.textContent = Math.round(value);
+    // Colour shift: green → yellow → red
+    if (frac > 0.85) {{
+      valNum.style.color = '#FF5252';
+    }} else if (frac > 0.65) {{
+      valNum.style.color = '#FFEA00';
+    }} else {{
+      valNum.style.color = '#00E676';
+    }}
+  }}
+
+  async function poll() {{
+    try {{
+      const resp = await fetch(API);
+      if (!resp.ok) {{
+        statusEl.textContent = 'Waiting for data\u2026';
+        statusEl.className = 'status';
+        return;
+      }}
+      const d = await resp.json();
+      lastTs = d.ts || 0;
+      setGauge(d.value);
+      updateAge();
+    }} catch(e) {{
+      statusEl.textContent = 'Connection error';
+      statusEl.className = 'status stale';
+    }}
+  }}
+
+  function updateAge() {{
+    if (!lastTs) return;
+    const ago = Math.round(Date.now() / 1000 - lastTs);
+    if (ago < 0 || ago > 86400) {{
+      statusEl.textContent = 'Stale data';
+      statusEl.className = 'status stale';
+    }} else if (ago > 120) {{
+      statusEl.textContent = `Last updated: ${{Math.round(ago/60)}}m ago`;
+      statusEl.className = 'status stale';
+    }} else {{
+      statusEl.textContent = `Last updated: ${{ago}}s ago`;
+      statusEl.className = 'status';
+    }}
+  }}
+
+  poll();
+  setInterval(poll, 5000);
+  setInterval(updateAge, 1000);
+}})();
+</script>
+</body>
+</html>"""
+        return web.Response(text=html, content_type="text/html")
+
     async def handle_root(self, request):
         """GET / — WebSocket upgrade → gateway handler; normal GET → map.html."""
         # If this is a WebSocket upgrade request, handle as gateway connection
@@ -423,6 +713,7 @@ class GatewayHub:
         log.info(f"  Map:       http://0.0.0.0:{self.listen_port}/")
         log.info(f"  API:       http://0.0.0.0:{self.listen_port}/api/gateways")
         log.info(f"  Sensors:   http://0.0.0.0:{self.listen_port}/api/sensors")
+        log.info(f"  Gauge:     http://0.0.0.0:{self.listen_port}/gauge/{{node}}/{{pin}}")
         if self.auth_key:
             log.info(f"  Authentication: ENABLED (key required)")
         else:
@@ -434,6 +725,8 @@ class GatewayHub:
         # HTTP endpoints for map API
         app.router.add_get("/api/gateways", self.handle_api_gateways)
         app.router.add_get("/api/sensors", self.handle_api_sensors)
+        app.router.add_get("/api/sensor/{node}/{pin}", self.handle_api_sensor)
+        app.router.add_get("/gauge/{node}/{pin}", self.handle_gauge)
         # Static files from gateway/web/
         web_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
         if os.path.isdir(web_dir):

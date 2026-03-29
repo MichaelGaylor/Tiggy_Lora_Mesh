@@ -25,6 +25,7 @@ class BlockType(str, Enum):
     PULSE_INPUT = "pulse_input"
     BEACON_DETECT = "beacon_detect"
     CONSTANT = "constant"
+    SCHEDULE = "schedule"
     # Transforms
     SCALE = "scale"
     MOVING_AVG = "moving_avg"
@@ -37,6 +38,7 @@ class BlockType(str, Enum):
     DEBOUNCE = "debounce"
     MONOSTABLE = "monostable"
     LATCH = "latch"
+    GEOFENCE = "geofence"
     # Actions
     SET_RELAY = "set_relay"
     PULSE_RELAY = "pulse_relay"
@@ -81,6 +83,13 @@ BLOCK_DEFS = {
         "inputs": [],
         "outputs": [("value", "number")],
         "defaults": {"value": 0},
+    },
+    BlockType.SCHEDULE: {
+        "category": "input",
+        "label": "Schedule",
+        "inputs": [],
+        "outputs": [("active", "bool")],
+        "defaults": {"on_time": "06:00", "off_time": "20:00", "days": "Mon,Tue,Wed,Thu,Fri,Sat,Sun"},
     },
     BlockType.SCALE: {
         "category": "transform",
@@ -151,6 +160,13 @@ BLOCK_DEFS = {
         "inputs": [("set", "bool"), ("reset", "bool")],
         "outputs": [("q", "bool")],
         "defaults": {},
+    },
+    BlockType.GEOFENCE: {
+        "category": "condition",
+        "label": "Geofence",
+        "inputs": [],
+        "outputs": [("inside", "bool"), ("distance", "number")],
+        "defaults": {"node_id": "", "centre_lat": "0", "centre_lon": "0", "radius_m": "500"},
     },
     BlockType.SET_RELAY: {
         "category": "action",
@@ -339,6 +355,7 @@ class AutomationEngine:
         self.deployed_beacons: set[str] = set()  # beacon IDs that have been deployed
         self._pending_relay_cmds: list[dict] = []  # Awaiting ACK [{node, pin, sent_at}]
         self.node_pin_configs: dict[str, tuple[list[str], list[str]]] = {}  # nodeId → (relay_pins, sensor_pins)
+        self.node_positions: dict[str, dict] = {}  # nodeId → {"lat": float, "lon": float}
         self.rules: list[Rule] = []
         self.rules_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rules.json")
 
@@ -601,6 +618,33 @@ class AutomationEngine:
             block.error = ""
             return {"value": cfg.get("value", 0)}
 
+        if bt == BlockType.SCHEDULE:
+            import time as _time
+            try:
+                on_parts = str(cfg.get("on_time", "06:00")).split(":")
+                off_parts = str(cfg.get("off_time", "20:00")).split(":")
+                now_t = _time.localtime()
+                current_mins = now_t.tm_hour * 60 + now_t.tm_min
+                on_mins = int(on_parts[0]) * 60 + int(on_parts[1])
+                off_mins = int(off_parts[0]) * 60 + int(off_parts[1])
+                day_names = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
+                days = str(cfg.get("days", "Mon,Tue,Wed,Thu,Fri,Sat,Sun")).split(",")
+                today = day_names[now_t.tm_wday]
+                if today not in days:
+                    block.status = "active"
+                    block.error = f"Off ({today})"
+                    return {"active": False}
+                if on_mins <= off_mins:
+                    active = on_mins <= current_mins < off_mins
+                else:
+                    active = current_mins >= on_mins or current_mins < off_mins
+                block.status = "triggered" if active else "active"
+                block.error = ""
+                return {"active": active}
+            except Exception:
+                block.error = "Invalid time"
+                return {"active": False}
+
         # ── Transforms ────────────────────────────────────────
         if bt == BlockType.SCALE:
             v = inputs.get("in")
@@ -715,6 +759,29 @@ class AutomationEngine:
                 st["q"] = True
             block.status = "active"
             return {"q": st["q"]}
+
+        if bt == BlockType.GEOFENCE:
+            from math import cos, radians, sqrt
+            node_id = cfg.get("node_id", "")
+            pos = self.node_positions.get(node_id)
+            if not pos:
+                block.error = "No GPS data"
+                block.status = "idle"
+                return {"inside": None, "distance": None}
+            try:
+                clat = float(cfg.get("centre_lat", 0))
+                clon = float(cfg.get("centre_lon", 0))
+                radius = float(cfg.get("radius_m", 500))
+                dlat = (pos["lat"] - clat) * 111320
+                dlon = (pos["lon"] - clon) * 111320 * cos(radians(clat))
+                dist = sqrt(dlat**2 + dlon**2)
+                inside = dist <= radius
+                block.status = "active" if inside else "triggered"
+                block.error = "" if inside else f"{dist:.0f}m away"
+                return {"inside": inside, "distance": round(dist, 1)}
+            except (ValueError, TypeError):
+                block.error = "Invalid config"
+                return {"inside": None, "distance": None}
 
         # ── Actions ───────────────────────────────────────────
         if bt == BlockType.SET_RELAY:

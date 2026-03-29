@@ -747,6 +747,15 @@ class GatewayGUIApp:
         self.disconnect_btn.configure(state="normal")
 
     def disconnect(self):
+        # Stop Telegram bot before disconnecting serial (prevents crash)
+        if self.telegram_bridge and self.telegram_bridge.is_running:
+            try:
+                self.telegram_bridge.stop()
+                self.telegram_bridge = None
+                self.tg_connect_btn.configure(text="Start Bot")
+                self.tg_status_label.configure(text="Stopped", text_color=COLORS["dim"])
+            except Exception:
+                pass
         if self.gateway:
             self.gateway.shutdown()
         self.connected = False
@@ -758,6 +767,7 @@ class GatewayGUIApp:
     # ─── Event Processing ───────────────────────────────────
 
     def poll_events(self):
+        if not self.root.winfo_exists(): return
         try:
             for _ in range(50):  # batch up to 50 events per tick
                 event = self.event_queue.get_nowait()
@@ -836,6 +846,16 @@ class GatewayGUIApp:
             # Parse pin config: PINS,R:2,3,4|S:33,34
             elif text.startswith("PINS,"):
                 self._parse_pins(text)
+            # Parse GPS position from local node
+            elif text.startswith("GPS,") and hasattr(self, 'local_id') and self.local_id:
+                try:
+                    gps_parts = text.split(",")
+                    if len(gps_parts) >= 3:
+                        self.engine.node_positions[self.local_id] = {
+                            "lat": float(gps_parts[1]), "lon": float(gps_parts[2]), "ts": time.time()
+                        }
+                except (ValueError, IndexError):
+                    pass
             # Parse beacon events
             elif text.startswith("BEACON,TRIGGERED,"):
                 self._parse_beacon_event(text, True)
@@ -863,6 +883,18 @@ class GatewayGUIApp:
                         self.engine._log("Engine", f"RX SDATA from {from_node}: {content[:50]}")
                     elif content.startswith("PINS,"):
                         self._parse_pins(content, from_node)
+                    elif content.startswith("POS,"):
+                        # GPS position from remote node → store for geofencing
+                        try:
+                            pos_parts = content.split(",")
+                            if len(pos_parts) >= 3:
+                                self.engine.node_positions[from_node] = {
+                                    "lat": float(pos_parts[1]),
+                                    "lon": float(pos_parts[2]),
+                                    "ts": time.time()
+                                }
+                        except (ValueError, IndexError):
+                            pass
             # Log unhandled serial lines (full text for scan results, truncated for others)
             elif text.startswith("BEACONSCAN,"):
                 self.engine._log("Serial", text)  # Full scan result for beacon dialog
@@ -1111,6 +1143,7 @@ class GatewayGUIApp:
         return "#FF5252"       # red — weak
 
     def animate_topology(self):
+        if not self.root.winfo_exists(): return
         canvas = self.topo_canvas
         canvas.delete("all")
         w = canvas.winfo_width() or 400
@@ -1543,6 +1576,7 @@ class GatewayGUIApp:
 
     def _eval_automation(self):
         """Periodic automation rule evaluation."""
+        if not self.root.winfo_exists(): return
         try:
             self.engine.evaluate_all()
             # Update live values on canvas if visible
@@ -1598,6 +1632,16 @@ class GatewayGUIApp:
             self.sensor_data[key].append((now, val))
             if len(self.sensor_data[key]) > self.max_sensor_history:
                 self.sensor_data[key] = self.sensor_data[key][-self.max_sensor_history:]
+            # Forward decoded sensor value to hub for web gauge
+            if hasattr(self, 'gateway') and self.gateway and hasattr(self.gateway, 'hub_ws') and self.gateway.hub_ws:
+                import json as _json
+                try:
+                    _msg = _json.dumps({"type": "sensor", "node": node_id, "pin": str(pin), "value": val})
+                    asyncio.run_coroutine_threadsafe(
+                        self.gateway.hub_ws.send(_msg), self.gateway._loop
+                    )
+                except Exception:
+                    pass
 
     def _set_default_pins_for_board(self, board_name: str):
         """Set default relay/sensor pins based on board type from Pins.h defaults."""

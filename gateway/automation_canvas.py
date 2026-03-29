@@ -42,16 +42,17 @@ DEPLOY_BADGE = {
     BlockType.AND_GATE: "GUI", BlockType.OR_GATE: "GUI",
     BlockType.NOT_GATE: "GUI", BlockType.LATCH: "GUI",
     BlockType.SEND_DIRECT: "GUI", BlockType.TELEGRAM_OUTPUT: "GUI",
+    BlockType.SCHEDULE: "GUI", BlockType.GEOFENCE: "GUI",
 }
 # All others default to "ND+GUI" (both)
 
 CATEGORY_BLOCKS = {
     "Input": [BlockType.SENSOR_READ, BlockType.DIGITAL_READ, BlockType.PULSE_INPUT,
-              BlockType.BEACON_DETECT, BlockType.CONSTANT],
+              BlockType.BEACON_DETECT, BlockType.CONSTANT, BlockType.SCHEDULE],
     "Transform": [BlockType.SCALE, BlockType.MOVING_AVG, BlockType.DELTA_RATE],
     "Condition": [BlockType.COMPARE, BlockType.AND_GATE, BlockType.OR_GATE,
                   BlockType.NOT_GATE, BlockType.DEBOUNCE, BlockType.MONOSTABLE,
-                  BlockType.LATCH],
+                  BlockType.LATCH, BlockType.GEOFENCE],
     "Action": [BlockType.SET_RELAY, BlockType.PULSE_RELAY,
                BlockType.SEND_BROADCAST, BlockType.SEND_DIRECT,
                BlockType.TELEGRAM_OUTPUT],
@@ -244,6 +245,11 @@ def show_block_config(parent, block: Block, discovered_nodes: dict,
     elif bt == BlockType.CONSTANT:
         add_field("Value:", "value", "0")
 
+    elif bt == BlockType.SCHEDULE:
+        add_field("ON time (HH:MM):", "on_time", "06:00")
+        add_field("OFF time (HH:MM):", "off_time", "20:00")
+        add_field("Days:", "days", "Mon,Tue,Wed,Thu,Fri,Sat,Sun")
+
     elif bt == BlockType.SCALE:
         add_field("Factor:", "factor", "1.0")
         add_field("Offset:", "offset", "0.0")
@@ -267,6 +273,12 @@ def show_block_config(parent, block: Block, discovered_nodes: dict,
 
     elif bt == BlockType.MONOSTABLE:
         add_field("Hold time (sec):", "hold_seconds", "60.0")
+
+    elif bt == BlockType.GEOFENCE:
+        add_node_combo("Track Node:", "node_id")
+        add_field("Centre Lat:", "centre_lat", "0")
+        add_field("Centre Lon:", "centre_lon", "0")
+        add_field("Radius (m):", "radius_m", "500")
 
     elif bt == BlockType.SET_RELAY:
         add_node_combo("Node ID:", "node_id")
@@ -702,6 +714,13 @@ class AutomationCanvas:
             return f"{label} {thresh}dBm"
         if bt == BlockType.CONSTANT:
             return str(cfg.get("value", 0))
+        if bt == BlockType.SCHEDULE:
+            on = cfg.get("on_time", "06:00")
+            off = cfg.get("off_time", "20:00")
+            days = cfg.get("days", "Mon,Tue,Wed,Thu,Fri,Sat,Sun")
+            if len(days) > 20:
+                days = "Daily"
+            return f"{on}-{off} {days}"
         if bt == BlockType.SCALE:
             f = cfg.get("factor", 1)
             o = cfg.get("offset", 0)
@@ -716,6 +735,10 @@ class AutomationCanvas:
             return f"{cfg.get('hold_seconds', 5)}s"
         if bt == BlockType.MONOSTABLE:
             return f"{cfg.get('hold_seconds', 60)}s hold"
+        if bt == BlockType.GEOFENCE:
+            nid = cfg.get("node_id", "?")
+            r = cfg.get("radius_m", 500)
+            return f"{nid}: {r}m radius"
         if bt == BlockType.SET_RELAY:
             return f"{cfg.get('node_id', '?')}:pin{cfg.get('pin', '?')} {'HIGH' if cfg.get('action', 1) else 'LOW'}"
         if bt == BlockType.PULSE_RELAY:
