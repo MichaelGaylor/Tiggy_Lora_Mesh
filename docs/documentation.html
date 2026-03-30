@@ -520,6 +520,7 @@
   <a href="#sensor-dashboard">Sensor Dashboard</a>
   <a href="#hw-watchdog">HW Watchdog</a>
   <a href="#heltec-v4">Heltec V4 USB</a>
+  <a href="#web-gauge">Web Gauge</a>
 </nav>
 
 <div class="container">
@@ -2284,6 +2285,12 @@ gateway/
     <td><strong>Value:</strong> Any number (e.g., 2000, 15.5).</td>
     <td>A number.</td>
   </tr>
+  <tr>
+    <td style="color:var(--cyan);">Schedule</td>
+    <td>Time-based trigger. Outputs true during configured hours/days. Uses the gateway PC&rsquo;s clock. Supports overnight schedules (e.g., 22:00&ndash;06:00).</td>
+    <td><strong>On time:</strong> HH:MM (24hr). <strong>Off time:</strong> HH:MM. <strong>Days:</strong> Mon,Tue,Wed,Thu,Fri,Sat,Sun (comma-separated, default all).</td>
+    <td><code>active</code> (bool) &mdash; true during scheduled hours on selected days.</td>
+  </tr>
 </table>
 
 <h4>Transform Blocks (green border)</h4>
@@ -2362,6 +2369,12 @@ gateway/
     <td style="color:var(--yellow);">Latch (SR Flip-Flop)</td>
     <td>Once &ldquo;set&rdquo; goes true, the output stays true until &ldquo;reset&rdquo; goes true. Like a physical toggle switch.</td>
     <td>None &mdash; connect a <strong>set</strong> signal and a <strong>reset</strong> signal.</td>
+  </tr>
+  <tr>
+    <td style="color:var(--yellow);">Geofence</td>
+    <td>GPS boundary detection. Checks if a node&rsquo;s GPS position is inside or outside a circle you define. Outputs distance in metres.</td>
+    <td><strong>Node ID:</strong> which GPS node to track. <strong>Centre Lat/Lon:</strong> fence centre coordinates. <strong>Radius:</strong> metres (default 500).</td>
+    <td><code>inside</code> (bool) &mdash; true if node is within the radius. <code>distance</code> (number) &mdash; metres from centre.</td>
   </tr>
 </table>
 
@@ -3783,13 +3796,71 @@ BEACON,REVERTED,Gate</pre>
 </ul>
 </section>
 
+<section id="web-gauge">
+<h2>44. Web Gauge &mdash; Live Sensor Sharing</h2>
+<p>Share any sensor reading as a live web page. Anyone with the URL sees an auto-refreshing gauge on their phone &mdash; no app, no login, no limit on viewers.</p>
+
+<h3>URL Format</h3>
+<pre style="background:var(--panel); padding:12px; border-radius:6px; overflow-x:auto;">
+https://&lt;hub-address&gt;/gauge/&lt;node-id&gt;/&lt;pin&gt;?label=&lt;name&gt;&amp;unit=&lt;unit&gt;&amp;min=&lt;min&gt;&amp;max=&lt;max&gt;
+</pre>
+
+<h3>Parameters</h3>
+<table>
+  <tr><th>Parameter</th><th>Required</th><th>Default</th><th>Example</th></tr>
+  <tr><td>node-id</td><td>Yes</td><td>&mdash;</td><td>5041</td></tr>
+  <tr><td>pin</td><td>Yes</td><td>&mdash;</td><td>15</td></tr>
+  <tr><td>label</td><td>No</td><td>Sensor</td><td>Barn+Temperature</td></tr>
+  <tr><td>unit</td><td>No</td><td>(none)</td><td>&deg;C</td></tr>
+  <tr><td>min</td><td>No</td><td>0</td><td>0</td></tr>
+  <tr><td>max</td><td>No</td><td>500</td><td>50</td></tr>
+</table>
+
+<h3>Examples</h3>
+<pre style="background:var(--panel); padding:12px; border-radius:6px; overflow-x:auto;">
+/gauge/5041/15?label=Barn+Temperature&amp;unit=&deg;C&amp;min=0&amp;max=50
+/gauge/5041/19?label=Wind+Speed&amp;unit=km/h&amp;min=0&amp;max=100
+/gauge/263A/3?label=Water+Level&amp;unit=%25&amp;min=0&amp;max=100
+</pre>
+
+<h3>How It Works</h3>
+<ol>
+  <li>Gateway GUI decodes sensor data (SDATA) from nodes via LoRa.</li>
+  <li>GUI forwards decoded values to the hub via WebSocket: <code>{"type": "sensor", "node": "5041", "pin": "15", "value": 423}</code></li>
+  <li>Hub stores latest value per node/pin in memory.</li>
+  <li><code>/gauge/&lt;node&gt;/&lt;pin&gt;</code> serves a live HTML gauge page with auto-refresh every 5 seconds.</li>
+  <li><code>/api/sensor/&lt;node&gt;/&lt;pin&gt;</code> returns JSON for programmatic access.</li>
+</ol>
+
+<h3>API Endpoint</h3>
+<pre style="background:var(--panel); padding:12px; border-radius:6px; overflow-x:auto;">
+GET /api/sensor/&lt;node&gt;/&lt;pin&gt;
+Response: {"node": "5041", "pin": "15", "value": 423, "ts": 1711234567}
+</pre>
+
+<h3>Requirements</h3>
+<ul>
+  <li>Hub server must be running (<code>gateway_hub.py</code>).</li>
+  <li>Gateway GUI must be connected and receiving sensor data.</li>
+  <li>Hub must be restarted after updating to pick up the <code>/gauge</code> endpoint.</li>
+</ul>
+
+<h3>Sharing</h3>
+<ul>
+  <li>Text or email the URL to anyone.</li>
+  <li>Generate a QR code and stick it on a wall.</li>
+  <li>Embed in an <code>&lt;iframe&gt;</code> on your website.</li>
+  <li>No limit on concurrent viewers &mdash; it&rsquo;s just a web page.</li>
+</ul>
+</section>
+
 </div>
 
 <!-- Footer -->
 <div style="background:var(--panel); border-top:1px solid var(--faint); padding:30px 40px; text-align:center; color:var(--faint); font-size:0.85em;">
   <p>TiggyOpenMesh v4.1 &mdash; MeshCore Architecture</p>
   <p>T-Deck Plus &bull; LoRa32 T3 V1.6.1 &bull; Heltec WiFi LoRa 32 V3 &bull; Heltec WiFi LoRa 32 V4 &bull; XIAO ESP32S3</p>
-  <p>43 sections &mdash; Hardware, Protocol, UI, BLE, Gateway, Logic Builder, Timers, Setpoints, Sensors, Pulse Counters, SOS, Map, Solar, Delivery, SF Change, Collision Detection, IO Expansion, GPS, Device Management, Signal Routing, iBeacon Scanner, Meshtastic Bridge, Telegram Bot (Gateway), Sensor Dashboard, HW Watchdog, Heltec V4 USB/FEM, Caveats</p>
+  <p>44 sections &mdash; Hardware, Protocol, UI, BLE, Gateway, Logic Builder, Timers, Setpoints, Sensors, Pulse Counters, SOS, Map, Solar, Delivery, SF Change, Collision Detection, IO Expansion, GPS, Device Management, Signal Routing, iBeacon Scanner, Meshtastic Bridge, Telegram Bot (Gateway), Sensor Dashboard, HW Watchdog, Heltec V4 USB/FEM, Web Gauge, Caveats</p>
   <p style="margin-top:8px;">Documentation updated March 2026</p>
 </div>
 
