@@ -30,5 +30,15 @@ gateway/rules.json
 gateway/gateway_gui_config.json
 check_syntax.py
 
+# Premium files (in separate private repo)
+gateway/gateway_gui.py
+gateway/automation_engine.py
+gateway/automation_canvas.py
+gateway/sensor_dashboard.py
+gateway/telegram_bot.py
+gateway/meshtastic_bridge.py
+gateway/license_manager.py
+gateway/build.bat
+
 # Claude
 .claude/

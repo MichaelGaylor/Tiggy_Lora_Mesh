@@ -185,6 +185,16 @@
     border-left: 4px solid var(--red);
   }
   .info-box p { margin-bottom: 4px; }
+  .pro-banner {
+    background: linear-gradient(90deg, rgba(255,140,0,0.12), rgba(255,140,0,0.04));
+    border-left: 4px solid var(--orange);
+    border-radius: 8px;
+    padding: 10px 18px;
+    margin: 14px 0 20px;
+    font-size: 0.92em;
+    color: var(--orange);
+  }
+  .pro-banner a { color: var(--cyan); }
 
   .callout {
     background: rgba(0,229,255,0.08);
@@ -521,6 +531,7 @@
   <a href="#hw-watchdog">HW Watchdog</a>
   <a href="#heltec-v4">Heltec V4 USB</a>
   <a href="#web-gauge">Web Gauge</a>
+  <a href="#licensing">Licensing</a>
 </nav>
 
 <div class="container">
@@ -2188,17 +2199,18 @@ python gateway.py --port COM5 --listen <span class="number">9001</span> --peers 
 <!-- ─── File Structure ─── -->
 
 <h3>Gateway File Structure</h3>
+<div class="pro-banner">Files marked with &#9733; are part of <strong>TiggyOpenMesh Pro</strong> (paid). The free version includes the CLI gateway (<code>gateway.py</code>) and hub server.</div>
 <pre>
 gateway/
   <span style="color:var(--cyan);">gateway.py</span>              <span class="comment"># Gateway client — headless (Linux/Windows CLI)</span>
-  <span style="color:var(--cyan);">gateway_gui.py</span>          <span class="comment"># Gateway client — Windows GUI (topology view + packet waterfall)</span>
+  <span style="color:var(--cyan);">gateway_gui.py</span>       &#9733; <span class="comment"># Gateway client — Windows GUI (topology view + packet waterfall)</span>
   <span style="color:var(--green);">gateway_hub.py</span>          <span class="comment"># Central hub server — headless (Linux/Windows CLI)</span>
   <span style="color:var(--green);">gateway_hub_gui.py</span>      <span class="comment"># Central hub server — Windows GUI (live dashboard)</span>
-  <span style="color:var(--orange);">automation_engine.py</span>    <span class="comment"># Logic Builder evaluation engine — rule model, persistence, anti-flood</span>
-  <span style="color:var(--orange);">automation_canvas.py</span>    <span class="comment"># Logic Builder visual canvas — drag, connect, configure blocks</span>
-  <span style="color:var(--red);">telegram_bot.py</span>         <span class="comment"># Telegram bot bridge — exposes rules as chat commands</span>
-  <span style="color:var(--red);">meshtastic_bridge.py</span>    <span class="comment"># TiggyOpenMesh ↔ Meshtastic bidirectional bridge</span>
-  <span style="color:var(--cyan);">sensor_dashboard.py</span>     <span class="comment"># Sensor gauges, line chart, CSV export (Sensors tab)</span>
+  <span style="color:var(--orange);">automation_engine.py</span> &#9733; <span class="comment"># Logic Builder evaluation engine — rule model, persistence, anti-flood</span>
+  <span style="color:var(--orange);">automation_canvas.py</span> &#9733; <span class="comment"># Logic Builder visual canvas — drag, connect, configure blocks</span>
+  <span style="color:var(--red);">telegram_bot.py</span>      &#9733; <span class="comment"># Telegram bot bridge — exposes rules as chat commands</span>
+  <span style="color:var(--red);">meshtastic_bridge.py</span> &#9733; <span class="comment"># TiggyOpenMesh ↔ Meshtastic bidirectional bridge</span>
+  <span style="color:var(--cyan);">sensor_dashboard.py</span>  &#9733; <span class="comment"># Sensor gauges, line chart, CSV export (Sensors tab)</span>
   <span style="color:var(--dim);">rules.json</span>              <span class="comment"># Auto-generated Logic Builder rules (JSON persistence)</span>
   <span style="color:var(--dim);">requirements.txt</span>        <span class="comment"># Python dependencies: pyserial, websockets, aiohttp, customtkinter</span>
   <span style="color:var(--dim);">gateways.json</span>           <span class="comment"># Auto-generated gateway registry (location persistence)</span>
@@ -2213,6 +2225,7 @@ gateway/
 <!-- ─── Gateway GUI Features ─── -->
 
 <h3>Gateway GUI — Feature Overview</h3>
+<div class="pro-banner">&#9733; <strong>TiggyOpenMesh Pro Feature</strong> — visit <a href="https://tiggyengineering.com">tiggyengineering.com</a></div>
 <p>The Windows GUI client (<code>gateway_gui.py</code>) provides a comprehensive dashboard with four main tabs:</p>
 
 <table>
@@ -2235,6 +2248,7 @@ gateway/
 <!-- ═══════════════ LOGIC BUILDER ═══════════════ -->
 <section id="logic-builder">
 <h2>22. Logic Builder &mdash; Visual Automation for the Gateway GUI</h2>
+<div class="pro-banner">&#9733; <strong>TiggyOpenMesh Pro Feature</strong> — visit <a href="https://tiggyengineering.com">tiggyengineering.com</a></div>
 
 <p>The Logic Builder is a <strong>PLC-style visual automation system</strong> built into the PC gateway GUI. It lets you create cross-node automation rules by dragging and connecting blocks on a canvas &mdash; like ladder logic or Scratch, but for your mesh network. Rules evaluate sensor data received from the mesh and fire actions (relay control, messages) back through the mesh.</p>
 
@@ -3617,6 +3631,7 @@ BEACON,REVERTED,Gate</pre>
 <!-- ═══════════════════════════════════════════════════════════ -->
 <section id="meshtastic-bridge">
 <h2>39. Meshtastic Bridge</h2>
+<div class="pro-banner">&#9733; <strong>TiggyOpenMesh Pro Feature</strong> — visit <a href="https://tiggyengineering.com">tiggyengineering.com</a></div>
 
 <p>The gateway GUI includes a built-in <strong>Meshtastic bridge</strong> that connects TiggyOpenMesh and Meshtastic networks via two USB serial ports. Messages, position reports, and SOS alerts are translated bidirectionally between the two mesh protocols.</p>
 
@@ -3658,6 +3673,7 @@ BEACON,REVERTED,Gate</pre>
 <!-- ═══════════════════════════════════════════════════════════ -->
 <section id="telegram-gateway">
 <h2>40. Telegram Bot (Gateway GUI)</h2>
+<div class="pro-banner">&#9733; <strong>TiggyOpenMesh Pro Feature</strong> — visit <a href="https://tiggyengineering.com">tiggyengineering.com</a></div>
 
 <p>The gateway GUI includes a built-in <strong>Telegram bot</strong> that exposes your automation rules as chat commands. Unlike the Android app's Telegram forwarding (which forwards broadcast messages), this bot lets remote users <strong>query sensor values</strong> and <strong>trigger relay actions</strong> from anywhere via Telegram.</p>
 
@@ -3703,6 +3719,7 @@ BEACON,REVERTED,Gate</pre>
 <!-- ═══════════════════════════════════════════════════════════ -->
 <section id="sensor-dashboard">
 <h2>41. Sensor Dashboard</h2>
+<div class="pro-banner">&#9733; <strong>TiggyOpenMesh Pro Feature</strong> — visit <a href="https://tiggyengineering.com">tiggyengineering.com</a></div>
 
 <p>The gateway GUI's <strong>Sensors</strong> tab provides a full sensor monitoring dashboard with real-time visualisation of all SDATA values received from the mesh.</p>
 
@@ -3798,6 +3815,7 @@ BEACON,REVERTED,Gate</pre>
 
 <section id="web-gauge">
 <h2>44. Web Gauge &mdash; Live Sensor Sharing</h2>
+<div class="pro-banner">&#9733; <strong>TiggyOpenMesh Pro Feature</strong> — visit <a href="https://tiggyengineering.com">tiggyengineering.com</a></div>
 <p>Share any sensor reading as a live web page. Anyone with the URL sees an auto-refreshing gauge on their phone &mdash; no app, no login, no limit on viewers.</p>
 
 <h3>URL Format</h3>
@@ -3854,13 +3872,40 @@ Response: {"node": "5041", "pin": "15", "value": 423, "ts": 1711234567}
 </ul>
 </section>
 
+<!-- ═══════════════ LICENSING ═══════════════ -->
+<section id="licensing">
+<h2>45. Licensing &amp; Tiers</h2>
+
+<p>TiggyOpenMesh uses a <strong>free core + paid tiers</strong> model. The firmware, CLI gateway, Android app, and hub map are free and open-source. Premium GUI features are licensed per-seat with an offline activation key.</p>
+
+<table>
+  <tr><th>Tier</th><th>Price</th><th>What You Get</th></tr>
+  <tr><td style="color:var(--green);"><strong>Free</strong></td><td>&mdash;</td><td>Node firmware, CLI gateway (<code>gateway.py</code>), hub server (<code>gateway_hub.py</code>), Android app, live hub map</td></tr>
+  <tr><td style="color:var(--cyan);"><strong>Hobbyist</strong></td><td>&pound;30</td><td>Gateway GUI + Sensor Dashboard + manual relay control</td></tr>
+  <tr><td style="color:var(--orange);"><strong>Pro</strong></td><td>&pound;80</td><td>Everything in Hobbyist + Logic Builder (all blocks) + Telegram Bot + Meshtastic Bridge + Web Gauges</td></tr>
+  <tr><td style="color:var(--red);"><strong>Business</strong></td><td>&pound;300</td><td>Everything in Pro + priority support + remote setup assistance</td></tr>
+</table>
+
+<h3>Activation</h3>
+<ol style="color:var(--dim); padding-left:20px;">
+  <li>Purchase your licence key at <a href="https://tiggyengineering.com" style="color:var(--cyan);">tiggyengineering.com</a>.</li>
+  <li>Launch <code>gateway_gui.py</code>. On first run a licence dialog appears.</li>
+  <li>Paste your key and click <strong>Activate</strong>.</li>
+  <li>The key is validated <strong>offline</strong> &mdash; no internet connection is required after purchase.</li>
+</ol>
+
+<div class="info-box green">
+  <p><strong>Keys are perpetual:</strong> Once activated, the licence does not expire. Future updates within the same major version are included.</p>
+</div>
+</section>
+
 </div>
 
 <!-- Footer -->
 <div style="background:var(--panel); border-top:1px solid var(--faint); padding:30px 40px; text-align:center; color:var(--faint); font-size:0.85em;">
   <p>TiggyOpenMesh v4.1 &mdash; MeshCore Architecture</p>
   <p>T-Deck Plus &bull; LoRa32 T3 V1.6.1 &bull; Heltec WiFi LoRa 32 V3 &bull; Heltec WiFi LoRa 32 V4 &bull; XIAO ESP32S3</p>
-  <p>44 sections &mdash; Hardware, Protocol, UI, BLE, Gateway, Logic Builder, Timers, Setpoints, Sensors, Pulse Counters, SOS, Map, Solar, Delivery, SF Change, Collision Detection, IO Expansion, GPS, Device Management, Signal Routing, iBeacon Scanner, Meshtastic Bridge, Telegram Bot (Gateway), Sensor Dashboard, HW Watchdog, Heltec V4 USB/FEM, Web Gauge, Caveats</p>
+  <p>45 sections &mdash; Hardware, Protocol, UI, BLE, Gateway, Logic Builder, Timers, Setpoints, Sensors, Pulse Counters, SOS, Map, Solar, Delivery, SF Change, Collision Detection, IO Expansion, GPS, Device Management, Signal Routing, iBeacon Scanner, Meshtastic Bridge, Telegram Bot (Gateway), Sensor Dashboard, HW Watchdog, Heltec V4 USB/FEM, Web Gauge, Licensing, Caveats</p>
   <p style="margin-top:8px;">Documentation updated March 2026</p>
 </div>
 
