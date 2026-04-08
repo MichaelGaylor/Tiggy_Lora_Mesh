@@ -168,56 +168,39 @@ void wakeDisplay() {
     lastInputTime = millis();
 }
 
-// ─── Touch Screen (GT911) ─────────────────────────────────
+// ─── Touch Screen (GT911 via SensorLib) ──────────────────
 #ifdef BOARD_TOUCH_INT
+#include <TouchDrvGT911.hpp>
+TouchDrvGT911 touch;
 struct TouchPoint { int16_t x, y; bool touched; };
 bool touchEnabled = false;
 
 void setupTouch() {
-    pinMode(BOARD_TOUCH_INT, INPUT);
-    // GT911 should be on the I2C bus already initialized for keyboard
-    // Verify it responds
-    Wire.beginTransmission(TOUCH_I2C_ADDR);
-    if (Wire.endTransmission() == 0) {
+    touch.setPins(-1, BOARD_TOUCH_INT);  // RST=-1 (not wired), INT=16
+    if (touch.begin(Wire, GT911_SLAVE_ADDRESS_H, BOARD_I2C_SDA, BOARD_I2C_SCL)) {
+        touch.setMaxCoordinates(320, 240);
+        touch.setSwapXY(true);
+        touch.setMirrorXY(false, true);
         touchEnabled = true;
         debugPrint("Touch screen: GT911 OK");
+    } else if (touch.begin(Wire, GT911_SLAVE_ADDRESS_L, BOARD_I2C_SDA, BOARD_I2C_SCL)) {
+        touch.setMaxCoordinates(320, 240);
+        touch.setSwapXY(true);
+        touch.setMirrorXY(false, true);
+        touchEnabled = true;
+        debugPrint("Touch screen: GT911 OK (alt addr)");
     } else {
-        // Try alternate address
-        Wire.beginTransmission(0x14);
-        if (Wire.endTransmission() == 0) {
-            touchEnabled = true;
-            debugPrint("Touch screen: GT911 OK (alt addr 0x14)");
-        } else {
-            debugPrint("Touch screen: GT911 not found");
-        }
+        debugPrint("Touch screen: GT911 not found");
     }
 }
 
 TouchPoint readTouch() {
     if (!touchEnabled) return {0, 0, false};
-    // Read GT911 status register (0x814E)
-    Wire.beginTransmission(TOUCH_I2C_ADDR);
-    Wire.write(0x81); Wire.write(0x4E);
-    Wire.endTransmission(false);
-    Wire.requestFrom((uint8_t)TOUCH_I2C_ADDR, (uint8_t)1);
-    if (!Wire.available()) return {0, 0, false};
-    uint8_t status = Wire.read();
-    if (!(status & 0x80) || (status & 0x0F) == 0) {
-        return {0, 0, false};
+    int16_t x, y;
+    if (touch.getPoint(&x, &y)) {
+        return {x, y, true};
     }
-    // Read touch point 1 (0x8150: x_lo, x_hi, y_lo, y_hi)
-    Wire.beginTransmission(TOUCH_I2C_ADDR);
-    Wire.write(0x81); Wire.write(0x50);
-    Wire.endTransmission(false);
-    Wire.requestFrom((uint8_t)TOUCH_I2C_ADDR, (uint8_t)4);
-    if (Wire.available() < 4) return {0, 0, false};
-    int16_t x = Wire.read() | (Wire.read() << 8);
-    int16_t y = Wire.read() | (Wire.read() << 8);
-    // Clear status register
-    Wire.beginTransmission(TOUCH_I2C_ADDR);
-    Wire.write(0x81); Wire.write(0x4E); Wire.write(0x00);
-    Wire.endTransmission();
-    return {x, y, true};
+    return {0, 0, false};
 }
 #endif
 
@@ -920,9 +903,9 @@ void drawChatView() {
   display.setTextColor(COL_FAINT, COL_BG);
   display.setCursor(8, SCREEN_H - STATUS_H - 4);
   if (lastSender.length()) {
-    display.print("[r] Reply  [n] New  [Esc] Back  [Up/Dn] Scroll");
+    display.print("[r] Reply  [n] New  [Click] Back  [Up/Dn] Scroll");
   } else {
-    display.print("[n] New msg  [Esc] Back  [Up/Dn] Scroll");
+    display.print("[n] New msg  [Click] Back  [Up/Dn] Scroll");
   }
 
   drawStatusBar();
@@ -1099,7 +1082,7 @@ void drawTextInput() {
   int helpY = boxY + boxH + 8;
   display.setTextColor(COL_FAINT, COL_BG);
   display.setCursor(8, helpY);
-  display.print("[Enter] Send   [Bksp] Delete   [Esc] Cancel");
+  display.print("[Enter] Send   [Bksp] Delete   [Click] Cancel");
 
   drawStatusBar();
 }
@@ -1268,7 +1251,7 @@ void drawPhrasePicker(int category, int sentence, bool pickingCat,
   display.setTextSize(1);
   display.setTextColor(COL_FAINT, COL_BG);
   display.setCursor(8, SCREEN_H - STATUS_H - 4);
-  display.print("[Enter] Select  [Esc] Done  [Bksp] Back");
+  display.print("[Enter] Select  [Click] Done  [Bksp] Back");
 
   drawStatusBar();
 }
@@ -1339,7 +1322,15 @@ void handleMenu() {
   if (tb == 'C' || kb == '\r' || kb == '\n') {
     if (menuState == M_MAIN) {
       switch (menuIndex) {
-        case 0: inputBuffer = String(targetID); startTextInput("To (4 hex or FFFF)", INPUT_TARGET_THEN_MSG); return;
+        case 0: {
+          if (strlen(targetID) == NODE_ID_LEN) {
+            // Target already set — go straight to message input
+            startTextInput("Message to " + String(targetID), INPUT_MSG);
+          } else {
+            inputBuffer = ""; startTextInput("To (4 hex or FFFF)", INPUT_TARGET_THEN_MSG);
+          }
+          return;
+        }
         case 1: {
           std::vector<int> parts = pickMultiplePhrases();
           if (parts.size() > 0) {
@@ -1623,7 +1614,7 @@ void handleTracking() {
 
   display.setCursor(10, 170);
   display.setTextColor(COL_FAINT, COL_BG);
-  display.print("[q/Esc] Back");
+  display.print("[q/Click] Back");
 
   drawStatusBar();
 }
@@ -1661,7 +1652,7 @@ void handleSOS() {
     display.print("Next broadcast: " + String(nextSend) + "s");
 
     display.setCursor(30, 180);
-    display.print("Hold Esc 3s to cancel");
+    display.print("Hold Click 3s to cancel");
     drawStatusBar();
   }
 
@@ -1748,7 +1739,7 @@ void handleMeshView() {
   display.setTextSize(1);
   display.setTextColor(COL_FAINT, COL_BG);
   display.setCursor(8, SCREEN_H - STATUS_H - 4);
-  display.print("[q/Esc] Back   Auto-refresh 5s");
+  display.print("[q/Click] Back   Auto-refresh 5s");
   drawStatusBar();
 }
 
