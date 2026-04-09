@@ -1554,6 +1554,9 @@ void handleCmd(const String& from, const String& cmdBody) {
     else if (action == "RELAY") {
         processBleCommand("RELAY " + rest);
     }
+    else if (action == "PINMODE") {
+        processBleCommand("PINMODE," + rest, false);
+    }
     else if (action == "SAVE") {
         saveConfig();
         bleSend("OK,SAVE");
@@ -2618,7 +2621,7 @@ void loadConfig() {
 
     // Pin config version check — if version doesn't match, reset to defaults
     // This catches old EEPROM with wrong pins (e.g., 19/20/33 on ESP32-S3)
-    #define PIN_CONFIG_VERSION 4  // Increment when defaults change
+    #define PIN_CONFIG_VERSION 5  // Increment when defaults change (v5: 50/50 IO split)
     #define EEPROM_PIN_VER_ADDR (EEPROM_GPIO_ADDR + 30)
     uint8_t pinVer = EEPROM.read(EEPROM_PIN_VER_ADDR);
     if (pinVer != PIN_CONFIG_VERSION) {
