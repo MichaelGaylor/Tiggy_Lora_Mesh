@@ -1,34 +1,54 @@
 {
-  "_comment": "Board pin definitions — must match Pins.h DEFAULT_RELAY_PINS and DEFAULT_SENSOR_PINS",
-  "_comment2": "When adding a new board: 1) Add to Pins.h  2) Add here  3) Add board code to repeater.cpp setup()",
+  "_comment": "Board pin definitions — single source of truth for the GUI.",
+  "_comment2": "Must match Pins.h DEFAULT_RELAY_PINS and DEFAULT_SENSOR_PINS.",
+  "_comment3": "When adding a new board: 1) Add section to Pins.h  2) Add entry here  3) Add build env to platformio.ini",
+  "_comment4": "The 'define' field is the C++ build flag. The key (V3, V4, etc) is the heartbeat board code.",
   "boards": {
     "V3": {
       "name": "Heltec WiFi LoRa 32 V3",
+      "define": "BOARD_HELTEC_V3",
+      "chip": "ESP32-S3",
+      "radio": "SX1262",
       "relay": ["2", "3", "4"],
       "sensor": ["5", "6", "7", "15", "16"]
     },
     "V4": {
       "name": "Heltec WiFi LoRa 32 V4",
+      "define": "BOARD_HELTEC_V4",
+      "chip": "ESP32-S3",
+      "radio": "SX1262 + GC1109 FEM",
       "relay": ["3", "4"],
       "sensor": ["5", "6", "15", "16"]
     },
     "L32": {
       "name": "LoRa32 T3 V1.6.1",
+      "define": "BOARD_LORA32",
+      "chip": "ESP32",
+      "radio": "SX1276",
       "relay": ["2", "4", "12"],
       "sensor": ["15", "33", "34", "36", "39"]
     },
     "XS3": {
       "name": "XIAO ESP32S3 + Wio SX1262",
+      "define": "BOARD_XIAO_S3",
+      "chip": "ESP32-S3",
+      "radio": "SX1262",
       "relay": ["2", "4"],
       "sensor": ["5", "6"]
     },
     "TD": {
       "name": "LilyGO T-Deck Plus",
+      "define": "BOARD_TDECK_PLUS",
+      "chip": "ESP32-S3",
+      "radio": "SX1262",
       "relay": [],
       "sensor": []
     },
     "V2": {
       "name": "Heltec WiFi LoRa 32 V2 (Gateway)",
+      "define": "BOARD_HELTEC_V2",
+      "chip": "ESP32",
+      "radio": "SX1276",
       "relay": ["2", "4"],
       "sensor": ["12", "15", "34", "36"]
     }
