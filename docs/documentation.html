@@ -532,6 +532,7 @@
   <a href="#heltec-v4">Heltec V4 USB</a>
   <a href="#web-gauge">Web Gauge</a>
   <a href="#licensing">Licensing</a>
+  <a href="#command-ref">Command Ref</a>
 </nav>
 
 <div class="container">
@@ -3927,13 +3928,124 @@ Response: {"node": "5041", "pin": "15", "value": 423, "ts": 1711234567}
 </div>
 </section>
 
+<!-- ═══════════════ COMMAND REFERENCE ═══════════════ -->
+<section id="command-ref">
+<h2>46. Complete Command Reference</h2>
+
+<p>Every command available on the repeater firmware, organised by category. Where serial and BLE/App formats differ, both are shown. A dash indicates the command is not available via that interface.</p>
+
+<h3>Node Configuration</h3>
+<table>
+  <tr><th>Command</th><th>Format (Serial)</th><th>Format (BLE/App)</th><th>Description</th></tr>
+  <tr><td>Set Node ID</td><td><code>ID XXXX</code></td><td><code>ID XXXX</code></td><td>4-digit hex node ID</td></tr>
+  <tr><td>Set AES Key</td><td><code>KEY &lt;16chars&gt;</code></td><td><code>KEY &lt;16chars&gt;</code></td><td>AES-128 encryption key (must match all nodes)</td></tr>
+  <tr><td>Set BLE PIN</td><td>&mdash;</td><td><code>BLEPIN,&lt;6digits&gt;</code></td><td>Set BLE pairing PIN (100000&ndash;999999, not 123456)</td></tr>
+  <tr><td>Set BLE Password</td><td>&mdash;</td><td><code>SETPASS,&lt;password&gt;</code></td><td>Set BLE auth password (max 30 chars)</td></tr>
+  <tr><td>Configure Relays</td><td><code>RELAY 2,3,4</code></td><td><code>RELAY 2,3,4</code></td><td>Comma-separated GPIO pins for relay output</td></tr>
+  <tr><td>Configure Sensors</td><td><code>SENSOR 15,16</code></td><td><code>SENSOR 15,16</code></td><td>Comma-separated GPIO pins for analog/digital input</td></tr>
+  <tr><td>Save Config</td><td><code>SAVE</code></td><td><code>SAVE</code></td><td>Persist all settings to EEPROM</td></tr>
+  <tr><td>Factory Reset</td><td>&mdash;</td><td><code>EEPROM,RESET</code></td><td>Wipe all EEPROM settings and restart</td></tr>
+  <tr><td>Reboot</td><td><code>REBOOT</code></td><td><code>REBOOT</code></td><td>Restart the node</td></tr>
+  <tr><td>Status</td><td><code>STATUS</code></td><td><code>STATUS</code></td><td>Show current configuration</td></tr>
+</table>
+
+<h3>Pin Control</h3>
+<table>
+  <tr><th>Command</th><th>Format (Serial)</th><th>Format (BLE/App)</th><th>Description</th></tr>
+  <tr><td>Set Relay</td><td>&mdash;</td><td><code>CMD,SET,&lt;pin&gt;,&lt;0/1&gt;</code></td><td>Set output pin HIGH or LOW</td></tr>
+  <tr><td>Pulse Relay</td><td>&mdash;</td><td><code>CMD,PULSE,&lt;pin&gt;,&lt;ms&gt;</code></td><td>Pulse output pin for N milliseconds</td></tr>
+  <tr><td>Pin Mode</td><td><code>PINMODE &lt;pin&gt; PULSE</code></td><td><code>PINMODE,&lt;pin&gt;,PULSE</code></td><td>Set pin to pulse counting mode</td></tr>
+  <tr><td>Pin Mode Auto</td><td><code>PINMODE &lt;pin&gt; AUTO</code></td><td><code>PINMODE,&lt;pin&gt;,AUTO</code></td><td>Restore pin to default analog mode</td></tr>
+  <tr><td>Pin Map</td><td>&mdash;</td><td><code>PINMAP</code></td><td>Show available GPIO pins for this board</td></tr>
+</table>
+
+<h3>Sensor Polling</h3>
+<table>
+  <tr><th>Command</th><th>Format (Serial)</th><th>Format (BLE/App)</th><th>Description</th></tr>
+  <tr><td>Poll Local</td><td><code>POLL</code></td><td><code>POLL</code></td><td>Read all sensor pins, output SDATA</td></tr>
+  <tr><td>Poll Remote</td><td><code>POLL,&lt;nodeId&gt;</code></td><td><code>POLL,&lt;nodeId&gt;</code></td><td>Request sensor data from remote node via mesh</td></tr>
+  <tr><td>Auto-Poll Start</td><td><code>AUTOPOLL &lt;id&gt; &lt;sec&gt;</code></td><td><code>AUTOPOLL,&lt;id&gt;,&lt;sec&gt;</code></td><td>Auto-send SDATA to target every N seconds</td></tr>
+  <tr><td>Auto-Poll Stop</td><td><code>AUTOPOLL OFF</code></td><td><code>AUTOPOLL,OFF</code></td><td>Stop auto-polling</td></tr>
+</table>
+
+<h3>Radio</h3>
+<table>
+  <tr><th>Command</th><th>Format (Serial)</th><th>Format (BLE/App)</th><th>Description</th></tr>
+  <tr><td>Spreading Factor</td><td>&mdash;</td><td><code>SF,&lt;7-12&gt;</code></td><td>Change LoRa spreading factor</td></tr>
+  <tr><td>Gateway Mode</td><td><code>GATEWAY ON/OFF</code></td><td>&mdash;</td><td>Enable/disable raw packet forwarding to serial</td></tr>
+  <tr><td>Solar Mode</td><td>&mdash;</td><td><code>SOLAR ON/OFF</code></td><td>Enter/exit low-power solar mode (SX1262 only)</td></tr>
+  <tr><td>Send Raw Packet</td><td><code>PKT,&lt;hex&gt;</code></td><td>&mdash;</td><td>Transmit raw hex packet</td></tr>
+</table>
+
+<h3>GPS</h3>
+<table>
+  <tr><th>Command</th><th>Format (Serial)</th><th>Format (BLE/App)</th><th>Description</th></tr>
+  <tr><td>Enable GPS</td><td><code>GPS &lt;tx&gt;,&lt;rx&gt;</code></td><td><code>GPS,&lt;tx&gt;,&lt;rx&gt;</code></td><td>Enable GPS on specified UART pins</td></tr>
+  <tr><td>Disable GPS</td><td><code>GPS OFF</code></td><td><code>GPS,OFF</code></td><td>Disable GPS module</td></tr>
+  <tr><td>GPS Status</td><td>&mdash;</td><td><code>GPS,ON</code></td><td>Re-enable GPS with saved pins</td></tr>
+</table>
+
+<h3>Timers</h3>
+<table>
+  <tr><th>Command</th><th>Format (Serial)</th><th>Format (BLE/App)</th><th>Description</th></tr>
+  <tr><td>Timer ON</td><td>&mdash;</td><td><code>TIMER,&lt;pin&gt;,ON,&lt;sec&gt;</code></td><td>Turn pin ON after N seconds</td></tr>
+  <tr><td>Timer OFF</td><td>&mdash;</td><td><code>TIMER,&lt;pin&gt;,OFF,&lt;sec&gt;</code></td><td>Turn pin OFF after N seconds</td></tr>
+  <tr><td>Timer Pulse</td><td>&mdash;</td><td><code>TIMER,&lt;pin&gt;,PULSE,&lt;on&gt;,&lt;off&gt;,&lt;reps&gt;</code></td><td>Repeating on/off cycle</td></tr>
+  <tr><td>Timer Clear</td><td>&mdash;</td><td><code>TIMER,CLEAR</code></td><td>Cancel all active timers</td></tr>
+  <tr><td>Timer List</td><td>&mdash;</td><td><code>TIMER,LIST</code></td><td>Show active timers</td></tr>
+</table>
+
+<h3>Beacon Scanner</h3>
+<table>
+  <tr><th>Command</th><th>Format (Serial)</th><th>Format (BLE/App)</th><th>Description</th></tr>
+  <tr><td>Scan</td><td>&mdash;</td><td><code>BEACON,SCAN</code></td><td>Scan for nearby BLE beacons (3 seconds)</td></tr>
+  <tr><td>Add Rule (Relay)</td><td>&mdash;</td><td><code>BEACON,ADD,&lt;mac&gt;,&lt;name&gt;,&lt;rssi&gt;,RELAY,&lt;pin&gt;,&lt;state&gt;,&lt;cooldown&gt;</code></td><td>Add beacon detection rule with relay action</td></tr>
+  <tr><td>Add Rule (MSG)</td><td>&mdash;</td><td><code>BEACON,ADD,&lt;mac&gt;,&lt;name&gt;,&lt;rssi&gt;,MSG,&lt;text&gt;,&lt;cooldown&gt;</code></td><td>Add beacon rule with broadcast action</td></tr>
+  <tr><td>Delete Rule</td><td>&mdash;</td><td><code>BEACON,DEL,&lt;slot&gt;</code></td><td>Delete beacon rule by slot number</td></tr>
+  <tr><td>Clear All</td><td>&mdash;</td><td><code>BEACON,CLEAR</code></td><td>Delete all beacon rules</td></tr>
+  <tr><td>List Rules</td><td>&mdash;</td><td><code>BEACON,LIST</code></td><td>Show active beacon rules</td></tr>
+</table>
+
+<h3>Setpoints (Firmware Automation)</h3>
+<table>
+  <tr><th>Command</th><th>Format (Serial)</th><th>Format (BLE/App)</th><th>Description</th></tr>
+  <tr><td>Add Setpoint</td><td>&mdash;</td><td><code>SETPOINT,&lt;sensorPin&gt;,&lt;op&gt;,&lt;threshold&gt;,RELAY,&lt;pin&gt;,&lt;state&gt;</code></td><td>Trigger relay when sensor crosses threshold</td></tr>
+  <tr><td>Clear All</td><td>&mdash;</td><td><code>SETPOINT,CLEAR</code></td><td>Delete all setpoints</td></tr>
+  <tr><td>List</td><td>&mdash;</td><td><code>SETPOINT,LIST</code></td><td>Show active setpoints</td></tr>
+</table>
+
+<h3>Messaging</h3>
+<table>
+  <tr><th>Command</th><th>Format (Serial)</th><th>Format (BLE/App)</th><th>Description</th></tr>
+  <tr><td>Send Message</td><td>&mdash;</td><td><code>MSG,&lt;nodeId&gt;,&lt;text&gt;</code></td><td>Send encrypted message to node (FFFF=broadcast)</td></tr>
+</table>
+
+<h3>WiFi Gateway Only (<code>gateway_wifi.cpp</code>)</h3>
+<table>
+  <tr><th>Command</th><th>Format (Serial)</th><th>Format (BLE/App)</th><th>Description</th></tr>
+  <tr><td>WiFi Config</td><td><code>WIFI,&lt;ssid&gt;,&lt;pass&gt;</code></td><td><code>WIFI,&lt;ssid&gt;,&lt;pass&gt;</code></td><td>Set WiFi credentials</td></tr>
+  <tr><td>Hub URL</td><td><code>HUBURL,&lt;wss://...&gt;</code></td><td><code>HUBURL,&lt;wss://...&gt;</code></td><td>Set hub WebSocket URL</td></tr>
+  <tr><td>Hub Key</td><td><code>HUBKEY,&lt;key&gt;</code></td><td><code>HUBKEY,&lt;key&gt;</code></td><td>Set hub auth key</td></tr>
+  <tr><td>Gateway Name</td><td><code>GWNAME,&lt;name&gt;</code></td><td><code>GWNAME,&lt;name&gt;</code></td><td>Set gateway display name</td></tr>
+  <tr><td>Gateway Location</td><td><code>GWLOC,&lt;lat&gt;,&lt;lon&gt;</code></td><td><code>GWLOC,&lt;lat&gt;,&lt;lon&gt;</code></td><td>Set latitude/longitude for map</td></tr>
+  <tr><td>Antenna Type</td><td><code>GWANTENNA,&lt;0-2&gt;</code></td><td><code>GWANTENNA,&lt;0-2&gt;</code></td><td>0=indoor, 1=external, 2=rooftop</td></tr>
+  <tr><td>Antenna Height</td><td><code>GWHEIGHT,&lt;metres&gt;</code></td><td><code>GWHEIGHT,&lt;metres&gt;</code></td><td>Antenna height for coverage ring</td></tr>
+</table>
+
+<h3>Remote Commands (via Mesh)</h3>
+<div class="info-box green">
+  <p><strong>All commands can be sent to remote nodes</strong> by wrapping in CMD:<br>
+  <code>MSG,&lt;nodeId&gt;,CMD,&lt;command&gt;</code> &mdash; e.g., <code>MSG,5041,CMD,SET,3,1</code></p>
+</div>
+</section>
+
 </div>
 
 <!-- Footer -->
 <div style="background:var(--panel); border-top:1px solid var(--faint); padding:30px 40px; text-align:center; color:var(--faint); font-size:0.85em;">
   <p>TiggyOpenMesh v4.1 &mdash; MeshCore Architecture</p>
   <p>T-Deck Plus &bull; LoRa32 T3 V1.6.1 &bull; Heltec WiFi LoRa 32 V3 &bull; Heltec WiFi LoRa 32 V4 &bull; XIAO ESP32S3</p>
-  <p>45 sections &mdash; Hardware, Protocol, UI, BLE, Gateway, Logic Builder, Timers, Setpoints, Sensors, Pulse Counters, SOS, Map, Solar, Delivery, SF Change, Collision Detection, IO Expansion, GPS, Device Management, Signal Routing, iBeacon Scanner, Meshtastic Bridge, Telegram Bot (Gateway), Sensor Dashboard, HW Watchdog, Heltec V4 USB/FEM, Web Gauge, Licensing, Caveats</p>
+  <p>46 sections &mdash; Hardware, Protocol, UI, BLE, Gateway, Logic Builder, Timers, Setpoints, Sensors, Pulse Counters, SOS, Map, Solar, Delivery, SF Change, Collision Detection, IO Expansion, GPS, Device Management, Signal Routing, iBeacon Scanner, Meshtastic Bridge, Telegram Bot (Gateway), Sensor Dashboard, HW Watchdog, Heltec V4 USB/FEM, Web Gauge, Licensing, Command Reference, Caveats</p>
   <p style="margin-top:8px;">Documentation updated April 2026</p>
 </div>
 
