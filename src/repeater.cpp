@@ -2622,7 +2622,7 @@ void loadConfig() {
     // Pin config version check — if version doesn't match, reset to defaults
     // This catches old EEPROM with wrong pins (e.g., 19/20/33 on ESP32-S3)
     #define PIN_CONFIG_VERSION 7  // v7: force 50/50 IO split reset
-    #define EEPROM_PIN_VER_ADDR (EEPROM_GPIO_ADDR + 30)
+    #define EEPROM_PIN_VER_ADDR 448  // After BLEPIN (443-446), safe gap
     uint8_t pinVer = EEPROM.read(EEPROM_PIN_VER_ADDR);
     if (pinVer != PIN_CONFIG_VERSION) {
         uint8_t d[] = DEFAULT_RELAY_PINS; relayCount = sizeof(d)/sizeof(d[0]); memcpy(relayPins, d, relayCount);
