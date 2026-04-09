@@ -718,8 +718,8 @@
       <tr><td>Battery ADC</td><td>35</td></tr>
       <tr><td>LED</td><td>25</td></tr>
       <tr><td>Button</td><td>0</td></tr>
-      <tr><td>Default Relay Pins</td><td style="color:var(--orange);">2, 4, 12, 15, 17, 33</td></tr>
-      <tr><td>Default Sensor Pins</td><td style="color:var(--yellow);">34, 36, 39 (input only)</td></tr>
+      <tr><td>Default Relay Pins</td><td style="color:var(--orange);">2, 4, 12</td></tr>
+      <tr><td>Default Sensor Pins</td><td style="color:var(--yellow);">15, 33, 34, 36, 39</td></tr>
     </table>
   </div>
 
@@ -737,8 +737,8 @@
       <tr><td>Vext Power Control</td><td>36 (LOW = OLED on)</td></tr>
       <tr><td>Battery ADC</td><td>1</td></tr>
       <tr><td>LED</td><td>35</td></tr>
-      <tr><td>Default Relay Pins</td><td style="color:var(--orange);">2, 3, 4, 5, 6, 7</td></tr>
-      <tr><td>Default Sensor Pins</td><td style="color:var(--yellow);">19, 20, 33</td></tr>
+      <tr><td>Default Relay Pins</td><td style="color:var(--orange);">2, 3, 4</td></tr>
+      <tr><td>Default Sensor Pins</td><td style="color:var(--yellow);">5, 6, 7, 15, 16</td></tr>
     </table>
   </div>
 
@@ -760,7 +760,8 @@
       <tr><td>Radio BUSY</td><td>34</td><td>internal</td></tr>
       <tr><td>RF Switch (TX/RX)</td><td>1</td><td>D0 — HIGH=RX, LOW=TX</td></tr>
       <tr><td>Optional OLED SDA / SCL</td><td>5 / 6</td><td>D4 / D5</td></tr>
-      <tr><td>Default Relay Pins</td><td style="color:var(--orange);">2, 4, 5, 6</td><td>D1, D3, D4, D5</td></tr>
+      <tr><td>Default Relay Pins</td><td style="color:var(--orange);">2, 4</td><td>D1, D3</td></tr>
+      <tr><td>Default Sensor Pins</td><td style="color:var(--yellow);">5, 6</td><td>D4, D5</td></tr>
     </table>
     <pre style="font-size:0.75em; margin-top:10px; background:#0a1628; padding:10px; border-radius:6px; color:var(--cyan); overflow-x:auto;">
         [USB-C]
@@ -792,8 +793,8 @@ D6/GPIO43 ●  ● D7 /GPIO44  CS/NSS</pre>
       <tr><td>ADC Control</td><td>37 (HIGH = enable battery divider)</td></tr>
       <tr><td>Battery ADC</td><td>1</td></tr>
       <tr><td>LED</td><td>35</td></tr>
-      <tr><td>Default Relay Pins</td><td style="color:var(--orange);">3, 4, 5, 6</td></tr>
-      <tr><td>Default Sensor Pins</td><td style="color:var(--yellow);">33, 34, 15</td></tr>
+      <tr><td>Default Relay Pins</td><td style="color:var(--orange);">3, 4</td></tr>
+      <tr><td>Default Sensor Pins</td><td style="color:var(--yellow);">5, 6, 15, 16</td></tr>
     </table>
   </div>
 
@@ -1735,11 +1736,11 @@ SDATA,0010,34:2048,36:1200,39:4095</pre>
 <h3>Default Sensor Pins per Board</h3>
 <table>
   <tr><th>Board</th><th>Default Sensor Pins</th><th>Notes</th></tr>
-  <tr><td>LoRa32 T3</td><td>34, 36, 39</td><td>Input-only, ADC1. Best for analog sensors.</td></tr>
-  <tr><td>Heltec V3</td><td>19, 20, 33</td><td>All ADC-capable on ESP32-S3.</td></tr>
-  <tr><td>Heltec V4</td><td>33, 34, 15</td><td>GPIO 19/20 are USB D-/D+, GPIO 2/46/7 are GC1109 FEM, GPIO 38 is GPS header &mdash; <strong>do not use any of these as GPIO</strong>.</td></tr>
-  <tr><td>XIAO ESP32S3</td><td>43, 44</td><td>Digital-only (UART pins). Use <code>SENSOR 2,4,5</code> for analog.</td></tr>
-  <tr><td>Heltec V2</td><td>36, 39</td><td>Input-only, ADC1. Used as WiFi gateway &mdash; sensors optional.</td></tr>
+  <tr><td>LoRa32 T3</td><td>15, 33, 34, 36, 39</td><td>GPIO 34-39 are input-only, ADC1. GPIO 15/33 are ADC-capable outputs.</td></tr>
+  <tr><td>Heltec V3</td><td>5, 6, 7, 15, 16</td><td>All ADC-capable on ESP32-S3.</td></tr>
+  <tr><td>Heltec V4</td><td>5, 6, 15, 16</td><td>GPIO 19/20 are USB D-/D+, GPIO 2/46/7 are GC1109 FEM, GPIO 38 is GPS header &mdash; <strong>do not use any of these as GPIO</strong>.</td></tr>
+  <tr><td>XIAO ESP32S3</td><td>5, 6</td><td>ADC-capable on ESP32-S3.</td></tr>
+  <tr><td>Heltec V2 (Gateway)</td><td>12, 15, 34, 36</td><td>Input-only ADC1 pins plus GPIO 12/15. Used as WiFi gateway.</td></tr>
   <tr><td>T-Deck Plus</td><td>None</td><td>No free GPIO &mdash; all pins used by display/keyboard/GPS.</td></tr>
 </table>
 
@@ -1905,6 +1906,10 @@ pio device monitor -b <span class="number">115200</span>
 
 <span class="comment"># Clean build</span>
 pio run -e lora32 --target clean</pre>
+
+<div class="info-box">
+  <p><strong>Pin defaults auto-reset:</strong> Pin defaults are reset automatically when firmware is updated (<code>PIN_CONFIG_VERSION</code> check). User-configured pins set via <code>RELAY</code>/<code>SENSOR</code> commands are preserved until the next version bump.</p>
+</div>
 
 <h3>Build Isolation</h3>
 <p>PlatformIO uses <code>build_src_filter</code> to ensure each target only compiles its firmware:</p>
@@ -2304,6 +2309,18 @@ gateway/
     <td>Time-based trigger. Outputs true during configured hours/days. Uses the gateway PC&rsquo;s clock. Supports overnight schedules (e.g., 22:00&ndash;06:00).</td>
     <td><strong>On time:</strong> HH:MM (24hr). <strong>Off time:</strong> HH:MM. <strong>Days:</strong> Mon,Tue,Wed,Thu,Fri,Sat,Sun (comma-separated, default all).</td>
     <td><code>active</code> (bool) &mdash; true during scheduled hours on selected days.</td>
+  </tr>
+  <tr>
+    <td style="color:var(--cyan);">Digital Read</td>
+    <td>Reads GPIO state as a boolean (HIGH/LOW). Works with any GPIO pin on any node.</td>
+    <td><strong>Node ID:</strong> 4-character hex ID. <strong>Pin:</strong> GPIO pin number. <strong>Label:</strong> Descriptive name.</td>
+    <td><code>state</code> (bool).</td>
+  </tr>
+  <tr>
+    <td style="color:var(--cyan);">Pulse Input</td>
+    <td>Counts rising edges on a GPIO pin and reports the rate (pulses/sec). Auto-configures the pin as PULSE mode on the remote node.</td>
+    <td><strong>Node ID:</strong> 4-character hex ID. <strong>Pin:</strong> GPIO pin number. <strong>Label:</strong> Descriptive name. <strong>Unit:</strong> Display unit (e.g., &ldquo;Hz&rdquo;, &ldquo;rpm&rdquo;).</td>
+    <td><code>rate</code> (number).</td>
   </tr>
 </table>
 
@@ -3421,8 +3438,8 @@ const int RELAY_PINS[]  = {2, 4, 5, 12, 13, 14};      <span class="comment">// D
     <td><code>VERIFY_TLS_CERT</code> is disabled for this board. Uses insecure TLS (no cert verification). Other gateway boards (V3/V4/XIAO on ESP32-S3) have cert verification enabled.</td></tr>
   <tr><td>Heltec V2 (gateway)</td><td>Flash is 86% full with <code>min_spiffs.csv</code> partition. Adding features may require removing debug output.</td>
     <td><code>CORE_DEBUG_LEVEL=0</code> is already set for this target.</td></tr>
-  <tr><td>XIAO ESP32S3</td><td>Default sensor pins (43, 44) are UART TX/RX &mdash; digital only (0/1). No analog readings on defaults.</td>
-    <td>Reconfigure: <code>SENSOR 2,4,5,6</code> + <code>SAVE</code>. Pins 2-6 support ADC on ESP32-S3.</td></tr>
+  <tr><td>XIAO ESP32S3</td><td>Only 4 free GPIO pins (2 relay, 2 sensor). Limited IO compared to larger boards.</td>
+    <td>Use an IO expansion board for more pins, or redeploy with a Heltec V3/V4 for more GPIO.</td></tr>
   <tr><td>T-Deck Plus</td><td>No free GPIO pins for sensors or relays. All pins used by display, keyboard, GPS, and radio.</td>
     <td>Use T-Deck as communicator only. Pair with a repeater node for sensor/relay control.</td></tr>
   <tr><td>LoRa32 T3 (repeater)</td><td>ESP32 (not S3) has different light-sleep behaviour. Solar mode uses <code>esp_light_sleep_start()</code> which works on both, but power savings vary by chip.</td>
@@ -3507,9 +3524,20 @@ const int RELAY_PINS[]  = {2, 4, 5, 12, 13, 14};      <span class="comment">// D
 </table>
 
 <h3>LoRa Mesh Commands</h3>
+<p>Most serial/BLE commands can be sent to remote nodes by wrapping them in a <code>CMD,</code> prefix. The command is AES-encrypted and routed through the mesh to the target node.</p>
 <table>
   <tr><th>Command</th><th>Description</th></tr>
-  <tr><td><code>CMD,REBOOT</code></td><td>Remote reboot via encrypted mesh command. The node sends a <code>CMD,RSP,REBOOTING</code> acknowledgement before restarting. Requires the mesh AES key — cannot be spoofed by anyone outside your mesh.</td></tr>
+  <tr><td><code>CMD,SET,&lt;pin&gt;,&lt;0|1&gt;</code></td><td>Set a relay pin on the remote node.</td></tr>
+  <tr><td><code>CMD,PULSE,&lt;pin&gt;,&lt;ms&gt;</code></td><td>Pulse a relay pin HIGH for N milliseconds.</td></tr>
+  <tr><td><code>CMD,POLL</code></td><td>Request SDATA from the remote node.</td></tr>
+  <tr><td><code>CMD,PINMODE,&lt;pin&gt;,PULSE|AUTO</code></td><td>Set sensor pin mode on the remote node.</td></tr>
+  <tr><td><code>CMD,BEACON,...</code></td><td>Manage beacon rules on the remote node.</td></tr>
+  <tr><td><code>CMD,SETPOINT,...</code></td><td>Manage setpoint rules on the remote node.</td></tr>
+  <tr><td><code>CMD,SENSOR,&lt;pins&gt;</code></td><td>Reconfigure sensor pins on the remote node.</td></tr>
+  <tr><td><code>CMD,RELAY,&lt;pins&gt;</code></td><td>Reconfigure relay pins on the remote node.</td></tr>
+  <tr><td><code>CMD,SAVE</code></td><td>Save configuration to EEPROM on the remote node.</td></tr>
+  <tr><td><code>CMD,STATUS</code></td><td>Request status information from the remote node.</td></tr>
+  <tr><td><code>CMD,REBOOT</code></td><td>Remote reboot via encrypted mesh command. The node sends a <code>CMD,RSP,REBOOTING</code> acknowledgement before restarting. Requires the mesh AES key &mdash; cannot be spoofed by anyone outside your mesh.</td></tr>
 </table>
 
 <h3>Android App</h3>
@@ -3906,7 +3934,7 @@ Response: {"node": "5041", "pin": "15", "value": 423, "ts": 1711234567}
   <p>TiggyOpenMesh v4.1 &mdash; MeshCore Architecture</p>
   <p>T-Deck Plus &bull; LoRa32 T3 V1.6.1 &bull; Heltec WiFi LoRa 32 V3 &bull; Heltec WiFi LoRa 32 V4 &bull; XIAO ESP32S3</p>
   <p>45 sections &mdash; Hardware, Protocol, UI, BLE, Gateway, Logic Builder, Timers, Setpoints, Sensors, Pulse Counters, SOS, Map, Solar, Delivery, SF Change, Collision Detection, IO Expansion, GPS, Device Management, Signal Routing, iBeacon Scanner, Meshtastic Bridge, Telegram Bot (Gateway), Sensor Dashboard, HW Watchdog, Heltec V4 USB/FEM, Web Gauge, Licensing, Caveats</p>
-  <p style="margin-top:8px;">Documentation updated March 2026</p>
+  <p style="margin-top:8px;">Documentation updated April 2026</p>
 </div>
 
 </body>
