@@ -2621,7 +2621,7 @@ void loadConfig() {
 
     // Pin config version check — if version doesn't match, reset to defaults
     // This catches old EEPROM with wrong pins (e.g., 19/20/33 on ESP32-S3)
-    #define PIN_CONFIG_VERSION 5  // Increment when defaults change (v5: 50/50 IO split)
+    #define PIN_CONFIG_VERSION 7  // v7: force 50/50 IO split reset
     #define EEPROM_PIN_VER_ADDR (EEPROM_GPIO_ADDR + 30)
     uint8_t pinVer = EEPROM.read(EEPROM_PIN_VER_ADDR);
     if (pinVer != PIN_CONFIG_VERSION) {
@@ -2916,6 +2916,9 @@ void setup() {
     }
 
     Serial.println("Ready. Type STATUS for info.");
+    Serial.println("Commands: ID xxxx | KEY xxx... | RELAY 2,4,12 | SENSOR 34,36 | GPS <tx>,<rx> | GPS OFF");
+    Serial.println("          STATUS | SAVE | RESET | GATEWAY ON/OFF | AUTOPOLL <id> <sec>");
+    Serial.println("          PINMODE <pin> PULSE|AUTO | BLEPIN,<6digits> | EEPROM,RESET | REBOOT");
     debugPrint("Free heap: " + String(ESP.getFreeHeap()));
 }
 
