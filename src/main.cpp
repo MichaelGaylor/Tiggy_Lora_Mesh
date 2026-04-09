@@ -2309,6 +2309,7 @@ void setup() {
   mesh.onNodeDiscovered = handleNodeDiscovered;
   mesh.onIdConflict = handleIdConflict;
   mesh.onHeartbeat = handleHeartbeat;
+  strncpy(mesh.boardCode, "TD", 3);  // T-Deck Plus
 
   analogReadResolution(12);
   pinMode(BOARD_BAT_ADC, INPUT);

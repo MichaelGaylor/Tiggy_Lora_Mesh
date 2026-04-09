@@ -545,8 +545,11 @@ void MeshCore::processPacket(const MeshPacket& pkt) {
 
     // ─── Heartbeat ───────────────────────────────────────────
     if (pkt.payload.startsWith("HB,")) {
-        String hbFrom = pkt.payload.substring(3);
-        hbFrom.trim();
+        String rest = pkt.payload.substring(3);
+        rest.trim();
+        // Parse: "A1B2" (old) or "A1B2,V3" (new with board code)
+        int hbComma = rest.indexOf(',');
+        String hbFrom = (hbComma > 0) ? rest.substring(0, hbComma) : rest;
         if (isValidNodeID(hbFrom)) {
             // Collision: another node is using our ID
             if (hbFrom == String(localID)) {
@@ -610,5 +613,7 @@ void MeshCore::processPacket(const MeshPacket& pkt) {
 // ═══════════════════════════════════════════════════════════════
 
 void MeshCore::sendHeartbeat() {
-    transmitPacket(0xFFFF, "HB," + String(localID));
+    String hb = "HB," + String(localID);
+    if (boardCode[0]) hb += "," + String(boardCode);
+    transmitPacket(0xFFFF, hb);
 }

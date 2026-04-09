@@ -159,6 +159,9 @@ public:
     typedef void (*HeartbeatFunc)(const String& from, int rssi);
     HeartbeatFunc onHeartbeat = nullptr;
 
+    // Board identification code (set by firmware, sent in heartbeat)
+    char boardCode[4] = "";  // e.g., "V3", "V4", "L32", "XS3", "TD", "V2"
+
     // Runtime spreading factor (may differ from compile-time LORA_SF after a CFG change)
     uint8_t currentSF = LORA_SF;
 

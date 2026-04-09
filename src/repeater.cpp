@@ -2772,6 +2772,19 @@ void setup() {
     mesh.onCmd = handleCmd;
     mesh.onNodeDiscovered = handleNodeDiscovered;
     mesh.onAck = handleAck;
+
+    // Set board code for heartbeat identification
+#if defined(BOARD_HELTEC_V3)
+    strncpy(mesh.boardCode, "V3", 3);
+#elif defined(BOARD_HELTEC_V4)
+    strncpy(mesh.boardCode, "V4", 3);
+#elif defined(BOARD_LORA32)
+    strncpy(mesh.boardCode, "L32", 4);
+#elif defined(BOARD_XIAO_S3)
+    strncpy(mesh.boardCode, "XS3", 4);
+#elif defined(BOARD_HELTEC_V2)
+    strncpy(mesh.boardCode, "V2", 3);
+#endif
     mesh.onCfg = handleCfg;
     mesh.onCfgAck = handleCfgAck;
     mesh.onCfgGo = handleCfgGo;
