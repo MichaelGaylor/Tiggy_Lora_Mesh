@@ -926,7 +926,7 @@ Fields:
 <h4>Special Packets (unencrypted)</h4>
 <table>
   <tr><th>Type</th><th>Format</th><th>Description</th></tr>
-  <tr><td>Heartbeat</td><td><code>HB,0001</code></td><td>Periodic presence announcement (every ~30s)</td></tr>
+  <tr><td>Heartbeat</td><td><code>HB,0001,V3</code></td><td>Periodic presence announcement (every ~30s). Board code (V3, V4, L32, XS3, TD, V2) appended for automatic pin identification. Backward compatible &mdash; old nodes without board code still work.</td></tr>
   <tr><td>ACK</td><td><code>ACK,0001,XYZW</code></td><td>Delivery acknowledgement (to node 0001, for message XYZW)</td></tr>
   <tr><td>CFG</td><td><code>CFG,SF,7,A1B2,C3D4</code></td><td>Config change proposal (type, value, changeId, authTag)</td></tr>
   <tr><td>CFGACK</td><td><code>CFGACK,SF,7,A1B2,0010</code></td><td>Config change accepted by node 0010</td></tr>
