@@ -178,10 +178,9 @@
 // (13 conflicts with SD card CS - use one or the other)
 //
 // Default relay/sensor pin assignments (override via EEPROM config):
-#define USER_GPIO_COUNT     6
-#define DEFAULT_RELAY_PINS  { 2, 4, 12, 15, 17, 33 }
-#define DEFAULT_SENSOR_PINS { 34, 36, 39 }
-#define SENSOR_PIN_COUNT    3
+#define USER_GPIO_COUNT     8
+#define DEFAULT_RELAY_PINS  { 2, 4, 12 }
+#define DEFAULT_SENSOR_PINS { 15, 33, 34, 36, 39 }
 
 // ═══════════════════════════════════════════════════════════════
 #elif defined(BOARD_HELTEC_V3)
@@ -256,8 +255,8 @@
 // 2, 3, 4, 5, 6, 7, 19, 20, 33, 34, 38, 39, 40, 41, 42, 43, 44, 45, 46
 // Plenty available since ESP32-S3 has many GPIOs
 #define USER_GPIO_COUNT     6
-#define DEFAULT_RELAY_PINS  { 2, 3, 4, 5, 6, 7 }
-#define DEFAULT_SENSOR_PINS { 15, 16 }  // ADC pins not in relay list (NOT 19/20=USB, NOT 33=no ADC)
+#define DEFAULT_RELAY_PINS  { 2, 3, 4 }
+#define DEFAULT_SENSOR_PINS { 5, 6, 7, 15, 16 }  // 50/50 split, ADC-capable (NOT 19/20=USB)
 #define SENSOR_PIN_COUNT    2
 
 // ═══════════════════════════════════════════════════════════════
@@ -341,8 +340,8 @@
 //   GPIO 19/20 = USB D-/D+ (kills USB serial)
 //   GPIO 38/39 = GPS header connector (hardwired to GNSS SH1.25)
 #define USER_GPIO_COUNT     6
-#define DEFAULT_RELAY_PINS  { 3, 4, 5, 6 }   // NOT 2(FEM_EN), NOT 7(FEM_POWER)
-#define DEFAULT_SENSOR_PINS { 15, 16 }       // ADC pins not in relay list
+#define DEFAULT_RELAY_PINS  { 3, 4 }          // NOT 2(FEM_EN), NOT 7(FEM_POWER)
+#define DEFAULT_SENSOR_PINS { 5, 6, 15, 16 } // 50/50 split, ADC-capable
 #define SENSOR_PIN_COUNT    2
 
 // ═══════════════════════════════════════════════════════════════
@@ -436,8 +435,8 @@
 // Free header pins: D1/GPIO2, D3/GPIO4, D4/GPIO5, D5/GPIO6
 // GPIO1,3,8,9,10,33,34,44 used by Wio-SX1262 — leave alone
 #define USER_GPIO_COUNT     4
-#define DEFAULT_RELAY_PINS  { 2, 4, 5, 6 }
-#define DEFAULT_SENSOR_PINS { 2, 4, 5, 6 }  // Valid ADC1 on ESP32-S3 (NOT 43/44=no ADC)
+#define DEFAULT_RELAY_PINS  { 2, 4 }
+#define DEFAULT_SENSOR_PINS { 5, 6 }         // 50/50 split, no overlap
 #define SENSOR_PIN_COUNT    4
 
 // ═══════════════════════════════════════════════════════════════
@@ -512,10 +511,9 @@
 // Free pins on Heltec V2:
 // 2, 12, 13, 17, 36, 39 — others are used by radio/OLED/SPI
 // (36, 39 are INPUT ONLY — good for sensors/ADC)
-#define USER_GPIO_COUNT     4
-#define DEFAULT_RELAY_PINS  { 2, 12, 13, 17 }
-#define DEFAULT_SENSOR_PINS { 36, 39 }
-#define SENSOR_PIN_COUNT    2
+#define USER_GPIO_COUNT     6
+#define DEFAULT_RELAY_PINS  { 2, 4 }
+#define DEFAULT_SENSOR_PINS { 12, 15, 34, 36 }  // 50/50 split
 
 // ═══════════════════════════════════════════════════════════════
 #elif defined(BOARD_CUSTOM)
