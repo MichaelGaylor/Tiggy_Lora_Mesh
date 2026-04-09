@@ -532,6 +532,7 @@
   <a href="#heltec-v4">Heltec V4 USB</a>
   <a href="#web-gauge">Web Gauge</a>
   <a href="#licensing">Licensing</a>
+  <a href="#new-board">New Board</a>
   <a href="#command-ref">Command Ref</a>
 </nav>
 
@@ -2217,6 +2218,7 @@ gateway/
   <span style="color:var(--red);">telegram_bot.py</span>      &#9733; <span class="comment"># Telegram bot bridge — exposes rules as chat commands</span>
   <span style="color:var(--red);">meshtastic_bridge.py</span> &#9733; <span class="comment"># TiggyOpenMesh ↔ Meshtastic bidirectional bridge</span>
   <span style="color:var(--cyan);">sensor_dashboard.py</span>  &#9733; <span class="comment"># Sensor gauges, line chart, CSV export (Sensors tab)</span>
+  <span style="color:var(--green);">board_pins.json</span>         <span class="comment"># Board pin definitions — relay/sensor pins per board type (matches Pins.h)</span>
   <span style="color:var(--dim);">rules.json</span>              <span class="comment"># Auto-generated Logic Builder rules (JSON persistence)</span>
   <span style="color:var(--dim);">requirements.txt</span>        <span class="comment"># Python dependencies: pyserial, websockets, aiohttp, customtkinter</span>
   <span style="color:var(--dim);">gateways.json</span>           <span class="comment"># Auto-generated gateway registry (location persistence)</span>
@@ -3928,9 +3930,50 @@ Response: {"node": "5041", "pin": "15", "value": 423, "ts": 1711234567}
 </div>
 </section>
 
+<!-- ═══════════════ ADDING A NEW BOARD ═══════════════ -->
+<section id="new-board">
+<h2>46. Adding a New Board</h2>
+<p>To add support for a new ESP32-based LoRa board, update three files:</p>
+
+<h3>Step 1: <code>include/Pins.h</code></h3>
+<p>Add a new <code>#elif defined(BOARD_YOUR_BOARD)</code> section with all pin definitions: SPI, radio, I2C, OLED, GPS, relay defaults, sensor defaults. Use an existing board as a template. Define a short board code (max 3 chars) for heartbeat identification.</p>
+
+<h3>Step 2: <code>gateway/board_pins.json</code></h3>
+<p>Add a new entry matching the board code and pin definitions from Pins.h:</p>
+<pre style="background:var(--panel); padding:12px; border-radius:6px;">
+"XX": {
+  "name": "Your Board Name",
+  "relay": ["2", "4"],
+  "sensor": ["5", "6", "15"]
+}
+</pre>
+<p>The GUI reads this file to determine which pins to show in dropdowns for each board type. It must match the <code>DEFAULT_RELAY_PINS</code> and <code>DEFAULT_SENSOR_PINS</code> in Pins.h.</p>
+
+<h3>Step 3: <code>src/repeater.cpp</code> (setup)</h3>
+<p>Add the board code assignment in <code>setup()</code> so heartbeats identify the board:</p>
+<pre style="background:var(--panel); padding:12px; border-radius:6px;">
+#elif defined(BOARD_YOUR_BOARD)
+    strncpy(mesh.boardCode, "XX", 3);
+</pre>
+
+<h3>Step 4: <code>platformio.ini</code></h3>
+<p>Add a new <code>[env:your-board]</code> build environment with the correct platform, board, and build flags including <code>-DBOARD_YOUR_BOARD</code>.</p>
+
+<h3>Board Code Reference</h3>
+<table>
+  <tr><th>Code</th><th>Board</th><th>Chip</th><th>Radio</th></tr>
+  <tr><td>V3</td><td>Heltec WiFi LoRa 32 V3</td><td>ESP32-S3</td><td>SX1262</td></tr>
+  <tr><td>V4</td><td>Heltec WiFi LoRa 32 V4</td><td>ESP32-S3</td><td>SX1262 + GC1109 FEM</td></tr>
+  <tr><td>L32</td><td>LoRa32 T3 V1.6.1</td><td>ESP32</td><td>SX1276</td></tr>
+  <tr><td>XS3</td><td>XIAO ESP32S3 + Wio SX1262</td><td>ESP32-S3</td><td>SX1262</td></tr>
+  <tr><td>TD</td><td>LilyGO T-Deck Plus</td><td>ESP32-S3</td><td>SX1262</td></tr>
+  <tr><td>V2</td><td>Heltec WiFi LoRa 32 V2</td><td>ESP32</td><td>SX1276</td></tr>
+</table>
+</section>
+
 <!-- ═══════════════ COMMAND REFERENCE ═══════════════ -->
 <section id="command-ref">
-<h2>46. Complete Command Reference</h2>
+<h2>47. Complete Command Reference</h2>
 
 <p>Every command available on the repeater firmware, organised by category. Where serial and BLE/App formats differ, both are shown. A dash indicates the command is not available via that interface.</p>
 
@@ -4045,7 +4088,7 @@ Response: {"node": "5041", "pin": "15", "value": 423, "ts": 1711234567}
 <div style="background:var(--panel); border-top:1px solid var(--faint); padding:30px 40px; text-align:center; color:var(--faint); font-size:0.85em;">
   <p>TiggyOpenMesh v4.1 &mdash; MeshCore Architecture</p>
   <p>T-Deck Plus &bull; LoRa32 T3 V1.6.1 &bull; Heltec WiFi LoRa 32 V3 &bull; Heltec WiFi LoRa 32 V4 &bull; XIAO ESP32S3</p>
-  <p>46 sections &mdash; Hardware, Protocol, UI, BLE, Gateway, Logic Builder, Timers, Setpoints, Sensors, Pulse Counters, SOS, Map, Solar, Delivery, SF Change, Collision Detection, IO Expansion, GPS, Device Management, Signal Routing, iBeacon Scanner, Meshtastic Bridge, Telegram Bot (Gateway), Sensor Dashboard, HW Watchdog, Heltec V4 USB/FEM, Web Gauge, Licensing, Command Reference, Caveats</p>
+  <p>47 sections &mdash; Hardware, Protocol, UI, BLE, Gateway, Logic Builder, Timers, Setpoints, Sensors, Pulse Counters, SOS, Map, Solar, Delivery, SF Change, Collision Detection, IO Expansion, GPS, Device Management, Signal Routing, iBeacon Scanner, Meshtastic Bridge, Telegram Bot (Gateway), Sensor Dashboard, HW Watchdog, Heltec V4 USB/FEM, Web Gauge, Licensing, Adding a New Board, Command Reference, Caveats</p>
   <p style="margin-top:8px;">Documentation updated April 2026</p>
 </div>
 
