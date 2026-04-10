@@ -480,6 +480,7 @@ void saveConfig();
 void loadConfig();
 void setupGPIO();
 void setupBLE();
+void setupRadio();
 bool isPinSafe(int pin);
 
 // ─── GPS function implementations ────────────────────────────
@@ -684,14 +685,21 @@ void radioStartListening() {
 #if defined(RADIO_RXEN)
     digitalWrite(RADIO_RXEN, HIGH);
 #endif
-    radio.startReceive();
+    int state = radio.startReceive();
+    if (state != RADIOLIB_ERR_NONE) {
+        static bool reinitializing = false;
+        if (!reinitializing) {
+            reinitializing = true;
+            debugPrint("RX FAIL: " + String(state) + " — reinitializing radio");
+            setupRadio();
+            reinitializing = false;
+        }
+    }
 }
 
 // MeshCore calls this to transmit raw packets
 void radioTransmit(uint8_t* pkt, size_t len) {
     // Rescue any pending RX before we clobber the SX1262 buffer
-    // Without this, a packet received between receiveCheck() and this TX
-    // would be permanently lost (radio.standby() discards the RX buffer)
     if (mesh.rxFlag) {
         receiveCheck();
     }
@@ -699,8 +707,12 @@ void radioTransmit(uint8_t* pkt, size_t len) {
     digitalWrite(RADIO_RXEN, LOW);
 #endif
     radio.standby();
-    radio.transmit(pkt, len);
-    mesh.rxFlag = false;  // Clear false RX flag from TX_DONE DIO1 interrupt
+    int state = radio.transmit(pkt, len);
+    if (state != RADIOLIB_ERR_NONE) {
+        debugPrint("TX FAIL: " + String(state) + " — reinitializing radio");
+        setupRadio();
+    }
+    mesh.rxFlag = false;
     radioStartListening();
 }
 
