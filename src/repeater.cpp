@@ -3053,11 +3053,21 @@ void loop() {
 #endif
     updateOLED();
 
-    // Heap monitor — auto-restart if dangerously low
+    // Heap + radio health monitor (every 60s)
     static unsigned long lastHeapCheck = 0;
+    static uint32_t lastRxSnapshot = 0;
     if (millis() - lastHeapCheck > 60000) {
         lastHeapCheck = millis();
         uint32_t freeHeap = ESP.getFreeHeap();
+        bool rxChanged = (mesh.packetsReceived != lastRxSnapshot);
+        debugPrint("HEALTH: heap=" + String(freeHeap) +
+                   " rx=" + String(mesh.packetsReceived) +
+                   " fwd=" + String(mesh.packetsForwarded) +
+                   " rxFlag=" + String(mesh.rxFlag) +
+                   " nodes=" + String(mesh.knownCount) +
+                   " routes=" + String(mesh.routingTable.size()) +
+                   " rxNew=" + String(rxChanged ? "YES" : "STALL"));
+        lastRxSnapshot = mesh.packetsReceived;
         if (freeHeap < 20000) {
             debugPrint("LOW HEAP: " + String(freeHeap) + "B — restarting");
             delay(100);
