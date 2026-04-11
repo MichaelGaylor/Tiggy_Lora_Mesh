@@ -3131,8 +3131,14 @@ void loop() {
         if (!rxChanged && mesh.knownCount > 0) {
             stallCount++;
             if (stallCount >= 2) {  // 2 consecutive stalls = 2 minutes
-                bleSend("RADIO STALL: full radio reinit");
-                setupRadio();  // Full reinit — resets SX1262 state machine completely
+                bleSend("RADIO STALL: hardware reset + reinit");
+                // Hardware reset the SX1262 — pulse NRST pin LOW
+                pinMode(RADIO_RST, OUTPUT);
+                digitalWrite(RADIO_RST, LOW);
+                delay(2);
+                digitalWrite(RADIO_RST, HIGH);
+                delay(10);
+                setupRadio();  // Full reinit after hardware reset
                 stallCount = 0;
             }
         } else {
