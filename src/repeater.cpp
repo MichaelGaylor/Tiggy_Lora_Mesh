@@ -295,6 +295,20 @@ static void onScanComplete(BLEScanResults results) {
     beaconScanActive = false;
 }
 
+static void stopBeaconScanNow() {
+    if (!pBLEScan) {
+        beaconScanActive = false;
+        beaconScanDone = false;
+        return;
+    }
+    if (beaconScanActive) {
+        pBLEScan->stop();
+    }
+    beaconScanActive = false;
+    beaconScanDone = false;
+    pBLEScan->clearResults();
+}
+
 // ─── Relay Timers (ephemeral, not persisted) ────────────────
 #define MAX_TIMERS 4
 struct RelayTimer {
@@ -638,6 +652,12 @@ void checkBeaconReverts() {
 }
 
 void checkBeacons() {
+    if (gatewayMode) {
+        if (beaconScanActive || beaconScanDone) {
+            stopBeaconScanNow();
+        }
+        return;
+    }
     if (solarMode || !beaconScanEnabled || !pBLEScan) return;
 
     static unsigned long lastScanStart = 0;
@@ -2263,11 +2283,16 @@ void handleSerialConfig() {
     }
     else if (line == "GATEWAY ON") {
         gatewayMode = true;
-        Serial.println("OK: Gateway mode ON — raw packets will be forwarded over serial");
+        // Shut down BLE entirely — gateway uses serial, not BLE
+        // Frees interrupt resources, prevents GPIO/SPI contention
+        beaconScanEnabled = false;
+        if (pBLEScan) { pBLEScan->stop(); pBLEScan = nullptr; }
+        BLEDevice::deinit(false);
+        Serial.println("OK: Gateway mode ON — BLE disabled, packets forwarded over serial");
     }
     else if (line == "GATEWAY OFF") {
         gatewayMode = false;
-        Serial.println("OK: Gateway mode OFF");
+        Serial.println("OK: Gateway mode OFF — beacon scan resumed");
     }
     else if (line.startsWith("AUTOPOLL ")) {
         String args = line.substring(9); args.trim();
