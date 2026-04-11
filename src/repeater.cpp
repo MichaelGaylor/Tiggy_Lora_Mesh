@@ -3068,6 +3068,23 @@ void loop() {
                    " routes=" + String(mesh.routingTable.size()) +
                    " rxNew=" + String(rxChanged ? "YES" : "STALL"));
         lastRxSnapshot = mesh.packetsReceived;
+        // Radio stall recovery — if no new RX for 2 minutes, reinit radio
+        static int stallCount = 0;
+        if (!rxChanged && mesh.knownCount > 0) {
+            stallCount++;
+            if (stallCount >= 2) {  // 2 consecutive stalls = 2 minutes
+                debugPrint("RADIO STALL: no RX for 2min — reinitializing");
+#if defined(RADIO_SX1262)
+                radio.setDio1Action(onRadioRx);
+#elif defined(RADIO_SX1276)
+                radio.setDio0Action(onRadioRx, RISING);
+#endif
+                radioStartListening();
+                stallCount = 0;
+            }
+        } else {
+            stallCount = 0;
+        }
         if (freeHeap < 20000) {
             debugPrint("LOW HEAP: " + String(freeHeap) + "B — restarting");
             delay(100);
