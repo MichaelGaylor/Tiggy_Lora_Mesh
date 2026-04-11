@@ -3107,7 +3107,8 @@ void loop() {
         lastHeapCheck = millis();
         uint32_t freeHeap = ESP.getFreeHeap();
         bool rxChanged = (mesh.packetsReceived != lastRxSnapshot);
-        debugPrint("HEALTH: heap=" + String(freeHeap) +
+        // Use bleSend so HEALTH goes through serial queue (not blocked by full buffer)
+        bleSend("HEALTH: heap=" + String(freeHeap) +
                    " rx=" + String(mesh.packetsReceived) +
                    " fwd=" + String(mesh.packetsForwarded) +
                    " rxFlag=" + String(mesh.rxFlag) +
@@ -3120,7 +3121,7 @@ void loop() {
         if (!rxChanged && mesh.knownCount > 0) {
             stallCount++;
             if (stallCount >= 2) {  // 2 consecutive stalls = 2 minutes
-                debugPrint("RADIO STALL: full radio reinit");
+                bleSend("RADIO STALL: full radio reinit");
                 setupRadio();  // Full reinit — resets SX1262 state machine completely
                 stallCount = 0;
             }
