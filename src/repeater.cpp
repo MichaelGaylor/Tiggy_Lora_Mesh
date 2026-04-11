@@ -816,19 +816,19 @@ void receiveCheck() {
         mesh.processPacket(mp);
 
         // Gateway mode: forward raw packet + RSSI over serial (queued)
-        // Pre-allocate to avoid heap fragmentation from String temporaries
+        // Static buffer — zero heap allocation, no fragmentation
         if (gatewayMode) {
-            String pktStr;
-            pktStr.reserve(len * 2 + 20);
-            pktStr = "PKT,";
+            static char pktBuf[600];  // Max: 4 + 256*2 + 1 + 5 + 1 = 523
+            int pos = 0;
+            pktBuf[pos++] = 'P'; pktBuf[pos++] = 'K'; pktBuf[pos++] = 'T'; pktBuf[pos++] = ',';
+            const char hex[] = "0123456789ABCDEF";
             for (size_t i = 0; i < len; i++) {
-                uint8_t b = pkt[i];
-                pktStr += "0123456789ABCDEF"[(b >> 4) & 0xF];
-                pktStr += "0123456789ABCDEF"[b & 0xF];
+                pktBuf[pos++] = hex[(pkt[i] >> 4) & 0xF];
+                pktBuf[pos++] = hex[pkt[i] & 0xF];
             }
-            pktStr += ",";
-            pktStr += String(mesh.lastRSSI);
-            serialEnqueue(pktStr);
+            pos += snprintf(pktBuf + pos, sizeof(pktBuf) - pos, ",%d", mesh.lastRSSI);
+            pktBuf[pos] = '\0';
+            serialEnqueue(String(pktBuf));
         }
     }
 }
@@ -3059,9 +3059,6 @@ void loop() {
     receiveCheck();
     handleBleAckRetry();
 
-    // 1b. Drain serial output queue (one message per loop, max 10ms block)
-    serialDrain();
-
     // 2. Process jittered forwards
     mesh.processPendingForwards();
 
@@ -3195,6 +3192,10 @@ void loop() {
     if (btn) btnPressStart = 0;
     lastBtn = btn;
 #endif
+
+    // Serial queue drain — at END of loop, far from SPI radio operations
+    // Prevents UART TX interrupt from corrupting SPI state (GDMA contention)
+    serialDrain();
 
     timerWrite(swWdt, 0);  // Pet the hardware timer watchdog
     yield();
