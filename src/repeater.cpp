@@ -680,7 +680,16 @@ String processBeaconCommand(const String& args);  // Forward declaration
 
 void receiveCheck();  // Forward declaration — needed by radioTransmit()
 
+// DIO1 ISR — kept as primary notification but supplemented by polling
+// (ESP32-S3 GPIO ISR can be lost after extended BLE/interrupt activity)
 void IRAM_ATTR onRadioRx() { mesh.rxFlag = true; }
+
+// Poll DIO1 pin directly as fallback — catches packets if ISR is lost
+void pollDio1() {
+    if (!mesh.rxFlag && digitalRead(RADIO_DIO1) == HIGH) {
+        mesh.rxFlag = true;
+    }
+}
 
 // Start listening — always continuous RX (no packet loss)
 void radioStartListening() {
@@ -3045,7 +3054,8 @@ void loop() {
     // 0. Process queued BLE commands (runs on main stack, not BTC_TASK)
     processBleQueue();
 
-    // 1. Radio RX — MeshCore handles routing, forwarding, decryption
+    // 1. Radio RX — poll DIO1 as fallback, then process
+    pollDio1();  // Catches packets if GPIO ISR was lost
     receiveCheck();
     handleBleAckRetry();
 
