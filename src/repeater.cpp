@@ -807,8 +807,19 @@ void receiveCheck() {
         mesh.processPacket(mp);
 
         // Gateway mode: forward raw packet + RSSI over serial (queued)
+        // Pre-allocate to avoid heap fragmentation from String temporaries
         if (gatewayMode) {
-            serialEnqueue("PKT," + mesh.toHex(pkt, len) + "," + String(mesh.lastRSSI));
+            String pktStr;
+            pktStr.reserve(len * 2 + 20);
+            pktStr = "PKT,";
+            for (size_t i = 0; i < len; i++) {
+                uint8_t b = pkt[i];
+                pktStr += "0123456789ABCDEF"[(b >> 4) & 0xF];
+                pktStr += "0123456789ABCDEF"[b & 0xF];
+            }
+            pktStr += ",";
+            pktStr += String(mesh.lastRSSI);
+            serialEnqueue(pktStr);
         }
     }
 }
