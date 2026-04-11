@@ -806,7 +806,7 @@ void receiveCheck() {
     if (mesh.parseRawPacket(pkt, len, mp)) {
         mesh.processPacket(mp);
 
-        // Gateway mode: forward raw packet + RSSI over serial (queued, non-blocking)
+        // Gateway mode: forward raw packet + RSSI over serial (queued)
         if (gatewayMode) {
             serialEnqueue("PKT," + mesh.toHex(pkt, len) + "," + String(mesh.lastRSSI));
         }
@@ -1766,28 +1766,33 @@ void setupBLE() {
 }
 
 // ─── Non-blocking serial output queue ────────────────────────
-// Queues messages and drains them in loop() when serial buffer has space.
-// NEVER blocks — the radio always stays responsive.
+// All gateway serial output goes through this queue.
+// serialDrain() sends data in loop() without blocking.
 #define SERIAL_QUEUE_SIZE 32
+#define SERIAL_DRAIN_BYTES_PER_LOOP 512  // Max bytes to write per loop iteration
 String serialQueue[SERIAL_QUEUE_SIZE];
-volatile uint8_t sqHead = 0, sqTail = 0;
+uint8_t sqHead = 0, sqTail = 0;
 
 void serialEnqueue(const String& line) {
     uint8_t next = (sqHead + 1) % SERIAL_QUEUE_SIZE;
-    if (next == sqTail) return;  // Queue full — oldest messages already sent
+    if (next == sqTail) {
+        // Queue full — drop oldest to make room
+        serialQueue[sqTail] = "";
+        sqTail = (sqTail + 1) % SERIAL_QUEUE_SIZE;
+    }
     serialQueue[sqHead] = line;
     sqHead = next;
 }
 
 void serialDrain() {
-    // Called from loop() — sends queued messages when serial has space
-    while (sqTail != sqHead) {
-        size_t needed = serialQueue[sqTail].length() + 2;
-        if ((size_t)Serial.availableForWrite() < needed) break;  // Buffer full, try next loop
-        Serial.println(serialQueue[sqTail]);
-        serialQueue[sqTail] = "";  // Free memory
-        sqTail = (sqTail + 1) % SERIAL_QUEUE_SIZE;
-    }
+    if (sqTail == sqHead) return;  // Nothing to send
+    // Send ONE message per loop — limits blocking to one Serial.println
+    // ESP32 Serial.println blocks only until TX buffer accepts the data
+    // (not until data is physically sent), so this is typically <1ms
+    String& msg = serialQueue[sqTail];
+    Serial.println(msg);
+    msg = "";
+    sqTail = (sqTail + 1) % SERIAL_QUEUE_SIZE;
 }
 
 void bleSend(const String& line) {
@@ -2768,6 +2773,7 @@ void updateOLED() {
 
 void setup() {
     Serial.begin(115200);
+    Serial.setTimeout(100);  // Limit blocking on serial operations
     delay(1000);
 
     // Hardware timer watchdog — 30s, completely independent of RTOS
@@ -3032,7 +3038,7 @@ void loop() {
     receiveCheck();
     handleBleAckRetry();
 
-    // 1b. Drain serial output queue (non-blocking — never stalls radio)
+    // 1b. Drain serial output queue (one message per loop, max 10ms block)
     serialDrain();
 
     // 2. Process jittered forwards
