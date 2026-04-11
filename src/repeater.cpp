@@ -3109,13 +3109,8 @@ void loop() {
         if (!rxChanged && mesh.knownCount > 0) {
             stallCount++;
             if (stallCount >= 2) {  // 2 consecutive stalls = 2 minutes
-                debugPrint("RADIO STALL: no RX for 2min — reinitializing");
-#if defined(RADIO_SX1262)
-                radio.setDio1Action(onRadioRx);
-#elif defined(RADIO_SX1276)
-                radio.setDio0Action(onRadioRx, RISING);
-#endif
-                radioStartListening();
+                debugPrint("RADIO STALL: full radio reinit");
+                setupRadio();  // Full reinit — resets SX1262 state machine completely
                 stallCount = 0;
             }
         } else {
