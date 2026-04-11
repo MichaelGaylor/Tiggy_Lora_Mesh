@@ -481,6 +481,8 @@ void loadConfig();
 void setupGPIO();
 void setupBLE();
 void setupRadio();
+void serialEnqueue(const String& line);
+void serialDrain();
 bool isPinSafe(int pin);
 
 // ─── GPS function implementations ────────────────────────────
@@ -804,9 +806,9 @@ void receiveCheck() {
     if (mesh.parseRawPacket(pkt, len, mp)) {
         mesh.processPacket(mp);
 
-        // Gateway mode: forward raw packet + RSSI over serial for bridge server
-        if (gatewayMode && Serial.availableForWrite() > 10) {
-            Serial.println("PKT," + mesh.toHex(pkt, len) + "," + String(mesh.lastRSSI));
+        // Gateway mode: forward raw packet + RSSI over serial (queued, non-blocking)
+        if (gatewayMode) {
+            serialEnqueue("PKT," + mesh.toHex(pkt, len) + "," + String(mesh.lastRSSI));
         }
     }
 }
@@ -1763,9 +1765,34 @@ void setupBLE() {
     debugPrint("BLE beacon scanner ready");
 }
 
+// ─── Non-blocking serial output queue ────────────────────────
+// Queues messages and drains them in loop() when serial buffer has space.
+// NEVER blocks — the radio always stays responsive.
+#define SERIAL_QUEUE_SIZE 32
+String serialQueue[SERIAL_QUEUE_SIZE];
+volatile uint8_t sqHead = 0, sqTail = 0;
+
+void serialEnqueue(const String& line) {
+    uint8_t next = (sqHead + 1) % SERIAL_QUEUE_SIZE;
+    if (next == sqTail) return;  // Queue full — oldest messages already sent
+    serialQueue[sqHead] = line;
+    sqHead = next;
+}
+
+void serialDrain() {
+    // Called from loop() — sends queued messages when serial has space
+    while (sqTail != sqHead) {
+        size_t needed = serialQueue[sqTail].length() + 2;
+        if ((size_t)Serial.availableForWrite() < needed) break;  // Buffer full, try next loop
+        Serial.println(serialQueue[sqTail]);
+        serialQueue[sqTail] = "";  // Free memory
+        sqTail = (sqTail + 1) % SERIAL_QUEUE_SIZE;
+    }
+}
+
 void bleSend(const String& line) {
-    // Echo BLE responses to serial when in gateway mode (so gateway GUI sees feedback)
-    if (gatewayMode) Serial.println(line);
+    // Echo BLE responses to serial when in gateway mode (queued, non-blocking)
+    if (gatewayMode) serialEnqueue(line);
     if (!bleConnected || !bleRxChar) return;
     String msg = line + "\n";
     for (unsigned int i = 0; i < msg.length(); i += 20) {
@@ -3004,6 +3031,9 @@ void loop() {
     // 1. Radio RX — MeshCore handles routing, forwarding, decryption
     receiveCheck();
     handleBleAckRetry();
+
+    // 1b. Drain serial output queue (non-blocking — never stalls radio)
+    serialDrain();
 
     // 2. Process jittered forwards
     mesh.processPendingForwards();
