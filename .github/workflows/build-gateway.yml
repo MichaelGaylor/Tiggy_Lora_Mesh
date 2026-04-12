@@ -35,15 +35,8 @@ jobs:
             --name "TiggyOpenMesh-Hub" `
             gateway_hub_gui.py
 
-      - name: Build Gateway Client exe
-        run: |
-          cd gateway
-          pyinstaller --noconfirm --onefile --windowed `
-            --collect-data customtkinter `
-            --collect-all matplotlib `
-            --hidden-import sensor_dashboard `
-            --name "TiggyOpenMesh-Gateway" `
-            gateway_gui.py
+      # Note: Gateway Client GUI is now in the premium repo (Tiggy_Lora_Mesh_Premium)
+      # Only the Hub GUI is built from the public repo
 
       - name: Upload exe artifacts
         uses: actions/upload-artifact@v4
@@ -51,7 +44,6 @@ jobs:
           name: gateway-windows-exe
           path: |
             gateway/dist/TiggyOpenMesh-Hub.exe
-            gateway/dist/TiggyOpenMesh-Gateway.exe
 
       - name: Attach to release
         if: github.event_name == 'release'
@@ -59,4 +51,3 @@ jobs:
         with:
           files: |
             gateway/dist/TiggyOpenMesh-Hub.exe
-            gateway/dist/TiggyOpenMesh-Gateway.exe
