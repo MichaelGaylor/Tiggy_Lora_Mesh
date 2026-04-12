@@ -285,8 +285,71 @@ struct BeaconRule {
 BeaconRule beaconRules[MAX_BEACON_RULES];
 BLEScan* pBLEScan = nullptr;
 static volatile bool beaconScanDone = false;
-static bool beaconScanActive = false;  // Track scan state (BLEScan has no isScanning)
-bool beaconScanEnabled = true;  // Can be disabled to save power
+static bool beaconScanActive = false;
+bool beaconScanEnabled = true;
+
+void bleSend(const String& line);  // Forward declaration for tracker
+// ─── Beacon Tracker (passive RSSI observer for triangulation) ─
+#define MAX_TRACKED_BEACONS 8
+struct TrackedBeacon {
+    char mac[18];
+    int8_t bestRssi;
+    uint8_t count;
+};
+bool trackerMode = false;
+uint16_t trackerIntervalMs = 30000;  // Default 30s
+unsigned long lastTrackerReport = 0;
+TrackedBeacon trackedBeacons[MAX_TRACKED_BEACONS];
+uint8_t trackedBeaconCount = 0;
+
+void trackBeacon(BLEAdvertisedDevice& dev) {
+    if (!trackerMode) return;
+    String mac = String(dev.getAddress().toString().c_str());
+    int8_t rssi = dev.getRSSI();
+    // Update existing or add new
+    for (int i = 0; i < trackedBeaconCount; i++) {
+        if (mac.equalsIgnoreCase(String(trackedBeacons[i].mac))) {
+            if (rssi > trackedBeacons[i].bestRssi) trackedBeacons[i].bestRssi = rssi;
+            trackedBeacons[i].count++;
+            return;
+        }
+    }
+    if (trackedBeaconCount < MAX_TRACKED_BEACONS) {
+        strncpy(trackedBeacons[trackedBeaconCount].mac, mac.c_str(), 17);
+        trackedBeacons[trackedBeaconCount].mac[17] = '\0';
+        trackedBeacons[trackedBeaconCount].bestRssi = rssi;
+        trackedBeacons[trackedBeaconCount].count = 1;
+        trackedBeaconCount++;
+    }
+}
+
+void sendTrackerReport() {
+    if (trackedBeaconCount == 0) return;
+    // Sort by strongest RSSI (most useful for trilateration)
+    for (int i = 0; i < trackedBeaconCount - 1; i++)
+        for (int j = i + 1; j < trackedBeaconCount; j++)
+            if (trackedBeacons[j].bestRssi > trackedBeacons[i].bestRssi) {
+                TrackedBeacon tmp = trackedBeacons[i];
+                trackedBeacons[i] = trackedBeacons[j];
+                trackedBeacons[j] = tmp;
+            }
+    // Build compact report: CMD,TRK,mac1:rssi1,mac2:rssi2,...
+    static char buf[256];
+    int pos = 0;
+    pos += snprintf(buf + pos, sizeof(buf) - pos, "CMD,TRK");
+    for (int i = 0; i < trackedBeaconCount && pos < 230; i++) {
+        pos += snprintf(buf + pos, sizeof(buf) - pos, ",%s:%d",
+                        trackedBeacons[i].mac, trackedBeacons[i].bestRssi);
+    }
+    // Broadcast over mesh
+    String hex = mesh.encryptMsg(String(buf));
+    String mid = mesh.generateMsgID();
+    String payload = String(mesh.localID) + ",FFFF," + mid + "," +
+                     String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+    mesh.transmitPacket(0xFFFF, payload);
+    bleSend("TRACKER_SENT," + String(trackedBeaconCount));
+    trackedBeaconCount = 0;  // Reset for next interval
+}
 
 void checkBeacons();  // Forward declaration
 
@@ -684,12 +747,19 @@ void checkBeacons() {
         for (int i = 0; i < results.getCount(); i++) {
             BLEAdvertisedDevice dev = results.getDevice(i);
             matchBeacon(dev);
+            trackBeacon(dev);  // Passive RSSI collection for triangulation
         }
         pBLEScan->clearResults();
     }
 
     // Check for auto-reverts
     checkBeaconReverts();
+
+    // Periodic tracker report (if enabled)
+    if (trackerMode && now - lastTrackerReport > trackerIntervalMs) {
+        sendTrackerReport();
+        lastTrackerReport = now;
+    }
 }
 
 String processBeaconCommand(const String& args);  // Forward declaration
@@ -1622,6 +1692,10 @@ void handleCmd(const String& from, const String& cmdBody) {
         // Beacon event from remote node — forward to local serial/BLE for GUI
         bleSend(rest);
     }
+    else if (action == "TRK") {
+        // Tracker report from remote node — forward to serial for GUI triangulation
+        bleSend("TRACKER," + from + "," + rest);
+    }
 }
 
 // Message handler — called by MeshCore when a message arrives for us
@@ -2293,6 +2367,29 @@ void handleSerialConfig() {
     else if (line == "GATEWAY OFF") {
         gatewayMode = false;
         Serial.println("OK: Gateway mode OFF — beacon scan resumed");
+    }
+    else if (line == "TRACKER ON") {
+        trackerMode = true;
+        Serial.println("OK: Tracker mode ON — reporting beacon RSSI every " + String(trackerIntervalMs / 1000) + "s");
+    }
+    else if (line == "TRACKER OFF") {
+        trackerMode = false;
+        trackedBeaconCount = 0;
+        Serial.println("OK: Tracker mode OFF");
+    }
+    else if (line.startsWith("TRACKER INTERVAL,")) {
+        int secs = line.substring(17).toInt();
+        if (secs >= 10 && secs <= 300) {
+            trackerIntervalMs = secs * 1000;
+            Serial.println("OK: Tracker interval set to " + String(secs) + "s");
+        } else {
+            Serial.println("ERR: Interval must be 10-300 seconds");
+        }
+    }
+    else if (line == "TRACKER STATUS") {
+        Serial.println("Tracker: " + String(trackerMode ? "ON" : "OFF") +
+                       " interval=" + String(trackerIntervalMs / 1000) + "s" +
+                       " beacons=" + String(trackedBeaconCount));
     }
     else if (line.startsWith("AUTOPOLL ")) {
         String args = line.substring(9); args.trim();
