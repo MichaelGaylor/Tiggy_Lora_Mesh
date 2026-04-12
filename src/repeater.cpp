@@ -239,6 +239,11 @@ char autoPollTarget[NODE_ID_LEN + 1] = "";
 uint16_t autoPollInterval = 300;  // default 5 min
 unsigned long nextAutoPollTime = 0;
 
+// ─── Node location (static, for nodes without GPS) ──────────
+#define EEPROM_NDLOC_ADDR 449   // 8 bytes: lat(float) + lon(float)
+float nodeLat = 0.0f;
+float nodeLon = 0.0f;
+
 // ─── GPS (optional external module via UART) ────────────────
 #define EEPROM_GPS_ADDR 441     // 2 bytes: TX pin, RX pin (0xFF = disabled)
 #define EEPROM_BLEPIN_ADDR 443  // 4 bytes: BLE PIN (uint32_t), 0xFFFFFFFF = default
@@ -2319,6 +2324,9 @@ void handleSerialConfig() {
         } else {
             Serial.println("AutoPoll: OFF");
         }
+        if (nodeLat != 0 || nodeLon != 0) {
+            Serial.println("LOC:" + String(nodeLat, 6) + "," + String(nodeLon, 6));
+        }
         // Output PINS directly (gateway GUI parses this for Logic Builder pin dropdowns)
         String pins = "PINS,R:";
         for (int i = 0; i < relayCount; i++) { if (i) pins += ","; pins += String(relayPins[i]); }
@@ -2390,6 +2398,21 @@ void handleSerialConfig() {
         Serial.println("Tracker: " + String(trackerMode ? "ON" : "OFF") +
                        " interval=" + String(trackerIntervalMs / 1000) + "s" +
                        " beacons=" + String(trackedBeaconCount));
+    }
+    else if (line.startsWith("NDLOC,") || line.startsWith("NDLOC ")) {
+        // NDLOC,lat,lon or NDLOC lat,lon — set static node location
+        String args = line.substring(6); args.trim();
+        int c = args.indexOf(',');
+        if (c > 0) {
+            nodeLat = args.substring(0, c).toFloat();
+            nodeLon = args.substring(c + 1).toFloat();
+            EEPROM.put(EEPROM_NDLOC_ADDR, nodeLat);
+            EEPROM.put(EEPROM_NDLOC_ADDR + 4, nodeLon);
+            EEPROM.commit();
+            Serial.println("OK: Node location set to " + String(nodeLat, 6) + "," + String(nodeLon, 6));
+        } else {
+            Serial.println("ERR: Use NDLOC,lat,lon (e.g. NDLOC,52.709,-0.841)");
+        }
     }
     else if (line.startsWith("AUTOPOLL ")) {
         String args = line.substring(9); args.trim();
@@ -2861,6 +2884,15 @@ void loadConfig() {
     } else {
         blePin = BLE_DEFAULT_PIN;
         blePinIsDefault = true;
+    }
+
+    // Load node location (static, for nodes without GPS)
+    float savedLat = 0, savedLon = 0;
+    EEPROM.get(EEPROM_NDLOC_ADDR, savedLat);
+    EEPROM.get(EEPROM_NDLOC_ADDR + 4, savedLon);
+    if (savedLat != 0 && savedLon != 0 && !isnan(savedLat) && !isnan(savedLon)) {
+        nodeLat = savedLat;
+        nodeLon = savedLon;
     }
 }
 
