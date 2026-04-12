@@ -93,6 +93,7 @@
   <div class="legend-item"><div class="legend-dot" style="background:#cc4444"></div> Offline Gateway</div>
   <div class="legend-item"><div class="legend-dot" style="background:rgba(0,180,255,0.15);border:1px solid rgba(0,180,255,0.4)"></div> Coverage Ring</div>
   <div class="legend-item"><div style="width:20px;height:2px;background:#00cc00;opacity:0.5"></div> Gateway Link</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#ff8c00;box-shadow:0 0 4px #ff8c00"></div> Tracked Beacon</div>
 </div>
 
 <script>
@@ -133,6 +134,88 @@ let markers = {};
 let circles = {};
 let linkLines = [];
 let totalPackets = 0;
+
+// Beacon tracking state
+let beaconMarkers = {};
+let beaconCircles = {};
+
+function createBeaconIcon() {
+  return L.divIcon({
+    className: '',
+    html: `<div style="
+      width: 14px; height: 14px; border-radius: 50%;
+      background: #ff8c00; border: 2px solid #fff;
+      filter: drop-shadow(0 0 4px #ff8c00);
+    "></div>`,
+    iconSize: [14, 14],
+    iconAnchor: [7, 7],
+    popupAnchor: [0, -10],
+  });
+}
+
+function formatAge(seconds) {
+  if (seconds < 60) return Math.round(seconds) + 's ago';
+  if (seconds < 3600) return Math.floor(seconds / 60) + 'm ago';
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  return h + 'h ' + m + 'm ago';
+}
+
+async function fetchBeacons() {
+  try {
+    const resp = await fetch('/api/beacon-positions');
+    const beacons = await resp.json();
+    const seen = new Set();
+
+    beacons.forEach(b => {
+      const id = b.mac;
+      seen.add(id);
+
+      const ageStr = formatAge(b.age || 0);
+      const accMeters = b.accuracy || 0;
+      const popupHtml = `
+        <div class="popup-content">
+          <div class="name" style="color:#ff8c00">Tracked Beacon</div>
+          <div class="detail">MAC: <span style="font-family:monospace">${b.mac}</span></div>
+          <div class="detail">Nodes: ${b.node_count || 0}</div>
+          <div class="detail">Accuracy: ~${accMeters.toFixed(0)}m</div>
+          <div class="detail">Last seen: ${ageStr}</div>
+        </div>
+      `;
+
+      if (beaconMarkers[id]) {
+        beaconMarkers[id].setLatLng([b.lat, b.lon]);
+        beaconMarkers[id].setPopupContent(popupHtml);
+        beaconCircles[id].setLatLng([b.lat, b.lon]);
+        beaconCircles[id].setRadius(accMeters);
+      } else {
+        beaconCircles[id] = L.circle([b.lat, b.lon], {
+          radius: accMeters,
+          color: 'rgba(255,140,0,0.5)',
+          fillColor: 'rgba(255,140,0,0.12)',
+          fillOpacity: 1,
+          weight: 1,
+        }).addTo(map);
+
+        beaconMarkers[id] = L.marker([b.lat, b.lon], { icon: createBeaconIcon() })
+          .bindPopup(popupHtml)
+          .addTo(map);
+      }
+    });
+
+    // Remove stale beacon markers
+    Object.keys(beaconMarkers).forEach(id => {
+      if (!seen.has(id)) {
+        map.removeLayer(beaconMarkers[id]);
+        map.removeLayer(beaconCircles[id]);
+        delete beaconMarkers[id];
+        delete beaconCircles[id];
+      }
+    });
+  } catch (e) {
+    console.warn('Failed to fetch beacons:', e);
+  }
+}
 
 function formatUptime(seconds) {
   if (seconds < 60) return seconds + 's';
@@ -431,8 +514,10 @@ async function fetchSensors() {
 
 fetchGateways();
 fetchSensors();
+fetchBeacons();
 setInterval(fetchGateways, 10000);
 setInterval(fetchSensors, 5000);
+setInterval(fetchBeacons, 10000);
 </script>
 </body>
 </html>
