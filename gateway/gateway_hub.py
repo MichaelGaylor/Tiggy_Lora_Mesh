@@ -107,10 +107,50 @@ class GatewayHub:
         # Key: "nodeId:pin" e.g. "5041:15"
         self.sensor_latest: dict[str, dict] = {}
 
+        # Beacon tracker — aggregates RSSI readings from multiple nodes for triangulation
+        self.beacon_readings: dict[str, list] = {}   # mac → [{node_id, rssi, lat, lon, ts}]
+        self.beacon_positions: dict[str, dict] = {}  # mac → {lat, lon, accuracy, node_count, ts}
+        self.BEACON_READING_TTL = 300  # 5 minutes
+
         # Gateway registry (persisted to disk so offline gateways appear on map)
         self.registry_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gateways.json")
         self.registry: dict[str, dict] = {}  # id -> {name, lat, lon, ...}
         self._load_registry()
+
+    def _trilaterate(self, beacon_mac: str):
+        """Estimate beacon position using weighted centroid from multiple RSSI readings."""
+        readings = self.beacon_readings.get(beacon_mac, [])
+        now = time.time()
+        # Keep latest reading per node
+        latest: dict[str, dict] = {}
+        for r in readings:
+            if now - r["ts"] > self.BEACON_READING_TTL:
+                continue
+            nid = r["node_id"]
+            if nid not in latest or r["ts"] > latest[nid]["ts"]:
+                latest[nid] = r
+        if len(latest) < 2:
+            return  # Need at least 2 nodes
+        # RSSI to distance: d = 10^((TxPower - RSSI) / (10 * n))
+        TX_POWER = -59  # Typical BLE beacon at 1m
+        PATH_LOSS_N = 2.5  # Outdoor with some obstacles
+        total_weight = 0.0
+        weighted_lat = 0.0
+        weighted_lon = 0.0
+        for r in latest.values():
+            d = 10 ** ((TX_POWER - r["rssi"]) / (10 * PATH_LOSS_N))
+            weight = 1.0 / max(d, 0.5)
+            weighted_lat += r["lat"] * weight
+            weighted_lon += r["lon"] * weight
+            total_weight += weight
+        if total_weight > 0:
+            self.beacon_positions[beacon_mac] = {
+                "lat": weighted_lat / total_weight,
+                "lon": weighted_lon / total_weight,
+                "accuracy": max(10, int(50 / len(latest))),
+                "node_count": len(latest),
+                "ts": now,
+            }
 
     def _load_registry(self):
         """Load gateway registry from disk."""
@@ -306,6 +346,36 @@ class GatewayHub:
                 "unit": msg.get("unit", ""),
             }
 
+        elif msg_type == "tracker_report":
+            # Beacon RSSI readings from a node for triangulation
+            node_id = msg.get("node_id", "")
+            node_lat = float(msg.get("lat", 0))
+            node_lon = float(msg.get("lon", 0))
+            now = time.time()
+            if node_lat == 0 and node_lon == 0:
+                return  # Skip nodes without position
+            for reading in msg.get("readings", []):
+                mac = reading.get("mac", "")
+                rssi = reading.get("rssi", -100)
+                if not mac:
+                    continue
+                if mac not in self.beacon_readings:
+                    self.beacon_readings[mac] = []
+                # Add reading
+                self.beacon_readings[mac].append({
+                    "node_id": node_id, "rssi": rssi,
+                    "lat": node_lat, "lon": node_lon, "ts": now
+                })
+                # Prune old readings
+                self.beacon_readings[mac] = [
+                    r for r in self.beacon_readings[mac]
+                    if now - r["ts"] < self.BEACON_READING_TTL
+                ]
+            # Trilaterate all beacons that have readings from 2+ nodes
+            for mac in set(r.get("mac", "") for r in msg.get("readings", [])):
+                if mac:
+                    self._trilaterate(mac)
+
     async def broadcast_event(self, msg: dict, exclude=None):
         """Send an event to all authenticated gateways."""
         raw = json.dumps(msg)
@@ -414,6 +484,23 @@ class GatewayHub:
         if not data:
             return web.json_response({"error": "No data"}, status=404)
         return web.json_response(data)
+
+    async def handle_api_beacon_positions(self, request):
+        """GET /api/beacon-positions — estimated beacon locations from triangulation."""
+        now = time.time()
+        result = []
+        for mac, pos in self.beacon_positions.items():
+            if now - pos["ts"] > self.BEACON_READING_TTL:
+                continue
+            result.append({
+                "mac": mac,
+                "lat": pos["lat"],
+                "lon": pos["lon"],
+                "accuracy": pos["accuracy"],
+                "node_count": pos["node_count"],
+                "age": int(now - pos["ts"]),
+            })
+        return web.json_response(result)
 
     async def handle_gauge(self, request):
         """GET /gauge/{node}/{pin} — self-contained HTML gauge page for any sensor."""
@@ -726,6 +813,7 @@ class GatewayHub:
         app.router.add_get("/api/gateways", self.handle_api_gateways)
         app.router.add_get("/api/sensors", self.handle_api_sensors)
         app.router.add_get("/api/sensor/{node}/{pin}", self.handle_api_sensor)
+        app.router.add_get("/api/beacon-positions", self.handle_api_beacon_positions)
         app.router.add_get("/gauge/{node}/{pin}", self.handle_gauge)
         # Static files from gateway/web/
         web_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
