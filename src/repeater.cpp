@@ -950,8 +950,11 @@ void startSolarMode() {
 #endif
     oledAvailable = false;
 
-    // BLE stays active — needed for app control and solar mode toggle
-    // Radio stays in continuous RX
+    // Disable BLE entirely — saves ~10mA (GATT + scanning off)
+    // Re-enable with SOLAR OFF via serial or remote CMD,SOLAR,OFF
+    beaconScanEnabled = false;
+    if (pBLEScan) { pBLEScan->stop(); pBLEScan = nullptr; }
+    BLEDevice::deinit(false);
 
     // 2. Configure light sleep with DIO1 wakeup
     //    Radio stays in continuous RX. DIO1 fires on packet → wakes CPU.
@@ -1703,6 +1706,22 @@ void handleCmd(const String& from, const String& cmdBody) {
     else if (action == "BEACONEVT") {
         // Beacon event from remote node — forward to local serial/BLE for GUI
         bleSend(rest);
+    }
+    else if (action == "SOLAR") {
+        if (rest == "ON") {
+            startSolarMode();
+            bleSend("OK,SOLAR,ON");
+        } else if (rest == "OFF") {
+            solarMode = false;
+            // Re-enable OLED
+#ifdef VEXT_CTRL
+            digitalWrite(VEXT_CTRL, LOW);
+#endif
+            // BLE reinit requires reboot
+            bleSend("OK,SOLAR,OFF,REBOOT_NEEDED");
+            delay(500);
+            ESP.restart();
+        }
     }
     else if (action == "TRK") {
         // Tracker report from remote node — forward to serial for GUI triangulation
