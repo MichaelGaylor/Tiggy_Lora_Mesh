@@ -1689,6 +1689,108 @@ void handleCmd(const String& from, const String& cmdBody) {
     else if (action == "NRSSI") {
         bleSend("NRSSI," + from + "," + rest);
     }
+    else if (action == "CONFIG") {
+        // Remote node configuration: CONFIG,<type>,<args>
+        int c2 = rest.indexOf(',');
+        String cfgType = (c2 > 0) ? rest.substring(0, c2) : rest;
+        String cfgArgs = (c2 > 0) ? rest.substring(c2 + 1) : "";
+        cfgType.toUpperCase();
+
+        if (cfgType == "SENSOR") {
+            sensorCount = 0;
+            int start = 0, end;
+            while ((end = cfgArgs.indexOf(',', start)) != -1 && sensorCount < MAX_SENSOR_PINS_CFG) {
+                int p = cfgArgs.substring(start, end).toInt();
+                if (isPinSafe(p)) sensorPins[sensorCount++] = p;
+                start = end + 1;
+            }
+            if (sensorCount < MAX_SENSOR_PINS_CFG) {
+                int p = cfgArgs.substring(start).toInt();
+                if (isPinSafe(p)) sensorPins[sensorCount++] = p;
+            }
+            setupGPIO(); saveConfig();
+            bleSend("OK,CONFIG,SENSOR," + String(sensorCount));
+        }
+        else if (cfgType == "RELAY") {
+            relayCount = 0;
+            int start = 0, end;
+            while ((end = cfgArgs.indexOf(',', start)) != -1 && relayCount < MAX_RELAY_PINS_CFG) {
+                int p = cfgArgs.substring(start, end).toInt();
+                if (isPinSafe(p)) relayPins[relayCount++] = p;
+                start = end + 1;
+            }
+            if (relayCount < MAX_RELAY_PINS_CFG) {
+                int p = cfgArgs.substring(start).toInt();
+                if (isPinSafe(p)) relayPins[relayCount++] = p;
+            }
+            setupGPIO(); saveConfig();
+            bleSend("OK,CONFIG,RELAY," + String(relayCount));
+        }
+        else if (cfgType == "KEY") {
+            if ((int)cfgArgs.length() == AES_KEY_LEN) {
+                strncpy(mesh.aes_key_string, cfgArgs.c_str(), AES_KEY_LEN);
+                mesh.aes_key_string[AES_KEY_LEN] = '\0';
+                saveConfig();
+                bleSend("OK,CONFIG,KEY");
+            } else {
+                bleSend("ERR,CONFIG,KEY,LEN");
+            }
+        }
+        else if (cfgType == "AUTOPOLL") {
+            if (cfgArgs == "OFF") {
+                autoPollEnabled = false;
+                saveConfig();
+                bleSend("OK,CONFIG,AUTOPOLL,OFF");
+            } else {
+                int ac = cfgArgs.indexOf(',');
+                if (ac > 0) {
+                    String target = cfgArgs.substring(0, ac); target.trim(); target.toUpperCase();
+                    int interval = cfgArgs.substring(ac + 1).toInt();
+                    if (mesh.isValidNodeID(target) && interval >= AUTOPOLL_MIN_INTERVAL) {
+                        autoPollEnabled = true;
+                        strncpy(autoPollTarget, target.c_str(), NODE_ID_LEN);
+                        autoPollTarget[NODE_ID_LEN] = '\0';
+                        autoPollInterval = interval;
+                        nextAutoPollTime = millis() + (unsigned long)interval * 1000UL;
+                        saveConfig();
+                        bleSend("OK,CONFIG,AUTOPOLL," + String(autoPollTarget) + "," + String(interval));
+                    } else {
+                        bleSend("ERR,CONFIG,AUTOPOLL,ARGS");
+                    }
+                } else {
+                    bleSend("ERR,CONFIG,AUTOPOLL,FORMAT");
+                }
+            }
+        }
+        else if (cfgType == "PINMODE") {
+            int pc = cfgArgs.indexOf(',');
+            if (pc > 0) {
+                int pin = cfgArgs.substring(0, pc).toInt();
+                String mode = cfgArgs.substring(pc + 1); mode.trim(); mode.toUpperCase();
+                int pinIdx = -1;
+                for (int i = 0; i < sensorCount; i++) {
+                    if (sensorPins[i] == pin) { pinIdx = i; break; }
+                }
+                if (pinIdx < 0) { bleSend("ERR,CONFIG,PINMODE,NOT_SENSOR"); }
+                else if (mode == "PULSE") {
+                    if (enablePulseCounter(pin)) {
+                        sensorMode[pinIdx] = SENSOR_MODE_PULSE;
+                        saveConfig();
+                        bleSend("OK,CONFIG,PINMODE," + String(pin) + ",PULSE");
+                    } else { bleSend("ERR,CONFIG,PINMODE,MAX4"); }
+                }
+                else {
+                    disablePulseCounter(pin);
+                    sensorMode[pinIdx] = SENSOR_MODE_AUTO;
+                    saveConfig();
+                    bleSend("OK,CONFIG,PINMODE," + String(pin) + ",AUTO");
+                }
+            } else { bleSend("ERR,CONFIG,PINMODE,FORMAT"); }
+        }
+        else {
+            bleSend("ERR,CONFIG,UNKNOWN," + cfgType);
+        }
+    }
 }
 
 // Message handler — called by MeshCore when a message arrives for us
