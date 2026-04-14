@@ -264,8 +264,8 @@ void broadcastGPS();
 // ─── iBeacon Scanner ─────────────────────────────────────────
 #define MAX_BEACON_RULES 8
 #define EEPROM_BEACON_ADDR 512  // After magic byte at 508
-#define BEACON_SCAN_DURATION 2  // seconds per scan
-#define BEACON_SCAN_INTERVAL 3000  // ms between scans
+#define BEACON_SCAN_DURATION 12   // seconds per scan (covers 10s Eddystone cycle)
+#define BEACON_SCAN_INTERVAL 30000 // ms between scans (18s clean gap for LoRa)
 
 struct BeaconRule {
     bool active;
@@ -1867,8 +1867,8 @@ void setupBLE() {
     // iBeacon scanner — runs alongside GATT server
     pBLEScan = BLEDevice::getScan();
     pBLEScan->setActiveScan(false);   // Passive scan = less interference with GATT
-    pBLEScan->setInterval(100);       // 100ms scan interval
-    pBLEScan->setWindow(50);          // 50ms scan window (50% duty)
+    pBLEScan->setInterval(1000);      // one scan window per second (was 100ms)
+    pBLEScan->setWindow(50);          // 50ms listen per window (5% duty, was 50%)
     debugPrint("BLE beacon scanner ready");
 }
 
