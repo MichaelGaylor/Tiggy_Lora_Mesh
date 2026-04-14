@@ -135,6 +135,7 @@ class HexPacketParser:
             hb_parts = payload[3:].strip().split(",")
             result["hb_from"] = hb_parts[0]
             result["hb_board"] = hb_parts[1] if len(hb_parts) > 1 else ""
+            result["hb_flags"] = hb_parts[2] if len(hb_parts) > 2 else ""
         else:
             fields = HexPacketParser.parse_payload_fields(payload)
             if fields:
