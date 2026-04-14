@@ -107,47 +107,44 @@ class GatewayHub:
         # Key: "nodeId:pin" e.g. "5041:15"
         self.sensor_latest: dict[str, dict] = {}
 
-        # Beacon tracker — aggregates RSSI readings from multiple nodes for triangulation
-        self.beacon_readings: dict[str, list] = {}   # mac → [{node_id, rssi, lat, lon, ts}]
-        self.beacon_positions: dict[str, dict] = {}  # mac → {lat, lon, accuracy, node_count, ts}
-        self.BEACON_READING_TTL = 300  # 5 minutes
+        # Node triangulation — LoRa RSSI from fixed nodes estimates mobile node positions
+        self.READING_TTL = 300  # 5 minutes
+        self.node_rssi_readings: dict[str, list] = {}   # target → [{observer_id, rssi, lat, lon, ts}]
+        self.node_positions: dict[str, dict] = {}        # target → {lat, lon, accuracy, node_count, ts}
 
         # Gateway registry (persisted to disk so offline gateways appear on map)
         self.registry_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gateways.json")
         self.registry: dict[str, dict] = {}  # id -> {name, lat, lon, ...}
         self._load_registry()
 
-    def _trilaterate(self, beacon_mac: str):
-        """Estimate beacon position using weighted centroid from multiple RSSI readings."""
-        readings = self.beacon_readings.get(beacon_mac, [])
+    def _trilaterate_node(self, target_node: str):
+        """Estimate node position using weighted centroid from LoRa RSSI readings."""
+        readings = self.node_rssi_readings.get(target_node, [])
         now = time.time()
-        # Keep latest reading per node
         latest: dict[str, dict] = {}
         for r in readings:
-            if now - r["ts"] > self.BEACON_READING_TTL:
+            if now - r["ts"] > self.READING_TTL:
                 continue
-            nid = r["node_id"]
-            if nid not in latest or r["ts"] > latest[nid]["ts"]:
-                latest[nid] = r
-        if len(latest) < 2:
-            return  # Need at least 2 nodes
-        # RSSI to distance: d = 10^((TxPower - RSSI) / (10 * n))
-        TX_POWER = -59  # Typical BLE beacon at 1m
-        PATH_LOSS_N = 2.5  # Outdoor with some obstacles
+            oid = r["observer_id"]
+            if oid not in latest or r["ts"] > latest[oid]["ts"]:
+                latest[oid] = r
+        if len(latest) < 3:
+            return  # Need 3+ observers
+        TX_POWER, PATH_LOSS_N = 14, 2.2
         total_weight = 0.0
         weighted_lat = 0.0
         weighted_lon = 0.0
         for r in latest.values():
             d = 10 ** ((TX_POWER - r["rssi"]) / (10 * PATH_LOSS_N))
-            weight = 1.0 / max(d, 0.5)
+            weight = 1.0 / max(d, 1.0)
             weighted_lat += r["lat"] * weight
             weighted_lon += r["lon"] * weight
             total_weight += weight
         if total_weight > 0:
-            self.beacon_positions[beacon_mac] = {
+            self.node_positions[target_node] = {
                 "lat": weighted_lat / total_weight,
                 "lon": weighted_lon / total_weight,
-                "accuracy": max(10, int(50 / len(latest))),
+                "accuracy": max(20, int(100 / len(latest))),
                 "node_count": len(latest),
                 "ts": now,
             }
@@ -346,35 +343,45 @@ class GatewayHub:
                 "unit": msg.get("unit", ""),
             }
 
-        elif msg_type == "tracker_report":
-            # Beacon RSSI readings from a node for triangulation
-            node_id = msg.get("node_id", "")
-            node_lat = float(msg.get("lat", 0))
-            node_lon = float(msg.get("lon", 0))
+        elif msg_type == "node_rssi_report":
+            observer_id = msg.get("observer_id", "")
+            obs_lat = float(msg.get("lat", 0))
+            obs_lon = float(msg.get("lon", 0))
             now = time.time()
-            if node_lat == 0 and node_lon == 0:
-                return  # Skip nodes without position
+            if obs_lat == 0 and obs_lon == 0:
+                return
+            if abs(obs_lat) > 90 or abs(obs_lon) > 180:
+                return
+            targets_updated = set()
             for reading in msg.get("readings", []):
-                mac = reading.get("mac", "")
-                rssi = reading.get("rssi", -100)
-                if not mac:
+                target = reading.get("node_id", "")
+                rssi = reading.get("rssi", -150)
+                if not target or target == observer_id:
                     continue
-                if mac not in self.beacon_readings:
-                    self.beacon_readings[mac] = []
-                # Add reading
-                self.beacon_readings[mac].append({
-                    "node_id": node_id, "rssi": rssi,
-                    "lat": node_lat, "lon": node_lon, "ts": now
+                if target not in self.node_rssi_readings:
+                    self.node_rssi_readings[target] = []
+                self.node_rssi_readings[target].append({
+                    "observer_id": observer_id, "rssi": rssi,
+                    "lat": obs_lat, "lon": obs_lon, "ts": now
                 })
-                # Prune old readings
-                self.beacon_readings[mac] = [
-                    r for r in self.beacon_readings[mac]
-                    if now - r["ts"] < self.BEACON_READING_TTL
+                self.node_rssi_readings[target] = [
+                    r for r in self.node_rssi_readings[target]
+                    if now - r["ts"] < self.READING_TTL
                 ]
-            # Trilaterate all beacons that have readings from 2+ nodes
-            for mac in set(r.get("mac", "") for r in msg.get("readings", [])):
-                if mac:
-                    self._trilaterate(mac)
+                targets_updated.add(target)
+            for target in targets_updated:
+                self._trilaterate_node(target)
+
+        elif msg_type == "tracked_position":
+            track_id = msg.get("track_id", "")
+            if track_id:
+                self.node_positions[track_id] = {
+                    "lat": float(msg.get("lat", 0)),
+                    "lon": float(msg.get("lon", 0)),
+                    "accuracy": float(msg.get("accuracy", 0)),
+                    "node_count": 0,
+                    "ts": time.time(),
+                }
 
     async def broadcast_event(self, msg: dict, exclude=None):
         """Send an event to all authenticated gateways."""
@@ -485,19 +492,16 @@ class GatewayHub:
             return web.json_response({"error": "No data"}, status=404)
         return web.json_response(data)
 
-    async def handle_api_beacon_positions(self, request):
-        """GET /api/beacon-positions — estimated beacon locations from triangulation."""
+    async def handle_api_node_positions(self, request):
+        """GET /api/node-positions — estimated mobile node locations from LoRa RSSI."""
         now = time.time()
         result = []
-        for mac, pos in self.beacon_positions.items():
-            if now - pos["ts"] > self.BEACON_READING_TTL:
+        for node_id, pos in self.node_positions.items():
+            if now - pos["ts"] > self.READING_TTL:
                 continue
             result.append({
-                "mac": mac,
-                "lat": pos["lat"],
-                "lon": pos["lon"],
-                "accuracy": pos["accuracy"],
-                "node_count": pos["node_count"],
+                "node_id": node_id, "lat": pos["lat"], "lon": pos["lon"],
+                "accuracy": pos["accuracy"], "node_count": pos["node_count"],
                 "age": int(now - pos["ts"]),
             })
         return web.json_response(result)
@@ -813,7 +817,7 @@ class GatewayHub:
         app.router.add_get("/api/gateways", self.handle_api_gateways)
         app.router.add_get("/api/sensors", self.handle_api_sensors)
         app.router.add_get("/api/sensor/{node}/{pin}", self.handle_api_sensor)
-        app.router.add_get("/api/beacon-positions", self.handle_api_beacon_positions)
+        app.router.add_get("/api/node-positions", self.handle_api_node_positions)
         app.router.add_get("/gauge/{node}/{pin}", self.handle_gauge)
         # Static files from gateway/web/
         web_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")

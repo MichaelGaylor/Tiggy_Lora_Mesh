@@ -290,83 +290,39 @@ struct BeaconRule {
 BeaconRule beaconRules[MAX_BEACON_RULES];
 BLEScan* pBLEScan = nullptr;
 static volatile bool beaconScanDone = false;
-static bool beaconScanActive = false;
-bool beaconScanEnabled = true;
+static bool beaconScanActive = false;  // Track scan state (BLEScan has no isScanning)
+bool beaconScanEnabled = true;  // Can be disabled to save power
 
-void bleSend(const String& line);  // Forward declaration for tracker
-// ─── Beacon Tracker (passive RSSI observer for triangulation) ─
-// Nodes passively collect beacon RSSI. Gateway polls when it wants a snapshot.
-// Zero airtime except when polled. Supports 50-100 beacons per node.
-#define MAX_TRACKED_BEACONS 32
-#define TRACKER_RSSI_THRESHOLD -90  // Ignore beacons weaker than this
-struct TrackedBeacon {
-    char mac[18];
-    int8_t bestRssi;
-    uint8_t count;
-};
-TrackedBeacon trackedBeacons[MAX_TRACKED_BEACONS];
-uint8_t trackedBeaconCount = 0;
-bool trackerEnabled = true;  // Always collects — only responds when polled
+void bleSend(const String& line);  // Forward declaration
 
-void trackBeacon(BLEAdvertisedDevice& dev) {
-    int8_t rssi = dev.getRSSI();
-    if (rssi < TRACKER_RSSI_THRESHOLD) return;  // Too weak for useful trilateration
-    String mac = String(dev.getAddress().toString().c_str());
-    // Update existing or add new
-    for (int i = 0; i < trackedBeaconCount; i++) {
-        if (mac.equalsIgnoreCase(String(trackedBeacons[i].mac))) {
-            if (rssi > trackedBeacons[i].bestRssi) trackedBeacons[i].bestRssi = rssi;
-            trackedBeacons[i].count++;
-            return;
-        }
-    }
-    if (trackedBeaconCount < MAX_TRACKED_BEACONS) {
-        strncpy(trackedBeacons[trackedBeaconCount].mac, mac.c_str(), 17);
-        trackedBeacons[trackedBeaconCount].mac[17] = '\0';
-        trackedBeacons[trackedBeaconCount].bestRssi = rssi;
-        trackedBeacons[trackedBeaconCount].count = 1;
-        trackedBeaconCount++;
-    }
-}
+// ─── Node RSSI Response (for LoRa-based node triangulation) ──────────
+void sendNodeRssiResponse(const String& replyTo) {
+    if (nodeLat == 0 && nodeLon == 0) return;
+    if (nodeLat < -90 || nodeLat > 90 || nodeLon < -180 || nodeLon > 180) return;
 
-void sendTrackerResponse(const String& replyTo) {
-    // Sort by strongest RSSI
-    for (int i = 0; i < trackedBeaconCount - 1; i++)
-        for (int j = i + 1; j < trackedBeaconCount; j++)
-            if (trackedBeacons[j].bestRssi > trackedBeacons[i].bestRssi) {
-                TrackedBeacon tmp = trackedBeacons[i];
-                trackedBeacons[i] = trackedBeacons[j];
-                trackedBeacons[j] = tmp;
-            }
-    // Send multiple packets if needed (max 8 beacons per packet to stay under 255 bytes)
-    int sent = 0;
-    while (sent < trackedBeaconCount) {
-        static char buf[256];
-        int pos = 0;
-        // Include node position in first packet
-        if (sent == 0 && (nodeLat != 0 || nodeLon != 0)) {
-            pos += snprintf(buf + pos, sizeof(buf) - pos, "CMD,TRK,LOC:%f:%f",
-                            nodeLat, nodeLon);
-        } else {
-            pos += snprintf(buf + pos, sizeof(buf) - pos, "CMD,TRK");
-        }
-        int batchCount = 0;
-        for (int i = sent; i < trackedBeaconCount && batchCount < 8 && pos < 230; i++) {
-            pos += snprintf(buf + pos, sizeof(buf) - pos, ",%s:%d",
-                            trackedBeacons[i].mac, trackedBeacons[i].bestRssi);
-            batchCount++;
-            sent++;
-        }
-        // Send to requesting node (or broadcast if replyTo is empty/FFFF)
-        String hex = mesh.encryptMsg(String(buf));
-        String mid = mesh.generateMsgID();
-        uint16_t dest = (replyTo.length() == 4) ? strtol(replyTo.c_str(), nullptr, 16) : 0xFFFF;
-        String payload = String(mesh.localID) + "," + replyTo + "," + mid + "," +
-                         String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
-        mesh.transmitPacket(dest, payload);
+    static char buf[256];
+    int pos = snprintf(buf, sizeof(buf), "CMD,NRSSI,LOC:%f:%f", nodeLat, nodeLon);
+
+    uint32_t now = millis();
+    int count = 0;
+    for (auto& entry : mesh.routingTable) {
+        if (entry.second.nextHop != entry.first) continue;  // Direct-heard only
+        if (now - entry.second.lastSeen > 300000) continue;  // Last 5 minutes
+        int needed = entry.first.length() + 6;
+        if (pos + needed >= 230) break;  // Stay under 255 byte LoRa limit
+        pos += snprintf(buf + pos, sizeof(buf) - pos, ",%s:%d",
+                        entry.first.c_str(), entry.second.rssi);
+        count++;
     }
-    bleSend("TRACKER_SENT," + String(trackedBeaconCount));
-    trackedBeaconCount = 0;  // Reset for next poll
+    if (count == 0) return;
+
+    String hex = mesh.encryptMsg(String(buf));
+    String mid = mesh.generateMsgID();
+    uint16_t dest = (replyTo.length() == 4) ? strtol(replyTo.c_str(), nullptr, 16) : 0xFFFF;
+    String payload = String(mesh.localID) + "," + replyTo + "," + mid + "," +
+                     String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+    mesh.transmitPacket(dest, payload);
+    bleSend("NRSSI_SENT," + String(count));
 }
 
 void checkBeacons();  // Forward declaration
@@ -487,6 +443,16 @@ SetpointRule setpoints[MAX_SETPOINTS];
 bool solarMode = false;
 bool solarOledTemporary = false;
 unsigned long solarOledWakeUntil = 0;
+
+void sendHeartbeatWithFlags() {
+    int pos = 0;
+    if (solarMode)        mesh.statusFlags[pos++] = 'S';
+    if (beaconScanEnabled && !solarMode && !gatewayMode)
+                          mesh.statusFlags[pos++] = 'B';
+    if (gatewayMode)      mesh.statusFlags[pos++] = 'G';
+    mesh.statusFlags[pos] = '\0';
+    mesh.sendHeartbeat();
+}
 
 // ─── IO Expansion Board (UART2) ─────────────────────────────
 // Daisy-chain a second ESP32 for additional I/O.
@@ -765,7 +731,6 @@ void checkBeacons() {
         for (int i = 0; i < results.getCount(); i++) {
             BLEAdvertisedDevice dev = results.getDevice(i);
             matchBeacon(dev);
-            trackBeacon(dev);  // Passive RSSI collection for triangulation
         }
         pBLEScan->clearResults();
     }
@@ -950,11 +915,8 @@ void startSolarMode() {
 #endif
     oledAvailable = false;
 
-    // Disable BLE entirely — saves ~10mA (GATT + scanning off)
-    // Re-enable with SOLAR OFF via serial or remote CMD,SOLAR,OFF
-    beaconScanEnabled = false;
-    if (pBLEScan) { pBLEScan->stop(); pBLEScan = nullptr; }
-    BLEDevice::deinit(false);
+    // BLE stays active — needed for app control and solar mode toggle
+    // Radio stays in continuous RX
 
     // 2. Configure light sleep with DIO1 wakeup
     //    Radio stays in continuous RX. DIO1 fires on packet → wakes CPU.
@@ -1713,23 +1675,19 @@ void handleCmd(const String& from, const String& cmdBody) {
             bleSend("OK,SOLAR,ON");
         } else if (rest == "OFF") {
             solarMode = false;
-            // Re-enable OLED
 #ifdef VEXT_CTRL
             digitalWrite(VEXT_CTRL, LOW);
 #endif
-            // BLE reinit requires reboot
             bleSend("OK,SOLAR,OFF,REBOOT_NEEDED");
             delay(500);
             ESP.restart();
         }
     }
-    else if (action == "TRK") {
-        // Tracker report from remote node — forward to serial for GUI triangulation
-        bleSend("TRACKER," + from + "," + rest);
+    else if (action == "NODE_RSSI_POLL") {
+        sendNodeRssiResponse(from);
     }
-    else if (action == "TRACKER_POLL") {
-        // Gateway requesting beacon RSSI snapshot — respond with current data
-        sendTrackerResponse(from);
+    else if (action == "NRSSI") {
+        bleSend("NRSSI," + from + "," + rest);
     }
 }
 
@@ -2406,16 +2364,7 @@ void handleSerialConfig() {
         gatewayMode = false;
         Serial.println("OK: Gateway mode OFF — beacon scan resumed");
     }
-    else if (line == "TRACKER POLL") {
-        // Local poll — respond immediately with current beacon data
-        sendTrackerResponse("LOCAL");
-    }
-    else if (line == "TRACKER STATUS") {
-        Serial.println("Tracker: beacons=" + String(trackedBeaconCount) +
-                       " loc=" + String(nodeLat, 6) + "," + String(nodeLon, 6));
-    }
     else if (line.startsWith("NDLOC,") || line.startsWith("NDLOC ")) {
-        // NDLOC,lat,lon or NDLOC lat,lon — set static node location
         String args = line.substring(6); args.trim();
         int c = args.indexOf(',');
         if (c > 0) {
@@ -2905,7 +2854,8 @@ void loadConfig() {
     float savedLat = 0, savedLon = 0;
     EEPROM.get(EEPROM_NDLOC_ADDR, savedLat);
     EEPROM.get(EEPROM_NDLOC_ADDR + 4, savedLon);
-    if (savedLat != 0 && savedLon != 0 && !isnan(savedLat) && !isnan(savedLon)) {
+    if (savedLat != 0 && savedLon != 0 && !isnan(savedLat) && !isnan(savedLon)
+        && savedLat >= -90 && savedLat <= 90 && savedLon >= -180 && savedLon <= 180) {
         nodeLat = savedLat;
         nodeLon = savedLon;
     }
@@ -3183,7 +3133,7 @@ void loop() {
 
         // Heartbeat (60s interval in solar mode to save TX power)
         if (millis() > nextHeartbeatTime) {
-            mesh.sendHeartbeat();
+            sendHeartbeatWithFlags();
             nextHeartbeatTime = millis() + HB_INTERVAL_SOLAR + random(-5000, 5000);
             if (BOARD_LED >= 0) { digitalWrite(BOARD_LED, HIGH); delay(2); digitalWrite(BOARD_LED, LOW); }
         }
@@ -3251,7 +3201,7 @@ void loop() {
 
     // 3. Heartbeat
     if (millis() > nextHeartbeatTime) {
-        mesh.sendHeartbeat();
+        sendHeartbeatWithFlags();
         nextHeartbeatTime = millis() + HB_INTERVAL + random(-2000, 2000);
         if (BOARD_LED >= 0) { digitalWrite(BOARD_LED, HIGH); delay(10); digitalWrite(BOARD_LED, LOW); }
     }
@@ -3344,7 +3294,7 @@ void loop() {
     if (!btn && lastBtn) {
         // Button just pressed
         btnPressStart = millis();
-        mesh.sendHeartbeat();
+        sendHeartbeatWithFlags();
         Serial.println("Manual heartbeat sent");
     }
     if (!btn && btnPressStart > 0 && (millis() - btnPressStart) > 10000) {

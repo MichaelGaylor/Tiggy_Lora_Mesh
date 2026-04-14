@@ -161,6 +161,7 @@ public:
 
     // Board identification code (set by firmware, sent in heartbeat)
     char boardCode[4] = "";  // e.g., "V3", "V4", "L32", "XS3", "TD", "V2"
+    char statusFlags[8] = "";  // Compact flags: S=solar, B=beacon scan, G=gateway
 
     // Runtime spreading factor (may differ from compile-time LORA_SF after a CFG change)
     uint8_t currentSF = LORA_SF;

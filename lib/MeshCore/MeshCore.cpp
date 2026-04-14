@@ -615,5 +615,6 @@ void MeshCore::processPacket(const MeshPacket& pkt) {
 void MeshCore::sendHeartbeat() {
     String hb = "HB," + String(localID);
     if (boardCode[0]) hb += "," + String(boardCode);
+    if (statusFlags[0]) hb += "," + String(statusFlags);
     transmitPacket(0xFFFF, hb);
 }
