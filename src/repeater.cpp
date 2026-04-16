@@ -1671,8 +1671,12 @@ void handleCmd(const String& from, const String& cmdBody) {
     }
     else if (action == "SOLAR") {
         if (rest == "ON") {
+#if defined(RADIO_SX1262)
             startSolarMode();
             bleSend("OK,SOLAR,ON");
+#else
+            bleSend("ERR,SOLAR not supported on this board");
+#endif
         } else if (rest == "OFF") {
             solarMode = false;
 #ifdef VEXT_CTRL
