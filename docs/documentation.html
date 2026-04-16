@@ -533,6 +533,7 @@
   <a href="#web-gauge">Web Gauge</a>
   <a href="#licensing">Licensing</a>
   <a href="#new-board">New Board</a>
+  <a href="#beacon-triangulation">Triangulation</a>
   <a href="#command-ref">Command Ref</a>
 </nav>
 
@@ -3971,6 +3972,56 @@ Response: {"node": "5041", "pin": "15", "value": 423, "ts": 1711234567}
 </table>
 </section>
 
+<!-- ═══════════════ BEACON TRIANGULATION ═══════════════ -->
+<section id="beacon-triangulation">
+<h2>48. Beacon Triangulation</h2>
+<p>Estimate the position of BLE beacons (on livestock, equipment, or assets) using RSSI readings from multiple mesh nodes at known positions.</p>
+
+<h3>How It Works</h3>
+<ol>
+  <li><strong>Set node positions:</strong> Each non-GPS node needs a static location: <code>NDLOC,52.709,-0.841</code> (saved to EEPROM).</li>
+  <li><strong>Nodes passively collect beacon RSSI</strong> during their regular BLE scan cycles (always on, no configuration needed).</li>
+  <li><strong>Gateway polls:</strong> The GUI sends <code>CMD,TRACKER_POLL</code> to all nodes. Each responds with its detected beacons + RSSI.</li>
+  <li><strong>Hub trilaterates:</strong> Collects RSSI readings from 2+ nodes, estimates beacon position using weighted centroid.</li>
+  <li><strong>Map displays:</strong> Orange markers on the hub web map show estimated beacon positions with accuracy circles.</li>
+</ol>
+
+<h3>Commands</h3>
+<table>
+  <tr><th>Command</th><th>Description</th></tr>
+  <tr><td><code>NDLOC,lat,lon</code></td><td>Set static node location (for nodes without GPS). Saved to EEPROM.</td></tr>
+  <tr><td><code>TRACKER POLL</code></td><td>Request beacon RSSI snapshot from local node (serial).</td></tr>
+  <tr><td><code>TRACKER STATUS</code></td><td>Show tracker state: beacon count and node location.</td></tr>
+  <tr><td><code>CMD,TRACKER_POLL</code></td><td>Remote poll via mesh &mdash; node responds with <code>CMD,TRK,mac:rssi,...</code></td></tr>
+</table>
+
+<h3>Response Format</h3>
+<pre style="background:var(--panel); padding:12px; border-radius:6px;">CMD,TRK,LOC:52.709672:-0.841409,dc:0d:30:23:38:1e:-45,ac:a7:04:06:43:b5:-67</pre>
+<p>First field is the node&rsquo;s position (from NDLOC or GPS). Subsequent fields are <code>mac:rssi</code> pairs, sorted by strongest RSSI. Max 8 per packet; multiple packets sent if more beacons detected.</p>
+
+<h3>Hub API</h3>
+<pre style="background:var(--panel); padding:12px; border-radius:6px;">GET /api/beacon-positions
+Response: [{"mac": "dc:0d:30:23:38:1e", "lat": 52.7097, "lon": -0.8414, "accuracy": 16, "node_count": 3, "age": 12}]</pre>
+
+<h3>Accuracy</h3>
+<ul>
+  <li>&plusmn;5&ndash;10m outdoors with 3+ nodes (sufficient for &ldquo;which field&rdquo;)</li>
+  <li>Improves with more reporting nodes</li>
+  <li>RSSI is noisy &mdash; weighted centroid handles this gracefully</li>
+  <li>Poll-based: zero mesh airtime when not polling</li>
+</ul>
+
+<h3>GUI Integration (Pro)</h3>
+<ul>
+  <li>Right-click node &rarr; <strong>Poll Beacons</strong> to request snapshot</li>
+  <li><strong>Beacon Position</strong> block in Logic Builder: outputs lat/lon/accuracy for a tracked beacon MAC</li>
+  <li>Wire to <strong>Geofence</strong> block for &ldquo;alert when cow leaves field&rdquo; automation</li>
+</ul>
+
+<h3>Solar Mode &amp; Power</h3>
+<p>In solar mode, BLE is fully disabled (GATT + scanning off, saves ~10mA). Tracker data is not collected. Use <code>CMD,SOLAR,OFF</code> via mesh or USB serial to re-enable for a poll session. Right-click node in GUI &rarr; Enable/Disable Solar Mode.</p>
+</section>
+
 <!-- ═══════════════ COMMAND REFERENCE ═══════════════ -->
 <section id="command-ref">
 <h2>47. Complete Command Reference</h2>
@@ -4088,7 +4139,7 @@ Response: {"node": "5041", "pin": "15", "value": 423, "ts": 1711234567}
 <div style="background:var(--panel); border-top:1px solid var(--faint); padding:30px 40px; text-align:center; color:var(--faint); font-size:0.85em;">
   <p>TiggyOpenMesh v4.1 &mdash; MeshCore Architecture</p>
   <p>T-Deck Plus &bull; LoRa32 T3 V1.6.1 &bull; Heltec WiFi LoRa 32 V3 &bull; Heltec WiFi LoRa 32 V4 &bull; XIAO ESP32S3</p>
-  <p>47 sections &mdash; Hardware, Protocol, UI, BLE, Gateway, Logic Builder, Timers, Setpoints, Sensors, Pulse Counters, SOS, Map, Solar, Delivery, SF Change, Collision Detection, IO Expansion, GPS, Device Management, Signal Routing, iBeacon Scanner, Meshtastic Bridge, Telegram Bot (Gateway), Sensor Dashboard, HW Watchdog, Heltec V4 USB/FEM, Web Gauge, Licensing, Adding a New Board, Command Reference, Caveats</p>
+  <p>48 sections &mdash; Hardware, Protocol, UI, BLE, Gateway, Logic Builder, Timers, Setpoints, Sensors, Pulse Counters, SOS, Map, Solar, Delivery, SF Change, Collision Detection, IO Expansion, GPS, Device Management, Signal Routing, iBeacon Scanner, Meshtastic Bridge, Telegram Bot (Gateway), Sensor Dashboard, HW Watchdog, Heltec V4 USB/FEM, Web Gauge, Licensing, Adding a New Board, Beacon Triangulation, Command Reference, Caveats</p>
   <p style="margin-top:8px;">Documentation updated April 2026</p>
 </div>
 

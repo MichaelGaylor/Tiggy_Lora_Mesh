@@ -239,6 +239,11 @@ char autoPollTarget[NODE_ID_LEN + 1] = "";
 uint16_t autoPollInterval = 300;  // default 5 min
 unsigned long nextAutoPollTime = 0;
 
+// ─── Node location (static, for nodes without GPS) ──────────
+#define EEPROM_NDLOC_ADDR 449   // 8 bytes: lat(float) + lon(float)
+float nodeLat = 0.0f;
+float nodeLon = 0.0f;
+
 // ─── GPS (optional external module via UART) ────────────────
 #define EEPROM_GPS_ADDR 441     // 2 bytes: TX pin, RX pin (0xFF = disabled)
 #define EEPROM_BLEPIN_ADDR 443  // 4 bytes: BLE PIN (uint32_t), 0xFFFFFFFF = default
@@ -259,8 +264,8 @@ void broadcastGPS();
 // ─── iBeacon Scanner ─────────────────────────────────────────
 #define MAX_BEACON_RULES 8
 #define EEPROM_BEACON_ADDR 512  // After magic byte at 508
-#define BEACON_SCAN_DURATION 2  // seconds per scan
-#define BEACON_SCAN_INTERVAL 3000  // ms between scans
+#define BEACON_SCAN_DURATION 12   // seconds per scan (covers 10s Eddystone cycle)
+#define BEACON_SCAN_INTERVAL 30000 // ms between scans (18s clean gap for LoRa)
 
 struct BeaconRule {
     bool active;
@@ -287,6 +292,38 @@ BLEScan* pBLEScan = nullptr;
 static volatile bool beaconScanDone = false;
 static bool beaconScanActive = false;  // Track scan state (BLEScan has no isScanning)
 bool beaconScanEnabled = true;  // Can be disabled to save power
+
+void bleSend(const String& line);  // Forward declaration
+
+// ─── Node RSSI Response (for LoRa-based node triangulation) ──────────
+void sendNodeRssiResponse(const String& replyTo) {
+    if (nodeLat == 0 && nodeLon == 0) return;
+    if (nodeLat < -90 || nodeLat > 90 || nodeLon < -180 || nodeLon > 180) return;
+
+    static char buf[256];
+    int pos = snprintf(buf, sizeof(buf), "CMD,NRSSI,LOC:%f:%f", nodeLat, nodeLon);
+
+    uint32_t now = millis();
+    int count = 0;
+    for (auto& entry : mesh.routingTable) {
+        if (entry.second.nextHop != entry.first) continue;  // Direct-heard only
+        if (now - entry.second.lastSeen > 300000) continue;  // Last 5 minutes
+        int needed = entry.first.length() + 6;
+        if (pos + needed >= 230) break;  // Stay under 255 byte LoRa limit
+        pos += snprintf(buf + pos, sizeof(buf) - pos, ",%s:%d",
+                        entry.first.c_str(), entry.second.rssi);
+        count++;
+    }
+    if (count == 0) return;
+
+    String hex = mesh.encryptMsg(String(buf));
+    String mid = mesh.generateMsgID();
+    uint16_t dest = (replyTo.length() == 4) ? strtol(replyTo.c_str(), nullptr, 16) : 0xFFFF;
+    String payload = String(mesh.localID) + "," + replyTo + "," + mid + "," +
+                     String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+    mesh.transmitPacket(dest, payload);
+    bleSend("NRSSI_SENT," + String(count));
+}
 
 void checkBeacons();  // Forward declaration
 
@@ -406,6 +443,16 @@ SetpointRule setpoints[MAX_SETPOINTS];
 bool solarMode = false;
 bool solarOledTemporary = false;
 unsigned long solarOledWakeUntil = 0;
+
+void sendHeartbeatWithFlags() {
+    int pos = 0;
+    if (solarMode)        mesh.statusFlags[pos++] = 'S';
+    if (beaconScanEnabled && !solarMode && !gatewayMode)
+                          mesh.statusFlags[pos++] = 'B';
+    if (gatewayMode)      mesh.statusFlags[pos++] = 'G';
+    mesh.statusFlags[pos] = '\0';
+    mesh.sendHeartbeat();
+}
 
 // ─── IO Expansion Board (UART2) ─────────────────────────────
 // Daisy-chain a second ESP32 for additional I/O.
@@ -1622,6 +1669,128 @@ void handleCmd(const String& from, const String& cmdBody) {
         // Beacon event from remote node — forward to local serial/BLE for GUI
         bleSend(rest);
     }
+    else if (action == "SOLAR") {
+        if (rest == "ON") {
+            startSolarMode();
+            bleSend("OK,SOLAR,ON");
+        } else if (rest == "OFF") {
+            solarMode = false;
+#ifdef VEXT_CTRL
+            digitalWrite(VEXT_CTRL, LOW);
+#endif
+            bleSend("OK,SOLAR,OFF,REBOOT_NEEDED");
+            delay(500);
+            ESP.restart();
+        }
+    }
+    else if (action == "NODE_RSSI_POLL") {
+        sendNodeRssiResponse(from);
+    }
+    else if (action == "NRSSI") {
+        bleSend("NRSSI," + from + "," + rest);
+    }
+    else if (action == "CONFIG") {
+        // Remote node configuration: CONFIG,<type>,<args>
+        int c2 = rest.indexOf(',');
+        String cfgType = (c2 > 0) ? rest.substring(0, c2) : rest;
+        String cfgArgs = (c2 > 0) ? rest.substring(c2 + 1) : "";
+        cfgType.toUpperCase();
+
+        if (cfgType == "SENSOR") {
+            sensorCount = 0;
+            int start = 0, end;
+            while ((end = cfgArgs.indexOf(',', start)) != -1 && sensorCount < MAX_SENSOR_PINS_CFG) {
+                int p = cfgArgs.substring(start, end).toInt();
+                if (isPinSafe(p)) sensorPins[sensorCount++] = p;
+                start = end + 1;
+            }
+            if (sensorCount < MAX_SENSOR_PINS_CFG) {
+                int p = cfgArgs.substring(start).toInt();
+                if (isPinSafe(p)) sensorPins[sensorCount++] = p;
+            }
+            setupGPIO(); saveConfig();
+            bleSend("OK,CONFIG,SENSOR," + String(sensorCount));
+        }
+        else if (cfgType == "RELAY") {
+            relayCount = 0;
+            int start = 0, end;
+            while ((end = cfgArgs.indexOf(',', start)) != -1 && relayCount < MAX_RELAY_PINS_CFG) {
+                int p = cfgArgs.substring(start, end).toInt();
+                if (isPinSafe(p)) relayPins[relayCount++] = p;
+                start = end + 1;
+            }
+            if (relayCount < MAX_RELAY_PINS_CFG) {
+                int p = cfgArgs.substring(start).toInt();
+                if (isPinSafe(p)) relayPins[relayCount++] = p;
+            }
+            setupGPIO(); saveConfig();
+            bleSend("OK,CONFIG,RELAY," + String(relayCount));
+        }
+        else if (cfgType == "KEY") {
+            if ((int)cfgArgs.length() == AES_KEY_LEN) {
+                strncpy(mesh.aes_key_string, cfgArgs.c_str(), AES_KEY_LEN);
+                mesh.aes_key_string[AES_KEY_LEN] = '\0';
+                saveConfig();
+                bleSend("OK,CONFIG,KEY");
+            } else {
+                bleSend("ERR,CONFIG,KEY,LEN");
+            }
+        }
+        else if (cfgType == "AUTOPOLL") {
+            if (cfgArgs == "OFF") {
+                autoPollEnabled = false;
+                saveConfig();
+                bleSend("OK,CONFIG,AUTOPOLL,OFF");
+            } else {
+                int ac = cfgArgs.indexOf(',');
+                if (ac > 0) {
+                    String target = cfgArgs.substring(0, ac); target.trim(); target.toUpperCase();
+                    int interval = cfgArgs.substring(ac + 1).toInt();
+                    if (mesh.isValidNodeID(target) && interval >= AUTOPOLL_MIN_INTERVAL) {
+                        autoPollEnabled = true;
+                        strncpy(autoPollTarget, target.c_str(), NODE_ID_LEN);
+                        autoPollTarget[NODE_ID_LEN] = '\0';
+                        autoPollInterval = interval;
+                        nextAutoPollTime = millis() + (unsigned long)interval * 1000UL;
+                        saveConfig();
+                        bleSend("OK,CONFIG,AUTOPOLL," + String(autoPollTarget) + "," + String(interval));
+                    } else {
+                        bleSend("ERR,CONFIG,AUTOPOLL,ARGS");
+                    }
+                } else {
+                    bleSend("ERR,CONFIG,AUTOPOLL,FORMAT");
+                }
+            }
+        }
+        else if (cfgType == "PINMODE") {
+            int pc = cfgArgs.indexOf(',');
+            if (pc > 0) {
+                int pin = cfgArgs.substring(0, pc).toInt();
+                String mode = cfgArgs.substring(pc + 1); mode.trim(); mode.toUpperCase();
+                int pinIdx = -1;
+                for (int i = 0; i < sensorCount; i++) {
+                    if (sensorPins[i] == pin) { pinIdx = i; break; }
+                }
+                if (pinIdx < 0) { bleSend("ERR,CONFIG,PINMODE,NOT_SENSOR"); }
+                else if (mode == "PULSE") {
+                    if (enablePulseCounter(pin)) {
+                        sensorMode[pinIdx] = SENSOR_MODE_PULSE;
+                        saveConfig();
+                        bleSend("OK,CONFIG,PINMODE," + String(pin) + ",PULSE");
+                    } else { bleSend("ERR,CONFIG,PINMODE,MAX4"); }
+                }
+                else {
+                    disablePulseCounter(pin);
+                    sensorMode[pinIdx] = SENSOR_MODE_AUTO;
+                    saveConfig();
+                    bleSend("OK,CONFIG,PINMODE," + String(pin) + ",AUTO");
+                }
+            } else { bleSend("ERR,CONFIG,PINMODE,FORMAT"); }
+        }
+        else {
+            bleSend("ERR,CONFIG,UNKNOWN," + cfgType);
+        }
+    }
 }
 
 // Message handler — called by MeshCore when a message arrives for us
@@ -1800,8 +1969,8 @@ void setupBLE() {
     // iBeacon scanner — runs alongside GATT server
     pBLEScan = BLEDevice::getScan();
     pBLEScan->setActiveScan(false);   // Passive scan = less interference with GATT
-    pBLEScan->setInterval(100);       // 100ms scan interval
-    pBLEScan->setWindow(50);          // 50ms scan window (50% duty)
+    pBLEScan->setInterval(1000);      // one scan window per second (was 100ms)
+    pBLEScan->setWindow(50);          // 50ms listen per window (5% duty, was 50%)
     debugPrint("BLE beacon scanner ready");
 }
 
@@ -2245,6 +2414,9 @@ void handleSerialConfig() {
         } else {
             Serial.println("AutoPoll: OFF");
         }
+        if (nodeLat != 0 || nodeLon != 0) {
+            Serial.println("LOC:" + String(nodeLat, 6) + "," + String(nodeLon, 6));
+        }
         // Output PINS directly (gateway GUI parses this for Logic Builder pin dropdowns)
         String pins = "PINS,R:";
         for (int i = 0; i < relayCount; i++) { if (i) pins += ","; pins += String(relayPins[i]); }
@@ -2293,6 +2465,20 @@ void handleSerialConfig() {
     else if (line == "GATEWAY OFF") {
         gatewayMode = false;
         Serial.println("OK: Gateway mode OFF — beacon scan resumed");
+    }
+    else if (line.startsWith("NDLOC,") || line.startsWith("NDLOC ")) {
+        String args = line.substring(6); args.trim();
+        int c = args.indexOf(',');
+        if (c > 0) {
+            nodeLat = args.substring(0, c).toFloat();
+            nodeLon = args.substring(c + 1).toFloat();
+            EEPROM.put(EEPROM_NDLOC_ADDR, nodeLat);
+            EEPROM.put(EEPROM_NDLOC_ADDR + 4, nodeLon);
+            EEPROM.commit();
+            Serial.println("OK: Node location set to " + String(nodeLat, 6) + "," + String(nodeLon, 6));
+        } else {
+            Serial.println("ERR: Use NDLOC,lat,lon (e.g. NDLOC,52.709,-0.841)");
+        }
     }
     else if (line.startsWith("AUTOPOLL ")) {
         String args = line.substring(9); args.trim();
@@ -2710,14 +2896,14 @@ void loadConfig() {
 
     // Pin config version check — if version doesn't match, reset to defaults
     // This catches old EEPROM with wrong pins (e.g., 19/20/33 on ESP32-S3)
-    #define PIN_CONFIG_VERSION 7  // v7: force 50/50 IO split reset
+    #define PIN_CONFIG_VERSION 8  // v8: fix stale pins — saveConfig was missing after reset
     #define EEPROM_PIN_VER_ADDR 448  // After BLEPIN (443-446), safe gap
     uint8_t pinVer = EEPROM.read(EEPROM_PIN_VER_ADDR);
     if (pinVer != PIN_CONFIG_VERSION) {
         uint8_t d[] = DEFAULT_RELAY_PINS; relayCount = sizeof(d)/sizeof(d[0]); memcpy(relayPins, d, relayCount);
         uint8_t s[] = DEFAULT_SENSOR_PINS; sensorCount = sizeof(s)/sizeof(s[0]); memcpy(sensorPins, s, sensorCount);
         EEPROM.write(EEPROM_PIN_VER_ADDR, PIN_CONFIG_VERSION);
-        EEPROM.commit();
+        saveConfig();  // Persist new pin defaults to EEPROM (was missing — caused stale pins)
         debugPrint("Pin config updated to v" + String(PIN_CONFIG_VERSION) + " — reset to board defaults");
     }
 
@@ -2764,6 +2950,16 @@ void loadConfig() {
     } else {
         blePin = BLE_DEFAULT_PIN;
         blePinIsDefault = true;
+    }
+
+    // Load node location (static, for nodes without GPS)
+    float savedLat = 0, savedLon = 0;
+    EEPROM.get(EEPROM_NDLOC_ADDR, savedLat);
+    EEPROM.get(EEPROM_NDLOC_ADDR + 4, savedLon);
+    if (savedLat != 0 && savedLon != 0 && !isnan(savedLat) && !isnan(savedLon)
+        && savedLat >= -90 && savedLat <= 90 && savedLon >= -180 && savedLon <= 180) {
+        nodeLat = savedLat;
+        nodeLon = savedLon;
     }
 }
 
@@ -3039,7 +3235,7 @@ void loop() {
 
         // Heartbeat (60s interval in solar mode to save TX power)
         if (millis() > nextHeartbeatTime) {
-            mesh.sendHeartbeat();
+            sendHeartbeatWithFlags();
             nextHeartbeatTime = millis() + HB_INTERVAL_SOLAR + random(-5000, 5000);
             if (BOARD_LED >= 0) { digitalWrite(BOARD_LED, HIGH); delay(2); digitalWrite(BOARD_LED, LOW); }
         }
@@ -3107,7 +3303,7 @@ void loop() {
 
     // 3. Heartbeat
     if (millis() > nextHeartbeatTime) {
-        mesh.sendHeartbeat();
+        sendHeartbeatWithFlags();
         nextHeartbeatTime = millis() + HB_INTERVAL + random(-2000, 2000);
         if (BOARD_LED >= 0) { digitalWrite(BOARD_LED, HIGH); delay(10); digitalWrite(BOARD_LED, LOW); }
     }
@@ -3200,7 +3396,7 @@ void loop() {
     if (!btn && lastBtn) {
         // Button just pressed
         btnPressStart = millis();
-        mesh.sendHeartbeat();
+        sendHeartbeatWithFlags();
         Serial.println("Manual heartbeat sent");
     }
     if (!btn && btnPressStart > 0 && (millis() - btnPressStart) > 10000) {
