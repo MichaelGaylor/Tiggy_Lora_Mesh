@@ -251,16 +251,11 @@
 #define BOARD_BUTTON        0
 
 // ─── User GPIO for relays & sensors ─────────────────────────
-// Free pins on Heltec V3 (verified from V3.2 pinmap):
-// 2, 3, 4, 5, 6, 7, 40, 41, 42, 45, 46, 47, 48
-// RESERVED — DO NOT USE:
-//   GPIO 19/20 = USB D-/D+ (kills USB serial)
-//   GPIO 33/34 = FSPIHD/FSPICS0 (flash SPI — will crash!)
-//   GPIO 38    = FSPIWP (flash SPI)
-//   GPIO 39    = SUBSPICS1 (flash SPI)
+// Free pins on Heltec V3:
+// 2, 3, 4, 5, 6, 7, 33, 34, 40, 41, 42, 45, 46, 47, 48
 #define USER_GPIO_COUNT     6
 #define DEFAULT_RELAY_PINS  { 2, 3, 4 }
-#define DEFAULT_SENSOR_PINS { 5, 6, 7, 40, 41 }  // GPIO33/34 are FSPI (flash SPI), use 40/41 instead
+#define DEFAULT_SENSOR_PINS { 5, 6, 7, 33, 34 }
 #define SENSOR_PIN_COUNT    2
 
 // ═══════════════════════════════════════════════════════════════
