@@ -251,12 +251,16 @@
 #define BOARD_BUTTON        0
 
 // ─── User GPIO for relays & sensors ─────────────────────────
-// Free pins on Heltec V3:
-// 2, 3, 4, 5, 6, 7, 19, 20, 33, 34, 38, 39, 40, 41, 42, 43, 44, 45, 46
-// Plenty available since ESP32-S3 has many GPIOs
+// Free pins on Heltec V3 (verified from V3.2 pinmap):
+// 2, 3, 4, 5, 6, 7, 40, 41, 42, 45, 46, 47, 48
+// RESERVED — DO NOT USE:
+//   GPIO 19/20 = USB D-/D+ (kills USB serial)
+//   GPIO 33/34 = FSPIHD/FSPICS0 (flash SPI — will crash!)
+//   GPIO 38    = FSPIWP (flash SPI)
+//   GPIO 39    = SUBSPICS1 (flash SPI)
 #define USER_GPIO_COUNT     6
 #define DEFAULT_RELAY_PINS  { 2, 3, 4 }
-#define DEFAULT_SENSOR_PINS { 5, 6, 7, 33, 34 }  // ADC-capable, on JP2/JP3 headers (GPIO15/16 not on headers)
+#define DEFAULT_SENSOR_PINS { 5, 6, 7, 40, 41 }  // GPIO33/34 are FSPI (flash SPI), use 40/41 instead
 #define SENSOR_PIN_COUNT    2
 
 // ═══════════════════════════════════════════════════════════════
@@ -334,14 +338,18 @@
 #define BOARD_BUTTON        0
 
 // ─── User GPIO for relays & sensors ─────────────────────────
-// Free pins on Heltec V4 (40-pin header, more GPIOs than V3):
-// 2, 3, 4, 5, 6, 7, 15, 16, 33, 34, 40, 41, 42, 43, 44, 45, 46
+// Free pins on Heltec V4 (verified from V4 pinmap):
+// 3, 4, 5, 6, 40, 41, 42, 47, 48
 // RESERVED — DO NOT USE:
+//   GPIO 2     = FEM_EN (front-end module)
+//   GPIO 7     = FEM_POWER (PA power)
 //   GPIO 19/20 = USB D-/D+ (kills USB serial)
+//   GPIO 33/34 = FSPIHD/FSPICS0 (flash SPI — will crash!)
 //   GPIO 38/39 = GPS header connector (hardwired to GNSS SH1.25)
+//   GPIO 46    = FEM_TXEN (PA TX enable)
 #define USER_GPIO_COUNT     6
 #define DEFAULT_RELAY_PINS  { 3, 4 }          // NOT 2(FEM_EN), NOT 7(FEM_POWER)
-#define DEFAULT_SENSOR_PINS { 5, 6, 33, 34 }  // ADC-capable, on JP2 headers (GPIO15/16 not on headers)
+#define DEFAULT_SENSOR_PINS { 5, 6, 40, 41 }  // GPIO33/34 are FSPI on V4, use 40/41 instead
 #define SENSOR_PIN_COUNT    2
 
 // ═══════════════════════════════════════════════════════════════
