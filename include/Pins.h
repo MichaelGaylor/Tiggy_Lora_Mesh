@@ -256,7 +256,7 @@
 // Plenty available since ESP32-S3 has many GPIOs
 #define USER_GPIO_COUNT     6
 #define DEFAULT_RELAY_PINS  { 2, 3, 4 }
-#define DEFAULT_SENSOR_PINS { 5, 6, 7, 15, 16 }  // 50/50 split, ADC-capable (NOT 19/20=USB)
+#define DEFAULT_SENSOR_PINS { 5, 6, 7, 33, 34 }  // ADC-capable, on JP2/JP3 headers (GPIO15/16 not on headers)
 #define SENSOR_PIN_COUNT    2
 
 // ═══════════════════════════════════════════════════════════════
@@ -341,7 +341,7 @@
 //   GPIO 38/39 = GPS header connector (hardwired to GNSS SH1.25)
 #define USER_GPIO_COUNT     6
 #define DEFAULT_RELAY_PINS  { 3, 4 }          // NOT 2(FEM_EN), NOT 7(FEM_POWER)
-#define DEFAULT_SENSOR_PINS { 5, 6, 15, 16 } // 50/50 split, ADC-capable
+#define DEFAULT_SENSOR_PINS { 5, 6, 33, 34 }  // ADC-capable, on JP2 headers (GPIO15/16 not on headers)
 #define SENSOR_PIN_COUNT    2
 
 // ═══════════════════════════════════════════════════════════════
