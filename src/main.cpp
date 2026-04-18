@@ -999,6 +999,14 @@ void IRAM_ATTR tbDownISR()  { tbDeltaDown++; }
 void IRAM_ATTR tbLeftISR()  { tbDeltaLeft++; }
 void IRAM_ATTR tbRightISR() { tbDeltaRight++; }
 
+#ifdef BOARD_TOUCH_INT
+// Set by the touch handler when a tap completes on a menu row.
+// The next readTrackball() will consume it as a 'C' (click) so the
+// existing handleMenu activation path fires — one code path for
+// both trackball click and touch tap, zero duplication.
+static volatile bool touchClickPending = false;
+#endif
+
 void setupTrackball() {
   pinMode(BOARD_TBALL_UP, INPUT_PULLUP);
   pinMode(BOARD_TBALL_DOWN, INPUT_PULLUP);
@@ -1012,6 +1020,13 @@ void setupTrackball() {
 }
 
 char readTrackball() {
+#ifdef BOARD_TOUCH_INT
+  if (touchClickPending) {
+      touchClickPending = false;
+      wakeDisplay();
+      return 'C';
+  }
+#endif
   const int threshold = 2;
   char result = 0;
   if (tbDeltaUp >= threshold) {
@@ -2406,29 +2421,84 @@ void loop() {
   // Notification overlay
   drawNotification();
 
-  // Touch input — map to trackball/keyboard equivalents
 #ifdef BOARD_TOUCH_INT
-  static bool lastTouched = false;
+  // Touch input — tap selects+activates, vertical swipe scrolls the menu.
+  // Robust to the GT911 driver's clearBuffer() flicker: we only consider
+  // the finger lifted after RELEASE_MS of sustained no-touch, which is
+  // well longer than the chip's clear-and-refresh cycle (~10-40 ms).
+  static const int SWIPE_PX               = 30;
+  static const unsigned long RELEASE_MS   = 100;
+  static const unsigned long TAP_MAX_MS   = 400;
+  static const int TOUCH_MENU_START_Y     = CONTENT_Y + 18;  // mirrors drawMenu
+  static const int TOUCH_MENU_LINE_H      = 24;              // mirrors drawMenu
+
+  static bool touchActive     = false;
+  static bool touchSwipeFired = false;
+  static int  touchStartY     = 0;
+  static int  touchCurY       = 0;
+  static unsigned long touchStartMs    = 0;
+  static unsigned long lastTouchTrueMs = 0;
+
   TouchPoint tp = readTouch();
-  if (tp.touched && !lastTouched) {
-      wakeDisplay();
-      // Map touch zones to actions (320x240 landscape)
-      if (tp.y < 40) {
-          // Top bar tap → back/menu
-          if (currentMode != MENU) {
-              currentMode = MENU;
+  unsigned long nowMs = millis();
+
+  if (tp.touched) {
+      lastTouchTrueMs = nowMs;
+      if (!touchActive) {
+          // Finger just landed
+          touchActive     = true;
+          touchSwipeFired = false;
+          touchStartY     = tp.y;
+          touchCurY       = tp.y;
+          touchStartMs    = nowMs;
+          wakeDisplay();
+      } else if (currentMode == MENU) {
+          // Held: one menu step per SWIPE_PX of vertical travel
+          int dy = tp.y - touchCurY;
+          if (dy >= SWIPE_PX) {
+              // Finger moved down → scroll up (earlier items)
+              int c = (menuState == M_MAIN) ? mainCount : settingsCount;
+              menuIndex = (menuIndex - 1 + c) % c;
+              drawCurrentMenu();
+              touchCurY       = tp.y;
+              touchSwipeFired = true;
+          } else if (dy <= -SWIPE_PX) {
+              // Finger moved up → scroll down (later items)
+              int c = (menuState == M_MAIN) ? mainCount : settingsCount;
+              menuIndex = (menuIndex + 1) % c;
+              drawCurrentMenu();
+              touchCurY       = tp.y;
+              touchSwipeFired = true;
           }
-      } else if (tp.y > 200) {
-          // Bottom area → could trigger text input
-      } else {
-          // Middle area — map to menu selection based on Y position
-          int item = (tp.y - 40) / 30;  // ~30px per menu item
-          // Simulate trackball down + click for menu navigation
-          tbDeltaDown += item;
-          tbDeltaUp = 0;  // Cancel any pending up
+      }
+  } else if (touchActive && (nowMs - lastTouchTrueMs) > RELEASE_MS) {
+      // Sustained no-touch → finger truly lifted
+      touchActive = false;
+      unsigned long duration = nowMs - touchStartMs;
+      if (!touchSwipeFired && duration < TAP_MAX_MS) {
+          // Genuine tap
+          if (touchStartY < CONTENT_Y) {
+              // Top bar → return to menu
+              if (currentMode != MENU) {
+                  currentMode = MENU;
+                  drawCurrentMenu();
+              }
+          } else if (currentMode == MENU) {
+              // Menu row tap → select absolute row + inject activation
+              int maxVisible = (SCREEN_H - STATUS_H - TOUCH_MENU_START_Y) / TOUCH_MENU_LINE_H;
+              int row = (touchStartY - TOUCH_MENU_START_Y) / TOUCH_MENU_LINE_H;
+              if (row >= 0 && row < maxVisible) {
+                  int tapped = menuScroll + row;
+                  int count  = (menuState == M_MAIN) ? mainCount : settingsCount;
+                  if (tapped < count) {
+                      menuIndex = tapped;
+                      drawCurrentMenu();
+                      touchClickPending = true;   // handleMenu → activate
+                  }
+              }
+          }
       }
   }
-  lastTouched = tp.touched;
 #endif
 
   // Mode dispatch
