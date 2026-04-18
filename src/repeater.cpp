@@ -915,25 +915,12 @@ void startSolarMode() {
 #endif
     oledAvailable = false;
 
-    // BLE stays active — needed for app control and solar mode toggle
-    // Radio stays in continuous RX
+    // BLE and radio stay active. solarLightSleep() uses delay() only,
+    // so arming esp_sleep_enable_*_wakeup() here is unused AND hazardous:
+    // esp_sleep_enable_uart_wakeup installs a PM idle hook that null-derefs
+    // in esp_pm_impl_waiti when PM isn't configured, crashing the idle task.
 
-    // 2. Configure light sleep with DIO1 wakeup
-    //    Radio stays in continuous RX. DIO1 fires on packet → wakes CPU.
-    //    Between events, CPU draws ~2-3mA instead of ~80mA (higher than
-    //    full deep sleep because BLE is still active, but much less than normal).
-    gpio_wakeup_enable((gpio_num_t)RADIO_DIO1, GPIO_INTR_HIGH_LEVEL);
-#if defined(BOARD_BUTTON) && BOARD_BUTTON >= 0
-    gpio_wakeup_enable((gpio_num_t)BOARD_BUTTON, GPIO_INTR_LOW_LEVEL);
-#endif
-    esp_sleep_enable_gpio_wakeup();
-    // Wake on timer for heartbeats (60s)
-    esp_sleep_enable_timer_wakeup(HB_INTERVAL_SOLAR * 1000ULL);  // microseconds
-    // Wake on UART input so serial commands (SOLAR OFF) work during sleep
-    uart_set_wakeup_threshold(UART_NUM_0, 3);  // wake after 3 edges on RX
-    esp_sleep_enable_uart_wakeup(UART_NUM_0);
-
-    debugPrint("SOLAR: OLED off, BLE active, light sleep armed");
+    debugPrint("SOLAR: OLED off, BLE active");
     debugPrint("SOLAR: Toggle off via app, PRG button, or SOLAR OFF via serial");
     Serial.flush();
 }
@@ -948,10 +935,6 @@ void solarLightSleep() {
 void stopSolarMode() {
     solarMode = false;
     debugPrint("SOLAR: Restoring normal operation");
-
-    // Disable light sleep wakeup sources
-    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_GPIO);
-    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
 
     // Re-enable OLED
 #ifdef VEXT_CTRL
@@ -2611,7 +2594,7 @@ void handleSerialConfig() {
              line.startsWith("BEACON,") || line.startsWith("BLEPIN,")) {
         processBleCommand(line, true);  // fromSerial=true: skip BLE PIN check
     }
-    else Serial.println("Commands: ID xxxx | KEY xxx... | RELAY 2,4,12 | SENSOR 34,36 | GPS <tx>,<rx> | GPS OFF | STATUS | SAVE | RESET | GATEWAY ON/OFF | AUTOPOLL <id> <sec> | PINMODE <pin> PULSE|AUTO"
+    else Serial.println("Commands: ID xxxx | KEY xxx... | Example RELAY 2,4,12 | SENSOR 34,36 | GPS <tx>,<rx> | GPS OFF | STATUS | SAVE | RESET | GATEWAY ON/OFF | AUTOPOLL <id> <sec> | PINMODE <pin> PULSE|AUTO"
 #if defined(RADIO_SX1262)
         " | SOLAR ON/OFF"
 #endif
@@ -3219,7 +3202,7 @@ void setup() {
     }
 
     Serial.println("Ready. Type STATUS for info.");
-    Serial.println("Commands: ID xxxx | KEY xxx... | RELAY 2,4,12 | SENSOR 34,36 | GPS <tx>,<rx> | GPS OFF");
+    Serial.println("Commands: ID xxxx | KEY xxx... | Example : RELAY 2,4,12 | SENSOR 34,36 | GPS <tx>,<rx> | GPS OFF");
     Serial.println("          STATUS | SAVE | RESET | GATEWAY ON/OFF | AUTOPOLL <id> <sec>");
     Serial.println("          PINMODE <pin> PULSE|AUTO | BLEPIN,<6digits> | EEPROM,RESET | REBOOT");
     debugPrint("Free heap: " + String(ESP.getFreeHeap()));
