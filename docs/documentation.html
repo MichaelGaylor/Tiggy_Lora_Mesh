@@ -609,7 +609,7 @@
 <table>
   <tr><th>Symptom</th><th>Most likely cause</th></tr>
   <tr><td>Nodes do not see each other</td><td>Different AES key, mismatched radio settings, bad antenna, or same node ID</td></tr>
-  <tr><td>BLE app cannot connect</td><td>Wrong firmware type, BLE disabled, or board is in solar mode</td></tr>
+  <tr><td>BLE app cannot connect</td><td>Wrong firmware type, or a gateway-mode build (BLE disabled in gateway mode)</td></tr>
   <tr><td>Message sends but never delivers</td><td>Target unreachable, wrong target ID, weak link, or ACK lost</td></tr>
   <tr><td>Gateway does not appear on map</td><td>No location configured or hub connection not active</td></tr>
 </table>
@@ -1453,7 +1453,7 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
   <tr><td>Save Config</td><td><code>SAVE</code></td><td></td><td><code>OK,SAVED</code></td></tr>
   <tr><td>Set SF</td><td><code>SF,&lt;7-12&gt;</code></td><td><code>SF,7</code></td><td><code>OK,SF,7</code></td></tr>
   <tr><td>Commit SF</td><td><code>SFGO,&lt;7-12&gt;</code></td><td><code>SFGO,7</code></td><td><code>OK,SFGO,7</code></td></tr>
-  <tr><td>Solar Mode On</td><td><code>POWER,SOLAR</code></td><td></td><td><code>OK,POWER,SOLAR</code> (BLE deinits, connection drops)</td></tr>
+  <tr><td>Solar Mode On</td><td><code>POWER,SOLAR</code></td><td></td><td><code>OK,POWER,SOLAR</code> (display off, BLE stays connected)</td></tr>
   <tr><td>Solar Mode Off</td><td><code>POWER,NORMAL</code></td><td></td><td><code>OK,POWER,NORMAL</code></td></tr>
   <tr><td>Poll Local Sensors</td><td><code>POLL</code></td><td></td><td><code>SDATA,0010,34:2048,36:1200</code></td></tr>
   <tr><td>Poll Remote</td><td><code>POLL,&lt;nodeId&gt;</code></td><td><code>POLL,0002</code></td><td>Remote node replies with SDATA over mesh</td></tr>
@@ -1469,8 +1469,8 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
   <tr><td>Set Pin Mode</td><td><code>PINMODE,&lt;pin&gt;,PULSE|AUTO</code></td><td><code>PINMODE,34,PULSE</code></td><td><code>OK,PINMODE,34,PULSE</code></td></tr>
 </table>
 
-<div class="info-box orange">
-  <p><strong>POWER,SOLAR warning:</strong> Enabling solar mode via BLE deinitialises BLE after sending the response &mdash; the connection drops. The app should warn the user before sending. To restore: connect via USB serial and send <code>SOLAR OFF</code>, or press the PRG button.</p>
+<div class="info-box">
+  <p><strong>Solar mode today:</strong> Turns off the OLED display via Vext (~15 mA saved) and switches heartbeat interval to 60 s. BLE and radio remain active &mdash; app connection stays up. To restore full operation: <code>POWER,NORMAL</code> via BLE, <code>SOLAR OFF</code> via USB serial, or press the PRG button.</p>
 </div>
 
 <h3>Notifications: Node &rarr; Phone</h3>
@@ -2825,41 +2825,24 @@ sudo systemctl restart tiggyopenmesh-hub</pre></div>
 <section id="solar">
 <h2>24. Solar / Low-Power Repeater Mode</h2>
 
-<p>Remote repeater nodes on hilltops or rooftops often need to run indefinitely from a small solar panel and an 18650 battery. Solar mode dramatically reduces power consumption by putting the ESP32-S3 into <strong>light sleep</strong> between radio events, while keeping the radio in continuous RX so <strong>no packets are lost</strong>.</p>
+<p>Remote repeater nodes on hilltops or rooftops often need to run from a small solar panel and an 18650 battery. Solar mode is a <em>low-impact</em> power tweak: it switches the OLED off and slows heartbeats to 60&nbsp;seconds, while keeping the radio in continuous RX so <strong>no packets are lost</strong>. A deeper low-power implementation (radio duty-cycling / real light sleep) is planned but not yet in the firmware.</p>
 
 <div class="info-box orange">
   <p><strong>SX1262 only:</strong> Solar mode is available on <strong>Heltec V3</strong> and <strong>Heltec V4</strong> boards (ESP32-S3 + SX1262 radio). The LoRa32 (SX1276 / classic ESP32) does not support this mode.</p>
 </div>
 
-<h3>Power Budget</h3>
-<table>
-  <tr><th>Component</th><th>Normal Mode</th><th>Solar Mode</th></tr>
-  <tr><td>ESP32-S3 (CPU)</td><td>~80 mA (active)</td><td>~0.8 mA (light sleep, wakes on DIO1)</td></tr>
-  <tr><td>SX1262 (Radio)</td><td>~10 mA (continuous RX)</td><td>~10 mA (continuous RX &mdash; no data loss)</td></tr>
-  <tr><td>OLED Display</td><td>~15 mA</td><td>0 mA (powered off via Vext)</td></tr>
-  <tr><td>BLE</td><td>~15 mA</td><td>0 mA (deinitialised)</td></tr>
-  <tr><td><strong>Total average</strong></td><td><strong>~120 mA</strong></td><td><strong>~11 mA</strong></td></tr>
-</table>
-
-<p style="color:var(--dim); margin-top:8px;">
-  With a 3000 mAh 18650: <strong>~11 days</strong> on battery alone.<br>
-  With a 1W solar panel: <strong>indefinite operation</strong>.
-</p>
-
-<h3>How It Works</h3>
+<h3>What Solar Mode Does Today</h3>
 <ul style="color:var(--dim); padding-left:20px;">
-  <li><strong>OLED disabled</strong> &mdash; Vext is powered off, turning off the OLED display. Press the PRG button to temporarily show status for 10 seconds.</li>
-  <li><strong>BLE deinitialised</strong> &mdash; Bluetooth is fully shut down, saving ~15 mA and freeing ~60 KB RAM. The phone app cannot connect in solar mode.</li>
-  <li><strong>ESP32-S3 light sleep</strong> &mdash; between radio events, the CPU enters light sleep (~0.8 mA). All RAM is preserved and GPIO config stays active. The CPU wakes instantly on:</li>
-  <ul style="padding-left:20px;">
-    <li><strong>DIO1 interrupt</strong> (radio packet received)</li>
-    <li><strong>PRG button</strong> press (shows OLED status temporarily)</li>
-    <li><strong>60-second timer</strong> (for heartbeat transmission)</li>
-    <li><strong>Serial input</strong> (for SOLAR OFF command)</li>
-  </ul>
-  <li><strong>Radio stays in continuous RX</strong> &mdash; <strong>no packets are lost</strong>. The SX1262 fires DIO1 when a preamble is detected, instantly waking the CPU to process the packet.</li>
-  <li><strong>Reduced heartbeat</strong> &mdash; heartbeats are sent every 60 seconds (vs 30s in normal mode), with longer jitter, reducing TX duty cycle.</li>
+  <li><strong>OLED disabled</strong> &mdash; Vext is powered off (~15 mA saved). Press the PRG button to temporarily show status for 10 seconds.</li>
+  <li><strong>Reduced heartbeat</strong> &mdash; heartbeats move to a 60-second interval (vs 30s in normal mode), reducing TX duty cycle slightly.</li>
+  <li><strong>BLE stays active</strong> &mdash; the phone app continues to work. BLE is <em>not</em> deinitialised.</li>
+  <li><strong>Radio stays in continuous RX</strong> &mdash; no packets are lost.</li>
+  <li><strong>CPU does not enter light sleep</strong> &mdash; the loop uses a short <code>delay()</code> per iteration, so there is no DIO1 / timer / UART sleep-wakeup.</li>
 </ul>
+
+<div class="info-box orange">
+  <p><strong>Power saving is modest:</strong> current solar mode mainly just turns off the OLED. Expect roughly ~15 mA saved versus normal mode &mdash; not the order-of-magnitude reduction a true light-sleep implementation would give. A proper low-power solar mode (radio duty cycling / real light sleep with BLE off) is planned but not yet implemented.</p>
+</div>
 
 <h3>Activation</h3>
 
@@ -2878,15 +2861,11 @@ sudo systemctl restart tiggyopenmesh-hub</pre></div>
 <h4>Via BLE (Android App)</h4>
 <pre>
 <span class="comment"># Enable solar mode (SX1262 boards only)</span>
-<span class="keyword">POWER,SOLAR</span>     <span class="comment">→ OK,POWER,SOLAR (BLE then disconnects!)</span>
+<span class="keyword">POWER,SOLAR</span>     <span class="comment">→ OK,POWER,SOLAR (display off, BLE stays connected)</span>
 
 <span class="comment"># Disable solar mode</span>
 <span class="keyword">POWER,NORMAL</span>    <span class="comment">→ OK,POWER,NORMAL</span>
 </pre>
-
-<div class="info-box red">
-  <p><strong>BLE disabled in solar mode:</strong> Sending <code>POWER,SOLAR</code> via BLE immediately deinitialises Bluetooth after sending the response. The phone app disconnects. To exit solar mode, use <strong>serial</strong> (<code>SOLAR OFF</code>) or press the <strong>PRG button</strong>.</p>
-</div>
 
 <h4>Via Android App Settings Screen</h4>
 <p>The app's <strong>Settings</strong> tab shows a <strong>Power Mode</strong> card for SX1262-based repeater boards. It displays the current mode from the STATUS response and provides a toggle with a confirmation dialog.</p>
@@ -2897,9 +2876,9 @@ sudo systemctl restart tiggyopenmesh-hub</pre></div>
 <table>
   <tr><th>Feature</th><th>Behaviour</th></tr>
   <tr><td>OLED display</td><td>Off. Press the PRG button to show status for 10 seconds.</td></tr>
-  <tr><td>BLE (phone app)</td><td>Disabled &mdash; phone app cannot connect. Deinitialised to save ~15 mA.</td></tr>
+  <tr><td>BLE (phone app)</td><td>Stays active &mdash; phone app can connect and toggle power mode back to normal.</td></tr>
   <tr><td>LED</td><td>Single brief blink every heartbeat (60s) as sign-of-life.</td></tr>
-  <tr><td>Serial commands</td><td>All serial commands work. UART wakeup is enabled &mdash; sending any character wakes from light sleep.</td></tr>
+  <tr><td>Serial commands</td><td>All serial commands work normally.</td></tr>
   <tr><td>Mesh routing</td><td>Fully functional &mdash; packets are received, forwarded, and routed normally. <strong>No data loss.</strong></td></tr>
   <tr><td>Gateway mode</td><td>Still works if previously enabled &mdash; <code>PKT,</code> forwarding over serial continues.</td></tr>
   <tr><td>GPIO relays</td><td>Fully operational &mdash; CMD processing, timers, setpoints, and sensor polling all continue.</td></tr>
@@ -3446,12 +3425,12 @@ const int RELAY_PINS[]  = {2, 4, 5, 12, 13, 14};      <span class="comment">// D
     <td>Use an IO expansion board for more pins, or redeploy with a Heltec V3/V4 for more GPIO.</td></tr>
   <tr><td>T-Deck Plus</td><td>No free GPIO pins for sensors or relays. All pins used by display, keyboard, GPS, and radio.</td>
     <td>Use T-Deck as communicator only. Pair with a repeater node for sensor/relay control.</td></tr>
-  <tr><td>LoRa32 T3 (repeater)</td><td>ESP32 (not S3) has different light-sleep behaviour. Solar mode uses <code>esp_light_sleep_start()</code> which works on both, but power savings vary by chip.</td>
-    <td>For lowest-power solar deployments, prefer Heltec V3/V4/XIAO on ESP32-S3.</td></tr>
+  <tr><td>LoRa32 T3 (repeater)</td><td>SX1276 radio &mdash; solar mode is not supported on this board (guarded by <code>RADIO_SX1262</code>).</td>
+    <td>For solar deployments, use Heltec V3/V4 or XIAO ESP32-S3.</td></tr>
   <tr><td>Heltec V4</td><td><strong>GPIO 19/20 are USB D-/D+, GPIO 2/46/7 are GC1109 FEM.</strong> The V4 has no CP2102 &mdash; it uses ESP32-S3 native USB (HWCDC). Configuring any of these pins as sensor/relay pins will kill USB or disable the 28 dBm power amplifier.</td>
     <td>Default sensor pins are 33, 34, 15. Default relay pins are 3, 4, 5, 6. All forbidden pins are blocked in <code>isPinSafe()</code>. See <a href="#heltec-v4" style="color:var(--cyan);">Section 43</a> for full details.</td></tr>
   <tr><td>Heltec V4</td><td>USB serial (HWCDC) takes ~60 seconds to start outputting data after boot. The first minute of serial output may be lost.</td>
-    <td>Normal behaviour for ESP32-S3 native USB. The gateway GUI will receive data once the HWCDC connection establishes. Solar mode light sleep is disabled on V4 to keep USB alive.</td></tr>
+    <td>Normal behaviour for ESP32-S3 native USB. The gateway GUI will receive data once the HWCDC connection establishes.</td></tr>
 </table>
 
 <h3>Protocol Notes</h3>
@@ -4019,7 +3998,7 @@ Response: [{"mac": "dc:0d:30:23:38:1e", "lat": 52.7097, "lon": -0.8414, "accurac
 </ul>
 
 <h3>Solar Mode &amp; Power</h3>
-<p>In solar mode, BLE is fully disabled (GATT + scanning off, saves ~10mA). Tracker data is not collected. Use <code>CMD,SOLAR,OFF</code> via mesh or USB serial to re-enable for a poll session. Right-click node in GUI &rarr; Enable/Disable Solar Mode.</p>
+<p>In solar mode, the OLED display is turned off via Vext (~15mA saved). BLE and radio stay active; the phone app remains usable. Tracker beacon scanning is disabled while in solar mode. Use <code>POWER,NORMAL</code> via BLE, <code>SOLAR OFF</code> via USB serial, or <code>CMD,SOLAR,OFF</code> over the mesh to return to normal operation. Right-click node in GUI &rarr; Enable/Disable Solar Mode.</p>
 </section>
 
 <!-- ═══════════════ COMMAND REFERENCE ═══════════════ -->

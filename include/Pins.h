@@ -574,10 +574,12 @@
 // ─── IO Expansion Board UART2 Pins ──────────────────────────
 // Secondary ESP32 connected via UART2 for additional I/O.
 // Pins chosen to avoid conflict with LoRa, OLED, BLE, and sensor defaults.
+// V3/V4: GPIO 48/47 are free on both boards and don't clash with any
+// default relay/sensor pin (V3 relays include 2 and 3, V4 relays use 3).
 #ifndef IO_EXPAND_TX
   #if defined(BOARD_HELTEC_V3) || defined(BOARD_HELTEC_V4)
-    #define IO_EXPAND_TX  2
-    #define IO_EXPAND_RX  3
+    #define IO_EXPAND_TX  48
+    #define IO_EXPAND_RX  47
   #elif defined(BOARD_XIAO_S3)
     #define IO_EXPAND_TX  2
     #define IO_EXPAND_RX  4

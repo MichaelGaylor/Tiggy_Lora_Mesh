@@ -188,6 +188,15 @@ static float getPulseRate(uint8_t pin) {
 #define IO_EXPAND_MAX_PINS   16
 #define IO_EXPAND_VPIN_BASE  100
 int ioExpandRead(int vpin);  // forward declaration
+void ioExpandSetRelay(int pin, int val);  // forward declaration
+
+// IO expansion / virtual-pin helpers — forward decls needed here so early
+// callers (deadman, beacon, etc.) can use them. Definitions are near isPinSafe().
+bool isPinSafe(int pin);
+bool isVPin(int pin);
+bool isPinConfigurable(int pin);
+void setDigital(int pin, int val);
+void setupDigitalOutput(int pin);
 
 // ─── Sensor read helper ─────────────────────────────────
 // PULSE mode: returns rate × 100 (centipulses/sec) for integer precision.
@@ -381,7 +390,7 @@ void checkDeadmans() {
         RelayDeadman& dm = deadmans[i];
         if (!dm.active) continue;
         if (now - dm.lastRefresh > DEADMAN_TIMEOUT_MS) {
-            digitalWrite(dm.pin, dm.activeState ? LOW : HIGH);
+            setDigital(dm.pin, dm.activeState ? 0 : 1);
             dm.active = false;
             debugPrint("DEADMAN: pin " + String(dm.pin) + " reverted (no refresh)");
             bleSend("DEADMAN,REVERTED," + String(dm.pin));
@@ -544,7 +553,8 @@ void setupBLE();
 void setupRadio();
 void serialEnqueue(const String& line);
 void serialDrain();
-bool isPinSafe(int pin);
+// isPinSafe / isVPin / isPinConfigurable / setDigital / setupDigitalOutput
+// are forward-declared higher up (near the IO expansion constants).
 
 // ─── GPS function implementations ────────────────────────────
 void setupGPS() {
@@ -609,8 +619,8 @@ void executeBeaconAction(BeaconRule& r) {
             mesh.transmitPacket(dest, payload);
             debugPrint("BEACON: " + String(r.name) + " -> remote " + String(r.targetNode) + " pin " + String(r.relayPin) + "=" + String(r.relayState));
         } else {
-            // Local relay: direct GPIO
-            digitalWrite(r.relayPin, r.relayState ? HIGH : LOW);
+            // Local relay: direct GPIO (or expansion dispatch)
+            setDigital(r.relayPin, r.relayState ? 1 : 0);
             debugPrint("BEACON: " + String(r.name) + " -> pin " + String(r.relayPin) + "=" + String(r.relayState));
         }
         r.triggered = true;
@@ -690,7 +700,7 @@ void checkBeaconReverts() {
 
         // Tag gone for longer than revertMs → revert relay
         if (now - r.lastSeen > r.revertMs) {
-            digitalWrite(r.relayPin, r.relayState ? LOW : HIGH);  // Opposite state
+            setDigital(r.relayPin, r.relayState ? 0 : 1);  // Opposite state
             r.triggered = false;
             debugPrint("BEACON: " + String(r.name) + " -> REVERTED pin " + String(r.relayPin));
             notifyBeaconEvent("BEACON,REVERTED," + String(r.name), true);  // Edge: broadcast once
@@ -915,25 +925,12 @@ void startSolarMode() {
 #endif
     oledAvailable = false;
 
-    // BLE stays active — needed for app control and solar mode toggle
-    // Radio stays in continuous RX
+    // BLE and radio stay active. solarLightSleep() uses delay() only,
+    // so arming esp_sleep_enable_*_wakeup() here is unused AND hazardous:
+    // esp_sleep_enable_uart_wakeup installs a PM idle hook that null-derefs
+    // in esp_pm_impl_waiti when PM isn't configured, crashing the idle task.
 
-    // 2. Configure light sleep with DIO1 wakeup
-    //    Radio stays in continuous RX. DIO1 fires on packet → wakes CPU.
-    //    Between events, CPU draws ~2-3mA instead of ~80mA (higher than
-    //    full deep sleep because BLE is still active, but much less than normal).
-    gpio_wakeup_enable((gpio_num_t)RADIO_DIO1, GPIO_INTR_HIGH_LEVEL);
-#if defined(BOARD_BUTTON) && BOARD_BUTTON >= 0
-    gpio_wakeup_enable((gpio_num_t)BOARD_BUTTON, GPIO_INTR_LOW_LEVEL);
-#endif
-    esp_sleep_enable_gpio_wakeup();
-    // Wake on timer for heartbeats (60s)
-    esp_sleep_enable_timer_wakeup(HB_INTERVAL_SOLAR * 1000ULL);  // microseconds
-    // Wake on UART input so serial commands (SOLAR OFF) work during sleep
-    uart_set_wakeup_threshold(UART_NUM_0, 3);  // wake after 3 edges on RX
-    esp_sleep_enable_uart_wakeup(UART_NUM_0);
-
-    debugPrint("SOLAR: OLED off, BLE active, light sleep armed");
+    debugPrint("SOLAR: OLED off, BLE active");
     debugPrint("SOLAR: Toggle off via app, PRG button, or SOLAR OFF via serial");
     Serial.flush();
 }
@@ -948,10 +945,6 @@ void solarLightSleep() {
 void stopSolarMode() {
     solarMode = false;
     debugPrint("SOLAR: Restoring normal operation");
-
-    // Disable light sleep wakeup sources
-    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_GPIO);
-    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
 
     // Re-enable OLED
 #ifdef VEXT_CTRL
@@ -1057,16 +1050,51 @@ bool isPinSafe(int pin) {
     return true;
 }
 
+// True for virtual pins that route to the IO expansion board over UART.
+// Range is [IO_EXPAND_VPIN_BASE, IO_EXPAND_VPIN_BASE + IO_EXPAND_MAX_PINS).
+bool isVPin(int pin) {
+    return pin >= IO_EXPAND_VPIN_BASE
+        && pin <  IO_EXPAND_VPIN_BASE + IO_EXPAND_MAX_PINS;
+}
+
+// True for any pin the user may configure as a relay or sensor.
+// Accepts local physical pins (isPinSafe) AND virtual expansion pins.
+// Execution guards that need a raw hardware pin (e.g. GPS config) keep
+// calling isPinSafe() directly.
+bool isPinConfigurable(int pin) {
+    return isPinSafe(pin) || isVPin(pin);
+}
+
+// Drive an output — local GPIO via digitalWrite, or expansion pin via
+// UART !R command. Safe to call for any pin that passed isPinConfigurable.
+// On boards without an expansion wired (IO_EXPAND_TX < 0), the vpin branch
+// calls ioExpandSetRelay which is a no-op — no hardware effect, no crash.
+void setDigital(int pin, int val) {
+    if (isVPin(pin)) {
+        ioExpandSetRelay(pin - IO_EXPAND_VPIN_BASE, val);
+    } else {
+        digitalWrite(pin, val ? HIGH : LOW);
+    }
+}
+
+// Configure an output. Vpins skip pinMode — the expansion ESP32 already
+// runs pinMode(…, OUTPUT) in its own setup(). Calling pinMode with a
+// non-existent pin on the main MCU is undefined; this guard avoids it.
+void setupDigitalOutput(int pin) {
+    if (!isVPin(pin)) pinMode(pin, OUTPUT);
+}
+
 void setupGPIO() {
     for (int i = 0; i < relayCount; i++) {
-        if (isPinSafe(relayPins[i])) {
-            pinMode(relayPins[i], OUTPUT);
-            digitalWrite(relayPins[i], LOW);
+        if (isPinConfigurable(relayPins[i])) {
+            setupDigitalOutput(relayPins[i]);
+            setDigital(relayPins[i], 0);
         }
     }
     for (int i = 0; i < sensorCount; i++) {
-        if (isPinSafe(sensorPins[i])) {
-            pinMode(sensorPins[i], INPUT);
+        if (isPinConfigurable(sensorPins[i])) {
+            if (!isVPin(sensorPins[i])) pinMode(sensorPins[i], INPUT);
+            // vpins skip pinMode — expansion firmware handles its own sensor pins
         }
     }
 }
@@ -1105,7 +1133,7 @@ String processTimerCommand(const String& args) {
     int c1 = args.indexOf(',');
     if (c1 < 0) return "ERR,TIMER,FORMAT";
     int pin = args.substring(0, c1).toInt();
-    if (!isPinSafe(pin)) return "ERR,TIMER,BADPIN";
+    if (!isPinConfigurable(pin)) return "ERR,TIMER,BADPIN";
 
     String rest = args.substring(c1 + 1);
     int c2 = rest.indexOf(',');
@@ -1128,7 +1156,7 @@ String processTimerCommand(const String& args) {
         if (c2 < 0) return "ERR,TIMER,FORMAT";
         int seconds = rest.substring(c2 + 1).toInt();
         if (seconds < 1 || seconds > 86400) return "ERR,TIMER,RANGE";
-        pinMode(pin, OUTPUT);
+        setupDigitalOutput(pin);
         timers[slot].active = true;
         timers[slot].pin = pin;
         timers[slot].isPulse = false;
@@ -1148,8 +1176,8 @@ String processTimerCommand(const String& args) {
         int offSec = pulseArgs.substring(p1 + 1, p2).toInt();
         int repeats = pulseArgs.substring(p2 + 1).toInt();
         if (onSec < 1 || offSec < 1 || onSec > 3600 || offSec > 3600) return "ERR,TIMER,RANGE";
-        pinMode(pin, OUTPUT);
-        digitalWrite(pin, HIGH);  // Start ON immediately
+        setupDigitalOutput(pin);
+        setDigital(pin, 1);  // Start ON immediately
         timers[slot].active = true;
         timers[slot].pin = pin;
         timers[slot].isPulse = true;
@@ -1231,7 +1259,7 @@ String processSetpointCommand(const String& args) {
     float threshold = args.substring(c[1] + 1, c[2]).toFloat();
     String rest = args.substring(c[2] + 1);
 
-    if (!isPinSafe(sensorPin)) return "ERR,SETPOINT,BADSENSOR";
+    if (!isPinConfigurable(sensorPin)) return "ERR,SETPOINT,BADSENSOR";
 
     uint8_t op = 255;
     if (opStr == "GT") op = 0;
@@ -1357,7 +1385,7 @@ void processTimers() {
 
         if (!timers[i].isPulse) {
             // Simple delay timer — fire once and deactivate
-            digitalWrite(timers[i].pin, timers[i].onAction ? HIGH : LOW);
+            setDigital(timers[i].pin, timers[i].onAction ? 1 : 0);
             debugPrint("TIMER: pin " + String(timers[i].pin) + " -> " + String(timers[i].onAction ? "ON" : "OFF"));
             bleSend("TIMER,FIRED," + String(timers[i].pin) + "," + String(timers[i].onAction ? "ON" : "OFF"));
             timers[i].active = false;
@@ -1365,7 +1393,7 @@ void processTimers() {
             // Pulse timer — alternate ON/OFF phases
             if (timers[i].phase == 1) {
                 // Was ON, switch to OFF
-                digitalWrite(timers[i].pin, LOW);
+                setDigital(timers[i].pin, 0);
                 timers[i].phase = 2;
                 timers[i].nextAt = now + (unsigned long)timers[i].offSec * 1000UL;
             } else {
@@ -1373,14 +1401,14 @@ void processTimers() {
                 if (timers[i].repeats > 0) {
                     timers[i].remaining--;
                     if (timers[i].remaining == 0) {
-                        digitalWrite(timers[i].pin, LOW);
+                        setDigital(timers[i].pin, 0);
                         debugPrint("TIMER: pin " + String(timers[i].pin) + " pulse DONE");
                         bleSend("TIMER,DONE," + String(timers[i].pin));
                         timers[i].active = false;
                         continue;
                     }
                 }
-                digitalWrite(timers[i].pin, HIGH);
+                setDigital(timers[i].pin, 1);
                 timers[i].phase = 1;
                 timers[i].nextAt = now + (unsigned long)timers[i].onSec * 1000UL;
             }
@@ -1400,7 +1428,8 @@ bool fireSetpointAction(SetpointRule& sp, int value, bool triggered) {
 
         if (isLocal) {
             // Local relay — no radio needed, just set the pin directly
-            digitalWrite(sp.relayPin, sp.action ? HIGH : LOW);
+            // (setDigital also dispatches to expansion board for vpin 100-115)
+            setDigital(sp.relayPin, sp.action ? 1 : 0);
             debugPrint("SETPOINT LOCAL: pin " + String(sp.sensorPin) + "=" + String(value) +
                        " -> pin " + String(sp.relayPin) + "=" + String(sp.action));
             bleSend("SETPOINT,FIRED," + String(sp.sensorPin) + "," + String(value) + ",LOCAL");
@@ -1549,9 +1578,9 @@ void handleCmd(const String& from, const String& cmdBody) {
         if (c2 < 0) return;
         int pin = rest.substring(0, c2).toInt();
         int val = rest.substring(c2 + 1).toInt();
-        if (!isPinSafe(pin)) return;
-        pinMode(pin, OUTPUT);
-        digitalWrite(pin, val ? HIGH : LOW);
+        if (!isPinConfigurable(pin)) return;
+        setupDigitalOutput(pin);
+        setDigital(pin, val);
         refreshDeadman(pin, val);  // Start/refresh dead-man's switch
         mesh.cmdsExecuted++;
         // Send response back over mesh
@@ -1565,7 +1594,7 @@ void handleCmd(const String& from, const String& cmdBody) {
     }
     else if (action == "GET") {
         int pin = rest.toInt();
-        if (!isPinSafe(pin)) return;
+        if (!isPinConfigurable(pin)) return;
         int value = readSensorPin(pin);
         mesh.cmdsExecuted++;
         String mid = mesh.generateMsgID();
@@ -1581,9 +1610,9 @@ void handleCmd(const String& from, const String& cmdBody) {
         if (c2 < 0) return;
         int pin = rest.substring(0, c2).toInt();
         int ms  = rest.substring(c2 + 1).toInt();
-        if (!isPinSafe(pin) || ms > 30000) return;
-        pinMode(pin, OUTPUT);
-        digitalWrite(pin, HIGH); delay(ms); digitalWrite(pin, LOW);
+        if (!isPinConfigurable(pin) || ms > 30000) return;
+        setupDigitalOutput(pin);
+        setDigital(pin, 1); delay(ms); setDigital(pin, 0);
         mesh.cmdsExecuted++;
         String mid = mesh.generateMsgID();
         String rsp = "CMD,RSP," + String(pin) + ",0";
@@ -1705,12 +1734,12 @@ void handleCmd(const String& from, const String& cmdBody) {
             int start = 0, end;
             while ((end = cfgArgs.indexOf(',', start)) != -1 && sensorCount < MAX_SENSOR_PINS_CFG) {
                 int p = cfgArgs.substring(start, end).toInt();
-                if (isPinSafe(p)) sensorPins[sensorCount++] = p;
+                if (isPinConfigurable(p)) sensorPins[sensorCount++] = p;
                 start = end + 1;
             }
             if (sensorCount < MAX_SENSOR_PINS_CFG) {
                 int p = cfgArgs.substring(start).toInt();
-                if (isPinSafe(p)) sensorPins[sensorCount++] = p;
+                if (isPinConfigurable(p)) sensorPins[sensorCount++] = p;
             }
             setupGPIO(); saveConfig();
             bleSend("OK,CONFIG,SENSOR," + String(sensorCount));
@@ -1720,12 +1749,12 @@ void handleCmd(const String& from, const String& cmdBody) {
             int start = 0, end;
             while ((end = cfgArgs.indexOf(',', start)) != -1 && relayCount < MAX_RELAY_PINS_CFG) {
                 int p = cfgArgs.substring(start, end).toInt();
-                if (isPinSafe(p)) relayPins[relayCount++] = p;
+                if (isPinConfigurable(p)) relayPins[relayCount++] = p;
                 start = end + 1;
             }
             if (relayCount < MAX_RELAY_PINS_CFG) {
                 int p = cfgArgs.substring(start).toInt();
-                if (isPinSafe(p)) relayPins[relayCount++] = p;
+                if (isPinConfigurable(p)) relayPins[relayCount++] = p;
             }
             setupGPIO(); saveConfig();
             bleSend("OK,CONFIG,RELAY," + String(relayCount));
@@ -1776,6 +1805,9 @@ void handleCmd(const String& from, const String& cmdBody) {
                     if (sensorPins[i] == pin) { pinIdx = i; break; }
                 }
                 if (pinIdx < 0) { bleSend("ERR,CONFIG,PINMODE,NOT_SENSOR"); }
+                else if (isVPin(pin)) {
+                    bleSend("ERR,CONFIG,PINMODE,VPIN_NOT_SUPPORTED");
+                }
                 else if (mode == "PULSE") {
                     if (enablePulseCounter(pin)) {
                         sensorMode[pinIdx] = SENSOR_MODE_PULSE;
@@ -2081,7 +2113,7 @@ void processBleCommand(const String& line, bool fromSerial) {
         }
     }
     else if (line == "STATUS") {
-        bleSend("STATUS,ID:" + String(mesh.localID) + ",BOARD:" + String(BOARD_NAME) +
+        String statusLine = "STATUS,ID:" + String(mesh.localID) + ",BOARD:" + String(BOARD_NAME) +
                 ",FREQ:" + String(LORA_FREQ, 1) + ",NODES:" + String(mesh.knownCount) +
                 ",RX:" + String(mesh.packetsReceived) + ",FWD:" + String(mesh.packetsForwarded) +
                 ",GW:" + String(gatewayMode ? "ON" : "OFF") +
@@ -2090,7 +2122,11 @@ void processBleCommand(const String& line, bool fromSerial) {
                 ",AUTOPOLL:" + String(autoPollEnabled ? (String(autoPollTarget) + "/" + String(autoPollInterval) + "s").c_str() : "OFF") +
                 ",GPS:" + String(gpsEnabled ? (gps.location.isValid() ? "FIX" : "NOFIX") : "OFF") +
                 ",SETUP:" + String(blePinIsDefault ? "1" : "0") +
-                ",HEAP:" + String(ESP.getFreeHeap()));
+                ",HEAP:" + String(ESP.getFreeHeap());
+#if IO_EXPAND_TX >= 0
+        statusLine += ",EXPAND:" + String(ioExpandEnabled ? "ON" : "OFF");
+#endif
+        bleSend(statusLine);
     }
     else if (line == "SAVE") { saveConfig(); bleSend("OK,SAVED"); }
     else if (line == "PINMAP") {
@@ -2337,6 +2373,13 @@ void processBleCommand(const String& line, bool fromSerial) {
             if (sensorPins[i] == pin) { pinIdx = i; break; }
         }
         if (pinIdx < 0) { bleSend("ERR,PINMODE,NOT_SENSOR"); return; }
+        if (isVPin(pin)) {
+            // Virtual expansion pins: pulse counting and pinMode(INPUT) are
+            // meaningless on the main MCU. The expansion firmware handles its
+            // own sensor pin modes internally.
+            bleSend("ERR,PINMODE,VPIN_NOT_SUPPORTED");
+            return;
+        }
         if (mode == "PULSE") {
             if (!enablePulseCounter(pin)) { bleSend("ERR,PINMODE,MAX4"); return; }
             sensorMode[pinIdx] = SENSOR_MODE_PULSE;
@@ -2413,6 +2456,9 @@ void handleSerialConfig() {
         Serial.println("Heap:     " + String(ESP.getFreeHeap()));
         Serial.println("Gateway:  " + String(gatewayMode ? "ON" : "OFF"));
         Serial.println("Solar:    " + String(solarMode ? "ON" : "OFF"));
+#if IO_EXPAND_TX >= 0
+        Serial.println("Expand:   " + String(ioExpandEnabled ? "ON" : "OFF"));
+#endif
         if (autoPollEnabled) {
             Serial.println("AutoPoll: " + String(autoPollTarget) + " every " + String(autoPollInterval) + "s");
         } else {
@@ -2537,6 +2583,10 @@ void handleSerialConfig() {
             if (sensorPins[i] == pin) { pinIdx = i; break; }
         }
         if (pinIdx < 0) { Serial.println("ERROR: Pin " + String(pin) + " is not a configured sensor pin"); return; }
+        if (isVPin(pin)) {
+            Serial.println("ERROR: PINMODE not supported on virtual expansion pins");
+            return;
+        }
         if (mode.startsWith("PULSE")) {
             if (!enablePulseCounter(pin)) { Serial.println("ERROR: Max 4 pulse counters"); return; }
             sensorMode[pinIdx] = SENSOR_MODE_PULSE;
@@ -2592,6 +2642,17 @@ void handleSerialConfig() {
         ioExpandRxBuf = "";
         Serial.println("OK: IO expansion enabled on UART2 (TX=" + String(IO_EXPAND_TX) + " RX=" + String(IO_EXPAND_RX) + ")");
         Serial.println("Virtual pins " + String(IO_EXPAND_VPIN_BASE) + "-" + String(IO_EXPAND_VPIN_BASE + IO_EXPAND_MAX_PINS - 1));
+        // Boot hygiene: drive any configured vpin relays LOW so the expansion
+        // board starts in a known state (matches setupGPIO() behaviour for
+        // local pins). Small inter-write delay gives the expansion UART time
+        // to process each line.
+        delay(50);
+        for (int i = 0; i < relayCount; i++) {
+            if (isVPin(relayPins[i])) {
+                setDigital(relayPins[i], 0);
+                delay(5);
+            }
+        }
 #else
         Serial.println("ERROR: IO expansion not supported on this board");
 #endif
@@ -2611,7 +2672,7 @@ void handleSerialConfig() {
              line.startsWith("BEACON,") || line.startsWith("BLEPIN,")) {
         processBleCommand(line, true);  // fromSerial=true: skip BLE PIN check
     }
-    else Serial.println("Commands: ID xxxx | KEY xxx... | RELAY 2,4,12 | SENSOR 34,36 | GPS <tx>,<rx> | GPS OFF | STATUS | SAVE | RESET | GATEWAY ON/OFF | AUTOPOLL <id> <sec> | PINMODE <pin> PULSE|AUTO"
+    else Serial.println("Commands: ID xxxx | KEY xxx... | Example RELAY 2,4,12 | SENSOR 34,36 | GPS <tx>,<rx> | GPS OFF | STATUS | SAVE | RESET | GATEWAY ON/OFF | AUTOPOLL <id> <sec> | PINMODE <pin> PULSE|AUTO"
 #if defined(RADIO_SX1262)
         " | SOLAR ON/OFF"
 #endif
@@ -3219,7 +3280,7 @@ void setup() {
     }
 
     Serial.println("Ready. Type STATUS for info.");
-    Serial.println("Commands: ID xxxx | KEY xxx... | RELAY 2,4,12 | SENSOR 34,36 | GPS <tx>,<rx> | GPS OFF");
+    Serial.println("Commands: ID xxxx | KEY xxx... | Example : RELAY 2,4,12 | SENSOR 34,36 | GPS <tx>,<rx> | GPS OFF");
     Serial.println("          STATUS | SAVE | RESET | GATEWAY ON/OFF | AUTOPOLL <id> <sec>");
     Serial.println("          PINMODE <pin> PULSE|AUTO | BLEPIN,<6digits> | EEPROM,RESET | REBOOT");
     debugPrint("Free heap: " + String(ESP.getFreeHeap()));
