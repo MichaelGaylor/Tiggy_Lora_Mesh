@@ -2350,10 +2350,25 @@ gateway/
     <td>None &mdash; automatic.</td>
     <td><code>output = (current &minus; previous) / elapsed_seconds</code></td>
   </tr>
+  <tr>
+    <td style="color:var(--green);">Value Map</td>
+    <td>Classifies a numeric input into a named string category (e.g., ADC counts &rarr; wind direction labels, temperature ranges &rarr; &ldquo;COLD/MILD/HOT&rdquo;). Built-in hysteresis keeps the category stable across noisy boundaries. Output is a <strong>string</strong> &mdash; feed it to an <em>Equals (text)</em> block to drive relays, or straight into Telegram/Broadcast messages.</td>
+    <td>
+      <strong>Mode:</strong> <code>Center &plusmn; Tol</code> (each row has a centre value and tolerance) <em>or</em> <code>Range</code> (each row has low/high bounds).<br>
+      <strong>Rows:</strong> add as many as needed. Each row maps a band of numeric values to a <strong>Label</strong> string.<br>
+      <strong>Default label:</strong> used when no row matches (default <code>UNKNOWN</code>).<br>
+      <strong>Release multiplier:</strong> hysteresis. Once a row matches, the input must leave <em>this multiple</em> of the match tolerance before a different row can win. Default <code>2.0</code> &mdash; i.e. a row matching at 855 &plusmn;30 only releases when the value goes outside 855 &plusmn;60.
+    </td>
+    <td><code>label</code> (string) &mdash; the matched row&rsquo;s label, or the default.</td>
+  </tr>
 </table>
 
 <div class="info-box green">
   <p><strong>Example &mdash; Wind speed from pulse counter:</strong> A Sensor Read block reads a pulse-counter pin. The Delta Rate block converts the growing count into pulses-per-second. A Scale block then multiplies by the anemometer's calibration factor (e.g., &times;0.0278) to get metres per second. The canvas shows live values on each wire so you can verify the maths.</p>
+</div>
+
+<div class="info-box green">
+  <p><strong>Example &mdash; Wind direction from 16-position reed-switch vane:</strong> Traditional 16-direction vanes (Davis, Sparkfun) produce a distinct ADC count for each compass point via a resistor network. A Sensor Read block grabs the ADC value, a Value Map block with 16 rows (one per direction, e.g. <code>855 &plusmn;30 &rarr; &ldquo;N&rdquo;</code>, <code>1762 &plusmn;30 &rarr; &ldquo;SE&rdquo;</code>) converts it to a compass label, and the built-in 2&times; hysteresis stops the label flickering between adjacent points when the wind is right on a boundary. The string output feeds Telegram (&ldquo;Wind: {value}&rdquo;) or Equals (text) &rarr; Set Relay for direction-triggered actions.</p>
 </div>
 
 <h4>Condition Blocks (yellow border)</h4>
@@ -2410,6 +2425,11 @@ gateway/
     <td>GPS boundary detection. Checks if a node&rsquo;s GPS position is inside or outside a circle you define. Outputs distance in metres.</td>
     <td><strong>Node ID:</strong> which GPS node to track. <strong>Centre Lat/Lon:</strong> fence centre coordinates. <strong>Radius:</strong> metres (default 500).</td>
     <td><code>inside</code> (bool) &mdash; true if node is within the radius. <code>distance</code> (number) &mdash; metres from centre.</td>
+  </tr>
+  <tr>
+    <td style="color:var(--yellow);">Equals (text)</td>
+    <td>Compares a <strong>string</strong> input to a configured target value and outputs true / false. Pairs with the <em>Value Map</em> transform block so a classified label (&ldquo;N&rdquo;, &ldquo;COLD&rdquo;, &ldquo;FULL&rdquo;) can drive relays, pulse outputs, broadcasts, or Telegram alerts.</td>
+    <td><strong>Compare to:</strong> the target string. <strong>Case sensitive:</strong> checkbox &mdash; if off, &ldquo;N&rdquo; and &ldquo;n&rdquo; both match.</td>
   </tr>
 </table>
 
