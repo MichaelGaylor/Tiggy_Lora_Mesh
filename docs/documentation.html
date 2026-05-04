@@ -751,30 +751,33 @@
     <h4 style="color:var(--cyan);">Seeed XIAO ESP32S3 + Wio-SX1262</h4>
     <p><strong>MCU:</strong> ESP32-S3 &bull; <strong>Radio:</strong> SX1262 &bull; <strong>Display:</strong> None (optional I2C SSD1306)</p>
     <p><strong>Cheapest repeater.</strong> Plug-together kit, no soldering. Tiny 10&times;21mm. Available from The Pi Hut UK.</p>
-    <p style="font-size:0.85em; color:var(--comment);">Pins verified from Seeed schematic: <em>Wio-SX1262 for XIAO V1.0.kicad_sch</em></p>
+    <p style="font-size:0.85em; color:var(--comment);">Pin map: Wio-SX1262 baseboard connects via the underside <strong>B2B connector</strong>, not the through-hole header. Verified against Seeed wiki and <a href="https://github.com/jgromes/RadioLib/discussions/1361">RadioLib discussion #1361</a>.</p>
     <table style="font-size:0.8em;">
-      <tr><th>Function</th><th>GPIO</th><th>Header Pin</th></tr>
-      <tr><td>SPI SCK</td><td>8</td><td>D8</td></tr>
-      <tr><td>SPI MISO</td><td>9</td><td>D9</td></tr>
-      <tr><td>SPI MOSI</td><td>10</td><td>D10</td></tr>
-      <tr><td>Radio CS (NSS)</td><td>44</td><td>D7</td></tr>
-      <tr><td>Radio RST</td><td>3</td><td>D2</td></tr>
-      <tr><td>Radio DIO1</td><td>33</td><td>internal</td></tr>
-      <tr><td>Radio BUSY</td><td>34</td><td>internal</td></tr>
-      <tr><td>RF Switch (TX/RX)</td><td>1</td><td>D0 — HIGH=RX, LOW=TX</td></tr>
-      <tr><td>Optional OLED SDA / SCL</td><td>5 / 6</td><td>D4 / D5</td></tr>
-      <tr><td>Default Relay Pins</td><td style="color:var(--orange);">2, 4</td><td>D1, D3</td></tr>
-      <tr><td>Default Sensor Pins</td><td style="color:var(--yellow);">5, 6</td><td>D4, D5</td></tr>
+      <tr><th>Function</th><th>GPIO</th><th>Connection</th></tr>
+      <tr><td>SPI SCK</td><td>7</td><td>B2B underside</td></tr>
+      <tr><td>SPI MISO</td><td>8</td><td>B2B underside</td></tr>
+      <tr><td>SPI MOSI</td><td>9</td><td>B2B underside</td></tr>
+      <tr><td>Radio CS (NSS)</td><td>41</td><td>B2B underside</td></tr>
+      <tr><td>Radio RST</td><td>42</td><td>B2B underside</td></tr>
+      <tr><td>Radio DIO1</td><td>39</td><td>B2B underside</td></tr>
+      <tr><td>Radio BUSY</td><td>40</td><td>B2B underside</td></tr>
+      <tr><td>RF Switch (ANT_SW)</td><td>38</td><td>B2B — HIGH=RX, LOW=TX</td></tr>
+      <tr><td>TCXO Voltage</td><td colspan="2">1.8 V (on DIO3, internal to module)</td></tr>
+      <tr><td>Optional OLED SDA / SCL</td><td>5 / 6</td><td>D4 / D5 (header)</td></tr>
+      <tr><td>Default Relay Pins</td><td style="color:var(--orange);">2, 4</td><td>D1, D3 (header)</td></tr>
+      <tr><td>Default Sensor Pins</td><td style="color:var(--yellow);">5, 6</td><td>D4, D5 (header)</td></tr>
+      <tr><td>IO Expansion UART TX / RX</td><td>43 / 44</td><td>D6, D7 (header silkscreen TX/RX)</td></tr>
     </table>
     <pre style="font-size:0.75em; margin-top:10px; background:#0a1628; padding:10px; border-radius:6px; color:var(--cyan); overflow-x:auto;">
+Through-hole header (radio is wired underneath, not here):
         [USB-C]
-D0/GPIO1  ●  ● 5V      RF_SW1 (TX/RX control)
-D1/GPIO2  ●  ● GND     Free relay/GPIO
-D2/GPIO3  ●  ● 3V3     RST
-D3/GPIO4  ●  ● D10/GPIO10  MOSI
-D4/GPIO5  ●  ● D9 /GPIO9   MISO  (optional OLED SDA)
-D5/GPIO6  ●  ● D8 /GPIO8   SCK   (optional OLED SCL)
-D6/GPIO43 ●  ● D7 /GPIO44  CS/NSS</pre>
+D0/GPIO1   ●  ● 5V
+D1/GPIO2   ●  ● GND     <span style="color:var(--orange);">Relay default (D1)</span>
+D2/GPIO3   ●  ● 3V3
+D3/GPIO4   ●  ● D10/GPIO9   <span style="color:var(--orange);">Relay default (D3)</span>
+D4/GPIO5   ●  ● D9 /GPIO8   <span style="color:var(--yellow);">Sensor / OLED SDA</span>
+D5/GPIO6   ●  ● D8 /GPIO7   <span style="color:var(--yellow);">Sensor / OLED SCL</span>
+D6/GPIO43  ●  ● D7 /GPIO44  <span style="color:var(--cyan);">UART TX / RX (IO expand)</span></pre>
   </div>
 
   <!-- Heltec V4 -->
@@ -2350,10 +2353,25 @@ gateway/
     <td>None &mdash; automatic.</td>
     <td><code>output = (current &minus; previous) / elapsed_seconds</code></td>
   </tr>
+  <tr>
+    <td style="color:var(--green);">Value Map</td>
+    <td>Classifies a numeric input into a named string category (e.g., ADC counts &rarr; wind direction labels, temperature ranges &rarr; &ldquo;COLD/MILD/HOT&rdquo;). Built-in hysteresis keeps the category stable across noisy boundaries. Output is a <strong>string</strong> &mdash; feed it to an <em>Equals (text)</em> block to drive relays, or straight into Telegram/Broadcast messages.</td>
+    <td>
+      <strong>Mode:</strong> <code>Center &plusmn; Tol</code> (each row has a centre value and tolerance) <em>or</em> <code>Range</code> (each row has low/high bounds).<br>
+      <strong>Rows:</strong> add as many as needed. Each row maps a band of numeric values to a <strong>Label</strong> string.<br>
+      <strong>Default label:</strong> used when no row matches (default <code>UNKNOWN</code>).<br>
+      <strong>Release multiplier:</strong> hysteresis. Once a row matches, the input must leave <em>this multiple</em> of the match tolerance before a different row can win. Default <code>2.0</code> &mdash; i.e. a row matching at 855 &plusmn;30 only releases when the value goes outside 855 &plusmn;60.
+    </td>
+    <td><code>label</code> (string) &mdash; the matched row&rsquo;s label, or the default.</td>
+  </tr>
 </table>
 
 <div class="info-box green">
   <p><strong>Example &mdash; Wind speed from pulse counter:</strong> A Sensor Read block reads a pulse-counter pin. The Delta Rate block converts the growing count into pulses-per-second. A Scale block then multiplies by the anemometer's calibration factor (e.g., &times;0.0278) to get metres per second. The canvas shows live values on each wire so you can verify the maths.</p>
+</div>
+
+<div class="info-box green">
+  <p><strong>Example &mdash; Wind direction from 16-position reed-switch vane:</strong> Traditional 16-direction vanes (Davis, Sparkfun) produce a distinct ADC count for each compass point via a resistor network. A Sensor Read block grabs the ADC value, a Value Map block with 16 rows (one per direction, e.g. <code>855 &plusmn;30 &rarr; &ldquo;N&rdquo;</code>, <code>1762 &plusmn;30 &rarr; &ldquo;SE&rdquo;</code>) converts it to a compass label, and the built-in 2&times; hysteresis stops the label flickering between adjacent points when the wind is right on a boundary. The string output feeds Telegram (&ldquo;Wind: {value}&rdquo;) or Equals (text) &rarr; Set Relay for direction-triggered actions.</p>
 </div>
 
 <h4>Condition Blocks (yellow border)</h4>
@@ -2410,6 +2428,11 @@ gateway/
     <td>GPS boundary detection. Checks if a node&rsquo;s GPS position is inside or outside a circle you define. Outputs distance in metres.</td>
     <td><strong>Node ID:</strong> which GPS node to track. <strong>Centre Lat/Lon:</strong> fence centre coordinates. <strong>Radius:</strong> metres (default 500).</td>
     <td><code>inside</code> (bool) &mdash; true if node is within the radius. <code>distance</code> (number) &mdash; metres from centre.</td>
+  </tr>
+  <tr>
+    <td style="color:var(--yellow);">Equals (text)</td>
+    <td>Compares a <strong>string</strong> input to a configured target value and outputs true / false. Pairs with the <em>Value Map</em> transform block so a classified label (&ldquo;N&rdquo;, &ldquo;COLD&rdquo;, &ldquo;FULL&rdquo;) can drive relays, pulse outputs, broadcasts, or Telegram alerts.</td>
+    <td><strong>Compare to:</strong> the target string. <strong>Case sensitive:</strong> checkbox &mdash; if off, &ldquo;N&rdquo; and &ldquo;n&rdquo; both match.</td>
   </tr>
 </table>
 
