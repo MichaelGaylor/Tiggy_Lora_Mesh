@@ -102,27 +102,28 @@ build.bat
 
 ### XIAO ESP32S3 + Wio-SX1262 — cheapest option
 ```
-XIAO ESP32S3 pinout:
-┌─────────────────────┐
-│      [USB-C]        │
-│ D0/GPIO1  ●   ● 5V  │
-│ D1/GPIO2  ●   ● GND │
-│ D2/GPIO3  ●   ● 3V3 │
-│ D3/GPIO4  ●   ● D10/GPIO9  ← MOSI │
-│ D4/GPIO5  ●   ● D9/GPIO8   ← MISO │
-│ D5/GPIO6  ●   ● D8/GPIO7   ← SCK  │
-│ D6/GPIO43 ●   ● D7/GPIO44        │
-└─────────────────────┘
+XIAO ESP32S3 through-hole header (top view, USB-C at top):
+┌────────────────────────┐
+│       [USB-C]          │
+│ D0/GPIO1   ●   ● 5V    │
+│ D1/GPIO2   ●   ● GND   │
+│ D2/GPIO3   ●   ● 3V3   │
+│ D3/GPIO4   ●   ● D10/GPIO9  │
+│ D4/GPIO5   ●   ● D9 /GPIO8  │
+│ D5/GPIO6   ●   ● D8 /GPIO7  │
+│ D6/GPIO43  ●   ● D7 /GPIO44 │
+└────────────────────────┘
 
-Wio-SX1262 internal connections (routed on expansion PCB):
-  SCK=GPIO8   MISO=GPIO9   MOSI=GPIO10
-  CS=GPIO44   RST=GPIO3   DIO1=GPIO33  BUSY=GPIO34
-  RF_SW1=GPIO1 (HIGH=RX enable, LOW=TX/idle)
+Wio-SX1262 connections (B2B underside connector — NOT exposed on header):
+  SCK=GPIO7    MISO=GPIO8   MOSI=GPIO9
+  CS=GPIO41    RST=GPIO42   DIO1=GPIO39   BUSY=GPIO40
+  ANT_SW=GPIO38 (HIGH=RX enable, LOW=TX/idle)
+  TCXO=1.8V on DIO3 (internal to module)
 ```
 
-Pins verified from official Seeed schematic (Wio-SX1262 for XIAO V1.0.kicad_sch).
-
-The XIAO + Wio-SX1262 is a plug-together kit — no soldering required for the LoRa part.
+Pin map verified against the Seeed wiki and RadioLib discussion #1361
+(B2B connector pinout). The XIAO + Wio-SX1262 is a plug-together kit —
+no soldering required for the LoRa part.
 
 ---
 

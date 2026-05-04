@@ -751,30 +751,33 @@
     <h4 style="color:var(--cyan);">Seeed XIAO ESP32S3 + Wio-SX1262</h4>
     <p><strong>MCU:</strong> ESP32-S3 &bull; <strong>Radio:</strong> SX1262 &bull; <strong>Display:</strong> None (optional I2C SSD1306)</p>
     <p><strong>Cheapest repeater.</strong> Plug-together kit, no soldering. Tiny 10&times;21mm. Available from The Pi Hut UK.</p>
-    <p style="font-size:0.85em; color:var(--comment);">Pins verified from Seeed schematic: <em>Wio-SX1262 for XIAO V1.0.kicad_sch</em></p>
+    <p style="font-size:0.85em; color:var(--comment);">Pin map: Wio-SX1262 baseboard connects via the underside <strong>B2B connector</strong>, not the through-hole header. Verified against Seeed wiki and <a href="https://github.com/jgromes/RadioLib/discussions/1361">RadioLib discussion #1361</a>.</p>
     <table style="font-size:0.8em;">
-      <tr><th>Function</th><th>GPIO</th><th>Header Pin</th></tr>
-      <tr><td>SPI SCK</td><td>8</td><td>D8</td></tr>
-      <tr><td>SPI MISO</td><td>9</td><td>D9</td></tr>
-      <tr><td>SPI MOSI</td><td>10</td><td>D10</td></tr>
-      <tr><td>Radio CS (NSS)</td><td>44</td><td>D7</td></tr>
-      <tr><td>Radio RST</td><td>3</td><td>D2</td></tr>
-      <tr><td>Radio DIO1</td><td>33</td><td>internal</td></tr>
-      <tr><td>Radio BUSY</td><td>34</td><td>internal</td></tr>
-      <tr><td>RF Switch (TX/RX)</td><td>1</td><td>D0 — HIGH=RX, LOW=TX</td></tr>
-      <tr><td>Optional OLED SDA / SCL</td><td>5 / 6</td><td>D4 / D5</td></tr>
-      <tr><td>Default Relay Pins</td><td style="color:var(--orange);">2, 4</td><td>D1, D3</td></tr>
-      <tr><td>Default Sensor Pins</td><td style="color:var(--yellow);">5, 6</td><td>D4, D5</td></tr>
+      <tr><th>Function</th><th>GPIO</th><th>Connection</th></tr>
+      <tr><td>SPI SCK</td><td>7</td><td>B2B underside</td></tr>
+      <tr><td>SPI MISO</td><td>8</td><td>B2B underside</td></tr>
+      <tr><td>SPI MOSI</td><td>9</td><td>B2B underside</td></tr>
+      <tr><td>Radio CS (NSS)</td><td>41</td><td>B2B underside</td></tr>
+      <tr><td>Radio RST</td><td>42</td><td>B2B underside</td></tr>
+      <tr><td>Radio DIO1</td><td>39</td><td>B2B underside</td></tr>
+      <tr><td>Radio BUSY</td><td>40</td><td>B2B underside</td></tr>
+      <tr><td>RF Switch (ANT_SW)</td><td>38</td><td>B2B — HIGH=RX, LOW=TX</td></tr>
+      <tr><td>TCXO Voltage</td><td colspan="2">1.8 V (on DIO3, internal to module)</td></tr>
+      <tr><td>Optional OLED SDA / SCL</td><td>5 / 6</td><td>D4 / D5 (header)</td></tr>
+      <tr><td>Default Relay Pins</td><td style="color:var(--orange);">2, 4</td><td>D1, D3 (header)</td></tr>
+      <tr><td>Default Sensor Pins</td><td style="color:var(--yellow);">5, 6</td><td>D4, D5 (header)</td></tr>
+      <tr><td>IO Expansion UART TX / RX</td><td>43 / 44</td><td>D6, D7 (header silkscreen TX/RX)</td></tr>
     </table>
     <pre style="font-size:0.75em; margin-top:10px; background:#0a1628; padding:10px; border-radius:6px; color:var(--cyan); overflow-x:auto;">
+Through-hole header (radio is wired underneath, not here):
         [USB-C]
-D0/GPIO1  ●  ● 5V      RF_SW1 (TX/RX control)
-D1/GPIO2  ●  ● GND     Free relay/GPIO
-D2/GPIO3  ●  ● 3V3     RST
-D3/GPIO4  ●  ● D10/GPIO10  MOSI
-D4/GPIO5  ●  ● D9 /GPIO9   MISO  (optional OLED SDA)
-D5/GPIO6  ●  ● D8 /GPIO8   SCK   (optional OLED SCL)
-D6/GPIO43 ●  ● D7 /GPIO44  CS/NSS</pre>
+D0/GPIO1   ●  ● 5V
+D1/GPIO2   ●  ● GND     <span style="color:var(--orange);">Relay default (D1)</span>
+D2/GPIO3   ●  ● 3V3
+D3/GPIO4   ●  ● D10/GPIO9   <span style="color:var(--orange);">Relay default (D3)</span>
+D4/GPIO5   ●  ● D9 /GPIO8   <span style="color:var(--yellow);">Sensor / OLED SDA</span>
+D5/GPIO6   ●  ● D8 /GPIO7   <span style="color:var(--yellow);">Sensor / OLED SCL</span>
+D6/GPIO43  ●  ● D7 /GPIO44  <span style="color:var(--cyan);">UART TX / RX (IO expand)</span></pre>
   </div>
 
   <!-- Heltec V4 -->
