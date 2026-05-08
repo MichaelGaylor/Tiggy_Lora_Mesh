@@ -534,6 +534,110 @@
 #define DEFAULT_SENSOR_PINS { 12, 15, 34, 36 }  // 50/50 split
 
 // ═══════════════════════════════════════════════════════════════
+#elif defined(BOARD_TIGGYOPENMESH_V1)
+// ═══════════════════════════════════════════════════════════════
+// TiggyOpenMesh-V1 — custom 3S LiPo farm/repeater board
+// ESP32-S3-WROOM-1-N8R2 + Wio-SX1262 (header) + DRV8871 actuator
+// 12V 3S LiPo input → AP63203 buck → 3.3V. Native USB-C.
+// 3 high-side MOSFET relays, 2 analog + 3 digital/opto sensor inputs,
+// optional GPS and OLED via headers (J5 / GPS port).
+//
+// ⚠️ V1 PCB rework: "Battery Voltage" was routed to GPIO 37, which
+//    has no ADC peripheral. Cut R28→GPIO37 trace, fly-wire R28 to
+//    the GPIO 1 pad (ADC1_CH0). V2 should route directly to a free
+//    ADC1 pin and add an ADC_CTRL gate FET for sleep current saving.
+// ═══════════════════════════════════════════════════════════════
+
+#define BOARD_NAME          "TiggyOpenMesh V1"
+#define HAS_DISPLAY         0
+#define HAS_KEYBOARD        0
+#define HAS_TRACKBALL       0
+#define HAS_GPS             1     // optional, header J?
+#define HAS_OLED            1     // optional, header J5 (I2C SSD1306)
+#define RADIO_SX1262        1
+#define RADIO_TCXO_VOLTAGE  1.8f  // Wio-SX1262 TCXO at 1.8V
+
+// Power
+#define BOARD_POWERON       -1
+
+// SPI for LoRa (Wio-SX1262 via 15.24mm header pins J14/J15)
+#define BOARD_SPI_SCK       9
+#define BOARD_SPI_MISO      11
+#define BOARD_SPI_MOSI      10
+
+// No TFT display
+#define BOARD_TFT_CS        -1
+#define BOARD_TFT_DC        -1
+#define BOARD_TFT_BL        -1
+
+// SX1262 control pins
+#define RADIO_CS            8     // NSS
+#define RADIO_RST           12    // NRST (active low)
+#define RADIO_DIO1          14
+#define RADIO_BUSY          13
+#define RADIO_RXEN          47    // RF_SW (antenna switch): HIGH=RX, LOW=TX/idle
+
+// GPS (UART, optional via external header)
+#define BOARD_GPS_TX        38    // ESP TX → GPS RX
+#define BOARD_GPS_RX        39    // ESP RX ← GPS TX
+
+// I2C (OLED via header J5 — SSD1306)
+#define BOARD_I2C_SDA       17
+#define BOARD_I2C_SCL       18
+#define OLED_RST            21
+
+// No keyboard/trackball
+#define KB_I2C_ADDR         0
+#define BOARD_KB_INT        -1
+#define BOARD_TBALL_UP      -1
+#define BOARD_TBALL_DOWN    -1
+#define BOARD_TBALL_LEFT    -1
+#define BOARD_TBALL_RIGHT   -1
+#define BOARD_TBALL_CLICK   -1
+
+// No SD card
+#define BOARD_SDCARD_CS     -1
+
+// Battery — 3S LiPo via 1MΩ + 220kΩ divider (always-on, no ADC_CTRL gate)
+//   ⚠️ V1 rework: physical pin moved from GPIO 37 → GPIO 1 by fly-wire.
+//   Divider math: (1M + 220k) / 220k = 5.545 (multiplier ADC→VBAT)
+//   ADC sees max 12.6V × 0.180 = 2.27V (within ESP32-S3 2.4V headroom)
+#define BOARD_BAT_ADC       1     // ADC1_CH0 (after rework)
+#define BAT_DIVIDER         5.545f
+#define BAT_LOW_MV          9300    // 3 × 3.1V LiPo cutoff
+#define BAT_RECOVER_MV      11100   // 3 × 3.7V LiPo recovery
+//   Tuneable in field via:  BATT_CFG <divider> <low_mv> <recover_mv>
+
+// LEDs (2 indicator LEDs)
+#define BOARD_LED           35
+#define BOARD_LED2          36
+
+// Boot button only (no user button — just BOOT/EN)
+#define BOARD_BUTTON        0
+
+// Linear actuator (DRV8871 motor driver — exposed for app, not used by mesh)
+#define ACTUATOR_IN1        41    // RAM_IN
+#define ACTUATOR_IN2        42    // RAM_OUT
+
+// ─── User GPIO for relays & sensors ─────────────────────────
+// Reserved by hardware on this board:
+//   8–14    Wio-SX1262 control + SPI
+//   17–18   I2C OLED
+//   19–20   USB
+//   21      OLED RST
+//   35–36   LEDs
+//   38–39   GPS UART
+//   41–42   DRV8871 actuator
+//   46      strap pin
+//   47      RF_SW
+//   1       Battery ADC (after rework)
+// Available extras for future use: 45, 48
+#define USER_GPIO_COUNT     8
+#define DEFAULT_RELAY_PINS  { 2, 3, 4 }
+#define DEFAULT_SENSOR_PINS { 5, 6, 7, 15, 16 }
+#define SENSOR_PIN_COUNT    5
+
+// ═══════════════════════════════════════════════════════════════
 #elif defined(BOARD_CUSTOM)
 // ═══════════════════════════════════════════════════════════════
 // Custom board - fill in your own pins

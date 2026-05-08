@@ -3383,6 +3383,8 @@ void setup() {
     strncpy(mesh.boardCode, "XS3", 4);
 #elif defined(BOARD_HELTEC_V2)
     strncpy(mesh.boardCode, "V2", 3);
+#elif defined(BOARD_TIGGYOPENMESH_V1)
+    strncpy(mesh.boardCode, "TM1", 4);
 #endif
     mesh.onCfg = handleCfg;
     mesh.onCfgAck = handleCfgAck;
