@@ -930,6 +930,12 @@ void receiveCheck() {
 #define BATT_NO_BATTERY_MV     500
 #define BATT_CHECK_INTERVAL_MS 60000UL   // Re-check while running every 60s
 #define BATT_SLEEP_INTERVAL_S  300       // Deep-sleep 5min between recovery polls
+#define BATT_BOOT_GRACE_MS     300000UL  // 5-min grace after boot before auto-shutdown can fire
+
+// RTC RAM survives deep sleep (but not power-off), so we can distinguish
+// "fresh power-on" from "wake from a low-battery sleep".
+RTC_DATA_ATTR uint32_t rtcLowBattFlag = 0;
+#define RTC_LOW_BATT_MAGIC  0xBADBA77Eu
 
 // Runtime values — start at compile-time defaults, overridden from EEPROM.
 float    battDivider     = BAT_DIVIDER;
@@ -997,10 +1003,11 @@ int readBatteryMv() {
 }
 
 void enterLowBatteryShutdown(int mv) {
-    Serial.printf("\n!!! BATTERY LOW (%dmV < %dmV) — entering deep sleep\n",
-                  mv, (int)battLowMv);
+    Serial.printf("\n!!! BATTERY LOW (%dmV < %dmV) — entering deep sleep for %ds\n",
+                  mv, (int)battLowMv, (int)BATT_SLEEP_INTERVAL_S);
     Serial.flush();
-    EEPROM.commit();   // Persist any pending state before we cut power
+    delay(500);                        // Make sure UART drains before sleep
+    EEPROM.commit();                   // Persist any pending state
 
     if (oledAvailable) {
         oled.clearDisplay();
@@ -1024,12 +1031,18 @@ void enterLowBatteryShutdown(int mv) {
   #endif
     radio.sleep(false);              // SX1262 cold sleep, lowest current
 
+    rtcLowBattFlag = RTC_LOW_BATT_MAGIC;  // Tell setup() on wake that we slept due to low batt
     esp_sleep_enable_timer_wakeup((uint64_t)BATT_SLEEP_INTERVAL_S * 1000000ULL);
     esp_deep_sleep_start();
     // Deep sleep does not return — wake = full reboot, setup() runs again.
 }
 
 void checkBatteryAndShutdown() {
+    // Grace period: never auto-shutdown for the first BATT_BOOT_GRACE_MS after
+    // boot. Gives the operator time to BATT_DEBUG / BATT_CFG / SOLAR OFF over
+    // serial without the chip resetting under their fingers.
+    if (millis() < BATT_BOOT_GRACE_MS) return;
+
     static uint32_t lastCheck = 0;
     uint32_t now = millis();
     if (now - lastCheck < BATT_CHECK_INTERVAL_MS) return;
@@ -3398,20 +3411,25 @@ void setup() {
     EEPROM.begin(EEPROM_SIZE);
     loadBattCfg();
 
-    // ─── Early low-battery check ──────────────────────────────
-    // If we just woke from a low-batt deep sleep, abort boot and sleep
-    // again until VBAT crosses battRecoverMv. Avoids burning energy on
-    // full radio/BLE init when we'll just shut down 30s later anyway.
+    // ─── Early low-battery recovery check ──────────────────────
+    // Only runs if we just woke from a low-battery deep sleep (RTC flag
+    // set by enterLowBatteryShutdown). Fresh power-on or reset — skip
+    // entirely so a bogus reading on first boot can't strand the device
+    // in a sleep loop. Operator always gets a full boot to debug.
 #if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
-    {
+    if (rtcLowBattFlag == RTC_LOW_BATT_MAGIC) {
         int bootMv = readBatteryMv();
+        Serial.printf("Wake from low-batt sleep: VBAT=%dmV (need %dmV to resume)\n",
+                      bootMv, (int)battRecoverMv);
+        Serial.flush();
         if (bootMv >= BATT_NO_BATTERY_MV && bootMv < (int)battRecoverMv) {
-            Serial.printf("Boot batt: %dmV (recovery at %dmV) — back to sleep\n",
-                          bootMv, (int)battRecoverMv);
-            Serial.flush();
+            // Still below recovery threshold — sleep again
+            delay(500);
             esp_sleep_enable_timer_wakeup((uint64_t)BATT_SLEEP_INTERVAL_S * 1000000ULL);
             esp_deep_sleep_start();
         }
+        // Recovered — clear flag, proceed with full boot
+        rtcLowBattFlag = 0;
     }
 #endif
 
