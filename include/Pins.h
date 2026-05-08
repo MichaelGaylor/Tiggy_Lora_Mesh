@@ -573,9 +573,40 @@
 #define BOARD_TBALL_RIGHT   -1
 #define BOARD_TBALL_CLICK   -1
 #define BOARD_SDCARD_CS     -1
-#define BOARD_BAT_ADC       -1
 #define BOARD_LED           -1
 #define BOARD_BUTTON        -1
+
+// ─── Battery monitoring (optional, V3/V4 reference impl) ────
+// 1) Pick BOARD_BAT_ADC = an ADC1 GPIO (1–10 on ESP32-S3, 32–39 on ESP32).
+// 2) Optional ADC_CTRL: gate pin to disconnect divider (active-low). Skip
+//    if the divider is hard-wired across VBAT.
+// 3) Size resistors so VBAT_max / DIVIDER < 2.4V (ESP32-S3 ADC headroom):
+//    Lower=100kΩ, Upper=R_top:  DIVIDER = (R_top + 100kΩ) / 100kΩ
+//
+//    Battery     VBAT_max  DIVIDER   R_top
+//    ────────    ────────  ───────   ─────
+//    1S LiPo     4.2V       4.9      390k    (V3/V4 stock)
+//    2S LiPo     8.4V       4.9      390k
+//    3S LiPo     12.6V      5.7      470k
+//    4S LiPo     16.8V      7.6      680k
+//    12V SLA     14.4V      6.6      560k
+//
+// 4) Set thresholds. Per-cell cutoffs:
+//    LiPo / Li-ion:  3.1V cutoff,  3.7V recovery
+//    LiFePO4:        2.5V cutoff,  3.2V recovery
+//    SLA (12V pack): 10.5V cutoff, 12.6V recovery
+//
+// All four below are runtime-overridable via the BATT_CFG serial command,
+// so wrong compile-time values can be tuned in the field without re-flash.
+//
+// Example: 3S LiPo on GPIO 4, gated by GPIO 5 ──────────────────
+// #define BOARD_BAT_ADC    4
+// #define ADC_CTRL         5
+// #define BAT_DIVIDER      5.7f
+// #define BAT_LOW_MV       9300    // 3 × 3.1V
+// #define BAT_RECOVER_MV   11100   // 3 × 3.7V
+#define BOARD_BAT_ADC       -1
+
 #define USER_GPIO_COUNT     4
 #define DEFAULT_RELAY_PINS  { 2, 4, 12, 15 }
 #define DEFAULT_SENSOR_PINS { 34, 36 }

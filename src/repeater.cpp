@@ -250,6 +250,10 @@ unsigned long nextAutoPollTime = 0;
 
 // ─── Node location (static, for nodes without GPS) ──────────
 #define EEPROM_NDLOC_ADDR 449   // 8 bytes: lat(float) + lon(float)
+// Battery config override (runtime-tunable via BATT_CFG serial command).
+// Layout: magic(2) + divider(4 float) + lowMv(2) + recoverMv(2) = 10 bytes.
+#define EEPROM_BATTCFG_ADDR  457
+#define EEPROM_BATTCFG_MAGIC 0xBAEEu
 float nodeLat = 0.0f;
 float nodeLon = 0.0f;
 
@@ -2471,8 +2475,9 @@ void handleSerialConfig() {
             if (mv < BATT_NO_BATTERY_MV) {
                 Serial.println("Battery:  USB (no batt detected)");
             } else {
-                Serial.printf("Battery:  %dmV  (cut %d / wake %d)\n",
-                              mv, BAT_LOW_MV, BAT_RECOVER_MV);
+                Serial.printf("Battery:  %dmV  (cut %d / wake %d, %s)\n",
+                              mv, (int)battLowMv, (int)battRecoverMv,
+                              battCfgIsCustom ? "custom" : "default");
             }
         }
 #endif
@@ -2501,10 +2506,56 @@ void handleSerialConfig() {
         if (mv < BATT_NO_BATTERY_MV) {
             Serial.println("BATT,USB,no battery detected");
         } else {
-            Serial.printf("BATT,%d,cut=%d,wake=%d\n", mv, BAT_LOW_MV, BAT_RECOVER_MV);
+            Serial.printf("BATT,%d,cut=%d,wake=%d\n",
+                          mv, (int)battLowMv, (int)battRecoverMv);
         }
 #else
         Serial.println("BATT,N/A,no monitoring on this board");
+#endif
+    }
+    else if (line == "BATT_CFG") {
+#if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
+        Serial.printf("BATT_CFG,div=%.3f,low=%d,recover=%d,source=%s\n",
+                      battDivider, (int)battLowMv, (int)battRecoverMv,
+                      battCfgIsCustom ? "EEPROM" : "default");
+        Serial.printf("Defaults (Pins.h): div=%.3f, low=%d, recover=%d\n",
+                      (float)BAT_DIVIDER, (int)BAT_LOW_MV, (int)BAT_RECOVER_MV);
+        Serial.println("Set: BATT_CFG <divider> <low_mv> <recover_mv>");
+        Serial.println("Reset to defaults: BATT_CFG_RESET");
+#else
+        Serial.println("BATT_CFG,N/A,no battery monitoring on this board");
+#endif
+    }
+    else if (line.startsWith("BATT_CFG ")) {
+#if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
+        float d = 0.0f;
+        int low = 0, rec = 0;
+        if (sscanf(line.c_str(), "BATT_CFG %f %d %d", &d, &low, &rec) != 3) {
+            Serial.println("ERR: usage: BATT_CFG <divider> <low_mv> <recover_mv>");
+        } else if (d < 0.5f || d > 50.0f) {
+            Serial.println("ERR: divider out of range (0.5–50)");
+        } else if (low < 1000 || low > 60000) {
+            Serial.println("ERR: low_mv out of range (1000–60000)");
+        } else if (rec <= low || rec > 60000) {
+            Serial.println("ERR: recover_mv must be > low_mv and <= 60000");
+        } else {
+            saveBattCfg(d, (uint16_t)low, (uint16_t)rec);
+            Serial.printf("OK: BATT_CFG saved (div=%.3f low=%d recover=%d)\n",
+                          d, low, rec);
+            int mv = readBatteryMv();
+            if (mv >= BATT_NO_BATTERY_MV) Serial.printf("Current VBAT: %dmV\n", mv);
+        }
+#else
+        Serial.println("ERR: no battery monitoring on this board");
+#endif
+    }
+    else if (line == "BATT_CFG_RESET") {
+#if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
+        resetBattCfg();
+        Serial.printf("OK: reset to Pins.h defaults (div=%.3f low=%d recover=%d)\n",
+                      battDivider, (int)battLowMv, (int)battRecoverMv);
+#else
+        Serial.println("ERR: no battery monitoring on this board");
 #endif
     }
     else if (line == "RESET") {
@@ -3119,15 +3170,71 @@ void updateOLED() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// SECTION: Battery monitor (V3 / V4 — 390k/100k divider on VBAT,
-//          gated by ADC_CTRL active-low. Other boards: no-op stubs.)
+// SECTION: Battery monitor — V3/V4 reference impl, plus runtime
+//          override via EEPROM (BATT_CFG serial command).
+//
+// Compile-time defaults come from Pins.h (BAT_DIVIDER, BAT_LOW_MV,
+// BAT_RECOVER_MV). At boot we load any EEPROM override on top.
+// Custom boards: define those four in Pins.h and the rest works.
 // ═══════════════════════════════════════════════════════════════
 #if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
 
+// Treat readings below this as "no battery / USB only" — never auto-shutdown.
+#define BATT_NO_BATTERY_MV     500
+#define BATT_CHECK_INTERVAL_MS 60000UL   // Re-check while running every 60s
+#define BATT_SLEEP_INTERVAL_S  300       // Deep-sleep 5min between recovery polls
+
+// Runtime values — start at compile-time defaults, overridden from EEPROM.
+float    battDivider     = BAT_DIVIDER;
+uint16_t battLowMv       = BAT_LOW_MV;
+uint16_t battRecoverMv   = BAT_RECOVER_MV;
+bool     battCfgIsCustom = false;
+
+struct __attribute__((packed)) BattCfgEEPROM {
+    uint16_t magic;
+    float    divider;
+    uint16_t lowMv;
+    uint16_t recoverMv;
+};
+
+void loadBattCfg() {
+    BattCfgEEPROM e;
+    EEPROM.get(EEPROM_BATTCFG_ADDR, e);
+    // Validate: magic + sane ranges. Reject NaN/inf via simple bounds.
+    if (e.magic == EEPROM_BATTCFG_MAGIC
+        && e.divider >= 0.5f && e.divider <= 50.0f
+        && e.lowMv >= 1000 && e.lowMv <= 60000
+        && e.recoverMv > e.lowMv && e.recoverMv <= 60000) {
+        battDivider     = e.divider;
+        battLowMv       = e.lowMv;
+        battRecoverMv   = e.recoverMv;
+        battCfgIsCustom = true;
+    }
+}
+
+void saveBattCfg(float divider, uint16_t lowMv, uint16_t recoverMv) {
+    BattCfgEEPROM e = { EEPROM_BATTCFG_MAGIC, divider, lowMv, recoverMv };
+    EEPROM.put(EEPROM_BATTCFG_ADDR, e);
+    EEPROM.commit();
+    battDivider     = divider;
+    battLowMv       = lowMv;
+    battRecoverMv   = recoverMv;
+    battCfgIsCustom = true;
+}
+
+void resetBattCfg() {
+    BattCfgEEPROM e = { 0, 0.0f, 0, 0 };
+    EEPROM.put(EEPROM_BATTCFG_ADDR, e);
+    EEPROM.commit();
+    battDivider     = BAT_DIVIDER;
+    battLowMv       = BAT_LOW_MV;
+    battRecoverMv   = BAT_RECOVER_MV;
+    battCfgIsCustom = false;
+}
+
 // Returns battery voltage in millivolts, or -1 if no battery monitoring.
-// Pulses ADC_CTRL low to enable the divider, takes 8 averaged samples
-// using the ESP32's calibrated mV reading, then idles ADC_CTRL high
-// again to disconnect the divider (saves ~9µA quiescent).
+// Pulses ADC_CTRL low to enable the divider (if defined), takes 8
+// averaged samples via ESP32's calibrated reading, then idles HIGH again.
 int readBatteryMv() {
   #ifdef ADC_CTRL
     digitalWrite(ADC_CTRL, LOW);     // Enable divider
@@ -3139,20 +3246,12 @@ int readBatteryMv() {
     digitalWrite(ADC_CTRL, HIGH);    // Idle: divider off, no quiescent draw
   #endif
     int dividerMv = sum / 8;
-    return (int)(dividerMv * BAT_DIVIDER);
+    return (int)(dividerMv * battDivider);
 }
-
-// Treat readings below this as "no battery / USB only" — never auto-shutdown.
-// 500mV is well below any real LiPo voltage but above ADC noise floor.
-#define BATT_NO_BATTERY_MV   500
-#define BATT_CHECK_INTERVAL_MS  60000UL   // Re-check while running every 60s
-#define BATT_SLEEP_INTERVAL_S   300       // Deep-sleep 5min between recovery polls
-
-bool batteryShutdownPending = false;
 
 void enterLowBatteryShutdown(int mv) {
     Serial.printf("\n!!! BATTERY LOW (%dmV < %dmV) — entering deep sleep\n",
-                  mv, BAT_LOW_MV);
+                  mv, (int)battLowMv);
     Serial.flush();
     EEPROM.commit();   // Persist any pending state before we cut power
 
@@ -3162,9 +3261,9 @@ void enterLowBatteryShutdown(int mv) {
         oled.setCursor(0, 0); oled.println("LOW BATT");
         oled.setTextSize(1);
         oled.setCursor(0, 24);
-        oled.printf("%dmV (cut %d)\n", mv, BAT_LOW_MV);
+        oled.printf("%dmV (cut %d)\n", mv, (int)battLowMv);
         oled.println("Sleeping until");
-        oled.printf("%dmV recovery\n", BAT_RECOVER_MV);
+        oled.printf("%dmV recovery\n", (int)battRecoverMv);
         oled.display();
         delay(2000);
         oled.clearDisplay(); oled.display();
@@ -3190,12 +3289,14 @@ void checkBatteryAndShutdown() {
     lastCheck = now;
     int mv = readBatteryMv();
     if (mv < BATT_NO_BATTERY_MV) return;   // No battery / USB — skip
-    if (mv < BAT_LOW_MV) enterLowBatteryShutdown(mv);
+    if (mv < (int)battLowMv) enterLowBatteryShutdown(mv);
 }
 
 #else   // No battery monitoring on this board
 inline int  readBatteryMv()             { return -1; }
 inline void checkBatteryAndShutdown()   { }
+inline void loadBattCfg()               { }
+inline void resetBattCfg()              { }
 #endif
 
 // ═══════════════════════════════════════════════════════════════
@@ -3239,16 +3340,20 @@ void setup() {
     pinMode(BOARD_BUTTON, INPUT_PULLUP);
 #endif
 
+    // EEPROM up early so the battery check honours any runtime override.
+    EEPROM.begin(EEPROM_SIZE);
+    loadBattCfg();
+
     // ─── Early low-battery check ──────────────────────────────
     // If we just woke from a low-batt deep sleep, abort boot and sleep
-    // again until we reach BAT_RECOVER_MV. Avoids burning energy on full
-    // radio/BLE init when we'll just shut down 30s later anyway.
+    // again until VBAT crosses battRecoverMv. Avoids burning energy on
+    // full radio/BLE init when we'll just shut down 30s later anyway.
 #if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
     {
         int bootMv = readBatteryMv();
-        if (bootMv >= BATT_NO_BATTERY_MV && bootMv < BAT_RECOVER_MV) {
+        if (bootMv >= BATT_NO_BATTERY_MV && bootMv < (int)battRecoverMv) {
             Serial.printf("Boot batt: %dmV (recovery at %dmV) — back to sleep\n",
-                          bootMv, BAT_RECOVER_MV);
+                          bootMv, (int)battRecoverMv);
             Serial.flush();
             esp_sleep_enable_timer_wakeup((uint64_t)BATT_SLEEP_INTERVAL_S * 1000000ULL);
             esp_deep_sleep_start();
@@ -3256,7 +3361,6 @@ void setup() {
     }
 #endif
 
-    EEPROM.begin(EEPROM_SIZE);
     loadConfig();
     loadBeaconRules();
 
@@ -3427,6 +3531,7 @@ void setup() {
     Serial.println("Commands: ID xxxx | KEY xxx... | Example : RELAY 2,4,12 | SENSOR 34,36 | GPS <tx>,<rx> | GPS OFF");
     Serial.println("          STATUS | SAVE | RESET | GATEWAY ON/OFF | AUTOPOLL <id> <sec>");
     Serial.println("          PINMODE <pin> PULSE|AUTO | BLEPIN,<6digits> | EEPROM,RESET | REBOOT");
+    Serial.println("          BATT | BATT_CFG | BATT_CFG <div> <low_mv> <rec_mv> | BATT_CFG_RESET");
     debugPrint("Free heap: " + String(ESP.getFreeHeap()));
 }
 
