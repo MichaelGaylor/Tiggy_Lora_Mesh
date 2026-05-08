@@ -190,6 +190,10 @@ static float getPulseRate(uint8_t pin) {
 int ioExpandRead(int vpin);  // forward declaration
 void ioExpandSetRelay(int pin, int val);  // forward declaration
 
+// Battery monitor — defined down in its own section, but sendHeartbeatWithFlags
+// (line ~460) needs to call this. Returns -1 if no monitoring on this board.
+int readBatteryMv();
+
 // IO expansion / virtual-pin helpers — forward decls needed here so early
 // callers (deadman, beacon, etc.) can use them. Definitions are near isPinSafe().
 bool isPinSafe(int pin);
@@ -464,6 +468,10 @@ void sendHeartbeatWithFlags() {
                           mesh.statusFlags[pos++] = 'B';
     if (gatewayMode)      mesh.statusFlags[pos++] = 'G';
     mesh.statusFlags[pos] = '\0';
+    // Refresh battery telemetry just before sending — readBatteryMv() returns
+    // -1 on boards without monitoring, which signals "don't include" to the
+    // heartbeat builder.
+    mesh.batteryMv = (int16_t)readBatteryMv();
     mesh.sendHeartbeat();
 }
 
@@ -2074,6 +2082,18 @@ void handleNodeDiscovered(const String& id, int rssi) {
     bleSend("NODE," + id + "," + String(rssi) + ",1,0,1," + id);
 }
 
+// Heartbeat-with-extras callback. When we're acting as gateway, forward each
+// incoming node's reported telemetry (board code, flags, battery mV) to the
+// GUI over serial as a "BATT,<id>,<mv>" line. Battery is omitted when the
+// remote node doesn't report one (-1 sentinel).
+void handleHeartbeatExtra(const String& from, int rssi,
+                          const String& boardCode, const String& flags,
+                          int batteryMv) {
+    if (gatewayMode && batteryMv >= 0) {
+        bleSend("BATT," + from + "," + String(batteryMv));
+    }
+}
+
 // ID conflict handler — another node is using our ID
 void handleIdConflict(const String& id, int rssi) {
     debugPrint("!! ID CONFLICT: " + id + " RSSI=" + String(rssi));
@@ -3456,6 +3476,7 @@ void setup() {
     mesh.onMessage = handleMessage;
     mesh.onCmd = handleCmd;
     mesh.onNodeDiscovered = handleNodeDiscovered;
+    mesh.onHeartbeatExtra = handleHeartbeatExtra;
     mesh.onAck = handleAck;
 
     // Set board code for heartbeat identification

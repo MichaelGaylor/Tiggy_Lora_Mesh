@@ -547,9 +547,35 @@ void MeshCore::processPacket(const MeshPacket& pkt) {
     if (pkt.payload.startsWith("HB,")) {
         String rest = pkt.payload.substring(3);
         rest.trim();
-        // Parse: "A1B2" (old) or "A1B2,V3" (new with board code)
-        int hbComma = rest.indexOf(',');
-        String hbFrom = (hbComma > 0) ? rest.substring(0, hbComma) : rest;
+        // Parse: "A1B2" (basic) | "A1B2,V3" | "A1B2,V3,SR" | "A1B2,V3,SR,B4067"
+        // Fields are positional except for tagged ones (currently "B<mv>" for
+        // battery), so order/optionality of tagged fields doesn't matter.
+        String hbFrom, hbBoard, hbFlags;
+        int hbBatt = -1;
+        {
+            int idx = 0;
+            int start = 0;
+            while (true) {
+                int comma = rest.indexOf(',', start);
+                String tok = (comma < 0) ? rest.substring(start) : rest.substring(start, comma);
+                tok.trim();
+                if (tok.length() > 0) {
+                    if (tok.charAt(0) == 'B' && tok.length() > 1) {
+                        // Tagged battery field "B<mv>"
+                        hbBatt = tok.substring(1).toInt();
+                    } else if (idx == 0) {
+                        hbFrom = tok;
+                    } else if (hbBoard.length() == 0) {
+                        hbBoard = tok;
+                    } else if (hbFlags.length() == 0) {
+                        hbFlags = tok;
+                    }
+                }
+                idx++;
+                if (comma < 0) break;
+                start = comma + 1;
+            }
+        }
         if (isValidNodeID(hbFrom)) {
             // Collision: another node is using our ID
             if (hbFrom == String(localID)) {
@@ -559,7 +585,8 @@ void MeshCore::processPacket(const MeshPacket& pkt) {
             }
             addNode(hbFrom);
             updateRouting(hbFrom, hbFrom, lastRSSI);
-            if (onHeartbeat) onHeartbeat(hbFrom, lastRSSI);
+            if (onHeartbeat)      onHeartbeat(hbFrom, lastRSSI);
+            if (onHeartbeatExtra) onHeartbeatExtra(hbFrom, lastRSSI, hbBoard, hbFlags, hbBatt);
         }
         return;
     }
@@ -616,5 +643,8 @@ void MeshCore::sendHeartbeat() {
     String hb = "HB," + String(localID);
     if (boardCode[0]) hb += "," + String(boardCode);
     if (statusFlags[0]) hb += "," + String(statusFlags);
+    // Battery is tagged ("B<mv>") so its position doesn't break legacy
+    // parsers that read boardCode/flags by index.
+    if (batteryMv >= 0)  hb += ",B" + String((int)batteryMv);
     transmitPacket(0xFFFF, hb);
 }

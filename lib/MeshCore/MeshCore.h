@@ -159,9 +159,23 @@ public:
     typedef void (*HeartbeatFunc)(const String& from, int rssi);
     HeartbeatFunc onHeartbeat = nullptr;
 
+    // Called for every heartbeat with the parsed extras (boardCode, flags,
+    // batteryMv). batteryMv is -1 when the sender doesn't include one.
+    // Use this in gateway firmware to forward node telemetry to the GUI.
+    typedef void (*HeartbeatExtraFunc)(const String& from, int rssi,
+                                       const String& boardCode,
+                                       const String& flags,
+                                       int batteryMv);
+    HeartbeatExtraFunc onHeartbeatExtra = nullptr;
+
     // Board identification code (set by firmware, sent in heartbeat)
     char boardCode[4] = "";  // e.g., "V3", "V4", "L32", "XS3", "TD", "V2"
     char statusFlags[8] = "";  // Compact flags: S=solar, B=beacon scan, G=gateway
+
+    // Battery voltage in millivolts (set by firmware if it has a battery
+    // monitor; -1 means "not reporting"). Included in every outgoing
+    // heartbeat as a tagged field "B<mv>".
+    int16_t batteryMv = -1;
 
     // Runtime spreading factor (may differ from compile-time LORA_SF after a CFG change)
     uint8_t currentSF = LORA_SF;
