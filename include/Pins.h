@@ -25,6 +25,10 @@
 // RADIO_CURRENT_LIMIT  - PA over-current protection in mA (default 140 for SX1262)
 // RADIO_FEM_EN         - Front-end module enable pin (GC1109 on Heltec V4, HIGH = on)
 // RADIO_FEM_TXEN       - Front-end TX enable pin (HIGH = TX/PA, LOW = RX/LNA)
+// ADC_CTRL             - GPIO that gates the battery voltage divider (optional)
+// ADC_CTRL_ACTIVE      - HIGH or LOW: which level enables the divider.
+//                        N-channel low-side switch (V3/V4) → HIGH (default)
+//                        P-channel high-side switch       → LOW
 
 // ═══════════════════════════════════════════════════════════════
 #if defined(BOARD_TDECK_PLUS)
@@ -241,8 +245,19 @@
 // No SD Card
 #define BOARD_SDCARD_CS     -1
 
-// Battery
+// Battery (390k/100k divider on VBAT, gated by ADC_CTRL active-HIGH).
+// Heltec V3 uses an N-channel low-side switch on the divider, so HIGH
+// turns it on. (Some V3 docs claim active-low — verified empirically
+// via BATT_DEBUG that this batch is active-high.)
+// If you have a V3 batch with a P-channel high-side switch, set
+//   #define ADC_CTRL_ACTIVE  LOW
+// here to flip the polarity.
 #define BOARD_BAT_ADC       1
+#define ADC_CTRL            37    // gate pin
+#define ADC_CTRL_ACTIVE     HIGH  // HIGH = enable divider on this board
+#define BAT_DIVIDER         4.9f  // 100k/(390k+100k) = 0.2041 → mul by 4.9
+#define BAT_LOW_MV          3300  // Cutoff: shut down to protect LiPo
+#define BAT_RECOVER_MV      3700  // Hysteresis: must reach this to wake up
 
 // LED
 #define BOARD_LED           35
@@ -283,7 +298,8 @@
 // Power
 #define BOARD_POWERON       -1
 #define VEXT_CTRL           36    // Vext power for OLED (LOW = on)
-#define ADC_CTRL            37    // HIGH = enable battery voltage divider
+#define ADC_CTRL            37    // gate pin for battery divider
+#define ADC_CTRL_ACTIVE     HIGH  // HIGH = enable divider (same as V3)
 
 // SPI for LoRa (same bus as V3)
 #define BOARD_SPI_MOSI      10
@@ -323,8 +339,11 @@
 // No SD Card
 #define BOARD_SDCARD_CS     -1
 
-// Battery (must set ADC_CTRL HIGH before reading)
+// Battery (390k/100k divider on VBAT, gated by ADC_CTRL active-low)
 #define BOARD_BAT_ADC       1
+#define BAT_DIVIDER         4.9f  // 100k/(390k+100k) = 0.2041 → mul by 4.9
+#define BAT_LOW_MV          3300  // Cutoff: shut down to protect LiPo
+#define BAT_RECOVER_MV      3700  // Hysteresis: must reach this to wake up
 
 // LED
 #define BOARD_LED           35
@@ -527,6 +546,110 @@
 #define DEFAULT_SENSOR_PINS { 12, 15, 34, 36 }  // 50/50 split
 
 // ═══════════════════════════════════════════════════════════════
+#elif defined(BOARD_TIGGYOPENMESH_V1)
+// ═══════════════════════════════════════════════════════════════
+// TiggyOpenMesh-V1 — custom 3S LiPo farm/repeater board
+// ESP32-S3-WROOM-1-N8R2 + Wio-SX1262 (header) + DRV8871 actuator
+// 12V 3S LiPo input → AP63203 buck → 3.3V. Native USB-C.
+// 3 high-side MOSFET relays, 2 analog + 3 digital/opto sensor inputs,
+// optional GPS and OLED via headers (J5 / GPS port).
+//
+// ⚠️ V1 PCB rework: "Battery Voltage" was routed to GPIO 37, which
+//    has no ADC peripheral. Cut R28→GPIO37 trace, fly-wire R28 to
+//    the GPIO 1 pad (ADC1_CH0). V2 should route directly to a free
+//    ADC1 pin and add an ADC_CTRL gate FET for sleep current saving.
+// ═══════════════════════════════════════════════════════════════
+
+#define BOARD_NAME          "TiggyOpenMesh V1"
+#define HAS_DISPLAY         0
+#define HAS_KEYBOARD        0
+#define HAS_TRACKBALL       0
+#define HAS_GPS             1     // optional, header J?
+#define HAS_OLED            1     // optional, header J5 (I2C SSD1306)
+#define RADIO_SX1262        1
+#define RADIO_TCXO_VOLTAGE  1.8f  // Wio-SX1262 TCXO at 1.8V
+
+// Power
+#define BOARD_POWERON       -1
+
+// SPI for LoRa (Wio-SX1262 via 15.24mm header pins J14/J15)
+#define BOARD_SPI_SCK       9
+#define BOARD_SPI_MISO      11
+#define BOARD_SPI_MOSI      10
+
+// No TFT display
+#define BOARD_TFT_CS        -1
+#define BOARD_TFT_DC        -1
+#define BOARD_TFT_BL        -1
+
+// SX1262 control pins
+#define RADIO_CS            8     // NSS
+#define RADIO_RST           12    // NRST (active low)
+#define RADIO_DIO1          14
+#define RADIO_BUSY          13
+#define RADIO_RXEN          47    // RF_SW (antenna switch): HIGH=RX, LOW=TX/idle
+
+// GPS (UART, optional via external header)
+#define BOARD_GPS_TX        38    // ESP TX → GPS RX
+#define BOARD_GPS_RX        39    // ESP RX ← GPS TX
+
+// I2C (OLED via header J5 — SSD1306)
+#define BOARD_I2C_SDA       17
+#define BOARD_I2C_SCL       18
+#define OLED_RST            21
+
+// No keyboard/trackball
+#define KB_I2C_ADDR         0
+#define BOARD_KB_INT        -1
+#define BOARD_TBALL_UP      -1
+#define BOARD_TBALL_DOWN    -1
+#define BOARD_TBALL_LEFT    -1
+#define BOARD_TBALL_RIGHT   -1
+#define BOARD_TBALL_CLICK   -1
+
+// No SD card
+#define BOARD_SDCARD_CS     -1
+
+// Battery — 3S LiPo via 1MΩ + 220kΩ divider (always-on, no ADC_CTRL gate)
+//   ⚠️ V1 rework: physical pin moved from GPIO 37 → GPIO 1 by fly-wire.
+//   Divider math: (1M + 220k) / 220k = 5.545 (multiplier ADC→VBAT)
+//   ADC sees max 12.6V × 0.180 = 2.27V (within ESP32-S3 2.4V headroom)
+#define BOARD_BAT_ADC       1     // ADC1_CH0 (after rework)
+#define BAT_DIVIDER         5.545f
+#define BAT_LOW_MV          9300    // 3 × 3.1V LiPo cutoff
+#define BAT_RECOVER_MV      11100   // 3 × 3.7V LiPo recovery
+//   Tuneable in field via:  BATT_CFG <divider> <low_mv> <recover_mv>
+
+// LEDs (2 indicator LEDs)
+#define BOARD_LED           35
+#define BOARD_LED2          36
+
+// Boot button only (no user button — just BOOT/EN)
+#define BOARD_BUTTON        0
+
+// Linear actuator (DRV8871 motor driver — exposed for app, not used by mesh)
+#define ACTUATOR_IN1        41    // RAM_IN
+#define ACTUATOR_IN2        42    // RAM_OUT
+
+// ─── User GPIO for relays & sensors ─────────────────────────
+// Reserved by hardware on this board:
+//   8–14    Wio-SX1262 control + SPI
+//   17–18   I2C OLED
+//   19–20   USB
+//   21      OLED RST
+//   35–36   LEDs
+//   38–39   GPS UART
+//   41–42   DRV8871 actuator
+//   46      strap pin
+//   47      RF_SW
+//   1       Battery ADC (after rework)
+// Available extras for future use: 45, 48
+#define USER_GPIO_COUNT     8
+#define DEFAULT_RELAY_PINS  { 2, 3, 4 }
+#define DEFAULT_SENSOR_PINS { 5, 6, 7, 15, 16 }
+#define SENSOR_PIN_COUNT    5
+
+// ═══════════════════════════════════════════════════════════════
 #elif defined(BOARD_CUSTOM)
 // ═══════════════════════════════════════════════════════════════
 // Custom board - fill in your own pins
@@ -566,9 +689,41 @@
 #define BOARD_TBALL_RIGHT   -1
 #define BOARD_TBALL_CLICK   -1
 #define BOARD_SDCARD_CS     -1
-#define BOARD_BAT_ADC       -1
 #define BOARD_LED           -1
 #define BOARD_BUTTON        -1
+
+// ─── Battery monitoring (optional, V3/V4 reference impl) ────
+// 1) Pick BOARD_BAT_ADC = an ADC1 GPIO (1–10 on ESP32-S3, 32–39 on ESP32).
+// 2) Optional ADC_CTRL: gate pin to disconnect divider (active-low). Skip
+//    if the divider is hard-wired across VBAT.
+// 3) Size resistors so VBAT_max / DIVIDER < 2.4V (ESP32-S3 ADC headroom):
+//    Lower=100kΩ, Upper=R_top:  DIVIDER = (R_top + 100kΩ) / 100kΩ
+//
+//    Battery     VBAT_max  DIVIDER   R_top
+//    ────────    ────────  ───────   ─────
+//    1S LiPo     4.2V       4.9      390k    (V3/V4 stock)
+//    2S LiPo     8.4V       4.9      390k
+//    3S LiPo     12.6V      5.7      470k
+//    4S LiPo     16.8V      7.6      680k
+//    12V SLA     14.4V      6.6      560k
+//
+// 4) Set thresholds. Per-cell cutoffs:
+//    LiPo / Li-ion:  3.1V cutoff,  3.7V recovery
+//    LiFePO4:        2.5V cutoff,  3.2V recovery
+//    SLA (12V pack): 10.5V cutoff, 12.6V recovery
+//
+// All four below are runtime-overridable via the BATT_CFG serial command,
+// so wrong compile-time values can be tuned in the field without re-flash.
+//
+// Example: 3S LiPo on GPIO 4, gated by GPIO 5 (N-channel low-side) ─
+// #define BOARD_BAT_ADC    4
+// #define ADC_CTRL         5
+// #define ADC_CTRL_ACTIVE  HIGH    // or LOW for P-channel high-side
+// #define BAT_DIVIDER      5.7f
+// #define BAT_LOW_MV       9300    // 3 × 3.1V
+// #define BAT_RECOVER_MV   11100   // 3 × 3.7V
+#define BOARD_BAT_ADC       -1
+
 #define USER_GPIO_COUNT     4
 #define DEFAULT_RELAY_PINS  { 2, 4, 12, 15 }
 #define DEFAULT_SENSOR_PINS { 34, 36 }

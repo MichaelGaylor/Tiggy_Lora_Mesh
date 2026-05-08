@@ -51,6 +51,14 @@
       "radio": "SX1276",
       "relay": ["2", "4"],
       "sensor": ["12", "15", "34", "36"]
+    },
+    "TM1": {
+      "name": "TiggyOpenMesh V1",
+      "define": "BOARD_TIGGYOPENMESH_V1",
+      "chip": "ESP32-S3",
+      "radio": "SX1262",
+      "relay": ["2", "3", "4"],
+      "sensor": ["5", "6", "7", "15", "16"]
     }
   }
 }

@@ -190,6 +190,10 @@ static float getPulseRate(uint8_t pin) {
 int ioExpandRead(int vpin);  // forward declaration
 void ioExpandSetRelay(int pin, int val);  // forward declaration
 
+// Battery monitor — defined down in its own section, but sendHeartbeatWithFlags
+// (line ~460) needs to call this. Returns -1 if no monitoring on this board.
+int readBatteryMv();
+
 // IO expansion / virtual-pin helpers — forward decls needed here so early
 // callers (deadman, beacon, etc.) can use them. Definitions are near isPinSafe().
 bool isPinSafe(int pin);
@@ -250,6 +254,10 @@ unsigned long nextAutoPollTime = 0;
 
 // ─── Node location (static, for nodes without GPS) ──────────
 #define EEPROM_NDLOC_ADDR 449   // 8 bytes: lat(float) + lon(float)
+// Battery config override (runtime-tunable via BATT_CFG serial command).
+// Layout: magic(2) + divider(4 float) + lowMv(2) + recoverMv(2) = 10 bytes.
+#define EEPROM_BATTCFG_ADDR  457
+#define EEPROM_BATTCFG_MAGIC 0xBAEEu
 float nodeLat = 0.0f;
 float nodeLon = 0.0f;
 
@@ -460,7 +468,18 @@ void sendHeartbeatWithFlags() {
                           mesh.statusFlags[pos++] = 'B';
     if (gatewayMode)      mesh.statusFlags[pos++] = 'G';
     mesh.statusFlags[pos] = '\0';
+    // Refresh battery telemetry just before sending — readBatteryMv() returns
+    // -1 on boards without monitoring, which signals "don't include" to the
+    // heartbeat builder.
+    mesh.batteryMv = (int16_t)readBatteryMv();
     mesh.sendHeartbeat();
+
+    // In gateway mode, publish our own battery to serial — remote nodes
+    // hear our heartbeats over LoRa, but we don't hear our own, so the GUI
+    // would never see the local node's battery without this.
+    if (gatewayMode && mesh.batteryMv >= 0) {
+        bleSend("BATT," + String(mesh.localID) + "," + String((int)mesh.batteryMv));
+    }
 }
 
 // ─── IO Expansion Board (UART2) ─────────────────────────────
@@ -911,6 +930,163 @@ void receiveCheck() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// SECTION: Battery monitor — V3/V4 reference impl, plus runtime
+//          override via EEPROM (BATT_CFG serial command).
+//
+// Compile-time defaults come from Pins.h (BAT_DIVIDER, BAT_LOW_MV,
+// BAT_RECOVER_MV). At boot we load any EEPROM override on top.
+// Custom boards: define those four in Pins.h and the rest works.
+// Must be defined BEFORE solarCheckButton/handleSerialConfig/updateOLED
+// since they all call readBatteryMv().
+// ═══════════════════════════════════════════════════════════════
+#if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
+
+// Treat readings below this as "no battery / USB only" — never auto-shutdown.
+#define BATT_NO_BATTERY_MV     500
+#define BATT_CHECK_INTERVAL_MS 60000UL   // Re-check while running every 60s
+#define BATT_SLEEP_INTERVAL_S  300       // Deep-sleep 5min between recovery polls
+#define BATT_BOOT_GRACE_MS     300000UL  // 5-min grace after boot before auto-shutdown can fire
+
+// RTC RAM survives deep sleep (but not power-off), so we can distinguish
+// "fresh power-on" from "wake from a low-battery sleep".
+RTC_DATA_ATTR uint32_t rtcLowBattFlag = 0;
+#define RTC_LOW_BATT_MAGIC  0xBADBA77Eu
+
+// ADC_CTRL polarity. Default to HIGH (N-channel low-side switch, V3/V4).
+// Boards with a P-channel high-side switch should #define ADC_CTRL_ACTIVE LOW
+// in their Pins.h block.
+#ifdef ADC_CTRL
+  #ifndef ADC_CTRL_ACTIVE
+    #define ADC_CTRL_ACTIVE HIGH
+  #endif
+  #define ADC_CTRL_IDLE  ((ADC_CTRL_ACTIVE) == HIGH ? LOW : HIGH)
+#endif
+
+// Runtime values — start at compile-time defaults, overridden from EEPROM.
+float    battDivider     = BAT_DIVIDER;
+uint16_t battLowMv       = BAT_LOW_MV;
+uint16_t battRecoverMv   = BAT_RECOVER_MV;
+bool     battCfgIsCustom = false;
+
+struct __attribute__((packed)) BattCfgEEPROM {
+    uint16_t magic;
+    float    divider;
+    uint16_t lowMv;
+    uint16_t recoverMv;
+};
+
+void loadBattCfg() {
+    BattCfgEEPROM e;
+    EEPROM.get(EEPROM_BATTCFG_ADDR, e);
+    // Validate: magic + sane ranges. Reject NaN/inf via simple bounds.
+    if (e.magic == EEPROM_BATTCFG_MAGIC
+        && e.divider >= 0.5f && e.divider <= 50.0f
+        && e.lowMv >= 1000 && e.lowMv <= 60000
+        && e.recoverMv > e.lowMv && e.recoverMv <= 60000) {
+        battDivider     = e.divider;
+        battLowMv       = e.lowMv;
+        battRecoverMv   = e.recoverMv;
+        battCfgIsCustom = true;
+    }
+}
+
+void saveBattCfg(float divider, uint16_t lowMv, uint16_t recoverMv) {
+    BattCfgEEPROM e = { EEPROM_BATTCFG_MAGIC, divider, lowMv, recoverMv };
+    EEPROM.put(EEPROM_BATTCFG_ADDR, e);
+    EEPROM.commit();
+    battDivider     = divider;
+    battLowMv       = lowMv;
+    battRecoverMv   = recoverMv;
+    battCfgIsCustom = true;
+}
+
+void resetBattCfg() {
+    BattCfgEEPROM e = { 0, 0.0f, 0, 0 };
+    EEPROM.put(EEPROM_BATTCFG_ADDR, e);
+    EEPROM.commit();
+    battDivider     = BAT_DIVIDER;
+    battLowMv       = BAT_LOW_MV;
+    battRecoverMv   = BAT_RECOVER_MV;
+    battCfgIsCustom = false;
+}
+
+// Returns battery voltage in millivolts, or -1 if no battery monitoring.
+// Pulses ADC_CTRL to its ACTIVE level (HIGH or LOW per board), takes 8
+// averaged samples via ESP32's calibrated reading, then returns to IDLE.
+// Polarity is set by ADC_CTRL_ACTIVE in Pins.h (default HIGH for V3/V4
+// N-channel low-side switch; set LOW for P-channel high-side designs).
+int readBatteryMv() {
+  #ifdef ADC_CTRL
+    digitalWrite(ADC_CTRL, ADC_CTRL_ACTIVE);   // Enable divider
+    delayMicroseconds(100);                    // Settling time
+  #endif
+    uint32_t sum = 0;
+    for (int i = 0; i < 8; i++) sum += analogReadMilliVolts(BOARD_BAT_ADC);
+  #ifdef ADC_CTRL
+    digitalWrite(ADC_CTRL, ADC_CTRL_IDLE);     // Idle: divider off, no quiescent draw
+  #endif
+    int dividerMv = sum / 8;
+    return (int)(dividerMv * battDivider);
+}
+
+void enterLowBatteryShutdown(int mv) {
+    Serial.printf("\n!!! BATTERY LOW (%dmV < %dmV) — entering deep sleep for %ds\n",
+                  mv, (int)battLowMv, (int)BATT_SLEEP_INTERVAL_S);
+    Serial.flush();
+    delay(500);                        // Make sure UART drains before sleep
+    EEPROM.commit();                   // Persist any pending state
+
+    if (oledAvailable) {
+        oled.clearDisplay();
+        oled.setTextSize(2); oled.setTextColor(SSD1306_WHITE);
+        oled.setCursor(0, 0); oled.println("LOW BATT");
+        oled.setTextSize(1);
+        oled.setCursor(0, 24);
+        oled.printf("%dmV (cut %d)\n", mv, (int)battLowMv);
+        oled.println("Sleeping until");
+        oled.printf("%dmV recovery\n", (int)battRecoverMv);
+        oled.display();
+        delay(2000);
+        oled.clearDisplay(); oled.display();
+    }
+
+  #ifdef VEXT_CTRL
+    digitalWrite(VEXT_CTRL, HIGH);   // OLED OFF (active-low)
+  #endif
+  #if defined(RADIO_FEM_EN)
+    digitalWrite(RADIO_FEM_EN, LOW); // Cut FEM power on V4
+  #endif
+    radio.sleep(false);              // SX1262 cold sleep, lowest current
+
+    rtcLowBattFlag = RTC_LOW_BATT_MAGIC;  // Tell setup() on wake that we slept due to low batt
+    esp_sleep_enable_timer_wakeup((uint64_t)BATT_SLEEP_INTERVAL_S * 1000000ULL);
+    esp_deep_sleep_start();
+    // Deep sleep does not return — wake = full reboot, setup() runs again.
+}
+
+void checkBatteryAndShutdown() {
+    // Grace period: never auto-shutdown for the first BATT_BOOT_GRACE_MS after
+    // boot. Gives the operator time to BATT_DEBUG / BATT_CFG / SOLAR OFF over
+    // serial without the chip resetting under their fingers.
+    if (millis() < BATT_BOOT_GRACE_MS) return;
+
+    static uint32_t lastCheck = 0;
+    uint32_t now = millis();
+    if (now - lastCheck < BATT_CHECK_INTERVAL_MS) return;
+    lastCheck = now;
+    int mv = readBatteryMv();
+    if (mv < BATT_NO_BATTERY_MV) return;   // No battery / USB — skip
+    if (mv < (int)battLowMv) enterLowBatteryShutdown(mv);
+}
+
+#else   // No battery monitoring on this board
+inline int  readBatteryMv()             { return -1; }
+inline void checkBatteryAndShutdown()   { }
+inline void loadBattCfg()               { }
+inline void resetBattCfg()              { }
+#endif
+
+// ═══════════════════════════════════════════════════════════════
 // SECTION: Solar Mode (SX1262 boards only)
 // ═══════════════════════════════════════════════════════════════
 #if defined(RADIO_SX1262)
@@ -992,6 +1168,15 @@ void solarCheckButton() {
             oled.print("Up:");
             if (up > 3600) { oled.print(up / 3600); oled.print("h"); }
             oled.print((up % 3600) / 60); oled.print("m");
+#if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
+            {
+                int mv = readBatteryMv();
+                if (mv >= BATT_NO_BATTERY_MV) {
+                    oled.print(" "); oled.print(mv/1000); oled.print(".");
+                    oled.print((mv/100)%10); oled.print("V");
+                }
+            }
+#endif
             oled.display();
         }
     }
@@ -1904,6 +2089,18 @@ void handleNodeDiscovered(const String& id, int rssi) {
     bleSend("NODE," + id + "," + String(rssi) + ",1,0,1," + id);
 }
 
+// Heartbeat-with-extras callback. When we're acting as gateway, forward each
+// incoming node's reported telemetry (board code, flags, battery mV) to the
+// GUI over serial as a "BATT,<id>,<mv>" line. Battery is omitted when the
+// remote node doesn't report one (-1 sentinel).
+void handleHeartbeatExtra(const String& from, int rssi,
+                          const String& boardCode, const String& flags,
+                          int batteryMv) {
+    if (gatewayMode && batteryMv >= 0) {
+        bleSend("BATT," + from + "," + String(batteryMv));
+    }
+}
+
 // ID conflict handler — another node is using our ID
 void handleIdConflict(const String& id, int rssi) {
     debugPrint("!! ID CONFLICT: " + id + " RSSI=" + String(rssi));
@@ -2456,6 +2653,18 @@ void handleSerialConfig() {
         Serial.println("Heap:     " + String(ESP.getFreeHeap()));
         Serial.println("Gateway:  " + String(gatewayMode ? "ON" : "OFF"));
         Serial.println("Solar:    " + String(solarMode ? "ON" : "OFF"));
+#if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
+        {
+            int mv = readBatteryMv();
+            if (mv < BATT_NO_BATTERY_MV) {
+                Serial.println("Battery:  USB (no batt detected)");
+            } else {
+                Serial.printf("Battery:  %dmV  (cut %d / wake %d, %s)\n",
+                              mv, (int)battLowMv, (int)battRecoverMv,
+                              battCfgIsCustom ? "custom" : "default");
+            }
+        }
+#endif
 #if IO_EXPAND_TX >= 0
         Serial.println("Expand:   " + String(ioExpandEnabled ? "ON" : "OFF"));
 #endif
@@ -2475,6 +2684,118 @@ void handleSerialConfig() {
         Serial.println(pins);
     }
     else if (line == "SAVE") { saveConfig(); Serial.println("OK: Saved"); }
+    else if (line == "BATT") {
+#if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
+        int mv = readBatteryMv();
+        if (mv < BATT_NO_BATTERY_MV) {
+            Serial.println("BATT,USB,no battery detected");
+        } else {
+            Serial.printf("BATT,%d,cut=%d,wake=%d\n",
+                          mv, (int)battLowMv, (int)battRecoverMv);
+        }
+#else
+        Serial.println("BATT,N/A,no monitoring on this board");
+#endif
+    }
+    else if (line == "BATT_CFG") {
+#if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
+        Serial.printf("BATT_CFG,div=%.3f,low=%d,recover=%d,source=%s\n",
+                      battDivider, (int)battLowMv, (int)battRecoverMv,
+                      battCfgIsCustom ? "EEPROM" : "default");
+        Serial.printf("Defaults (Pins.h): div=%.3f, low=%d, recover=%d\n",
+                      (float)BAT_DIVIDER, (int)BAT_LOW_MV, (int)BAT_RECOVER_MV);
+        Serial.println("Set: BATT_CFG <divider> <low_mv> <recover_mv>");
+        Serial.println("Reset to defaults: BATT_CFG_RESET");
+#else
+        Serial.println("BATT_CFG,N/A,no battery monitoring on this board");
+#endif
+    }
+    else if (line.startsWith("BATT_CFG ")) {
+#if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
+        float d = 0.0f;
+        int low = 0, rec = 0;
+        if (sscanf(line.c_str(), "BATT_CFG %f %d %d", &d, &low, &rec) != 3) {
+            Serial.println("ERR: usage: BATT_CFG <divider> <low_mv> <recover_mv>");
+        } else if (d < 0.5f || d > 50.0f) {
+            Serial.println("ERR: divider out of range (0.5–50)");
+        } else if (low < 1000 || low > 60000) {
+            Serial.println("ERR: low_mv out of range (1000–60000)");
+        } else if (rec <= low || rec > 60000) {
+            Serial.println("ERR: recover_mv must be > low_mv and <= 60000");
+        } else {
+            saveBattCfg(d, (uint16_t)low, (uint16_t)rec);
+            Serial.printf("OK: BATT_CFG saved (div=%.3f low=%d recover=%d)\n",
+                          d, low, rec);
+            int mv = readBatteryMv();
+            if (mv >= BATT_NO_BATTERY_MV) Serial.printf("Current VBAT: %dmV\n", mv);
+        }
+#else
+        Serial.println("ERR: no battery monitoring on this board");
+#endif
+    }
+    else if (line == "BATT_CFG_RESET") {
+#if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
+        resetBattCfg();
+        Serial.printf("OK: reset to Pins.h defaults (div=%.3f low=%d recover=%d)\n",
+                      battDivider, (int)battLowMv, (int)battRecoverMv);
+#else
+        Serial.println("ERR: no battery monitoring on this board");
+#endif
+    }
+    else if (line == "BATT_DEBUG") {
+#if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
+        Serial.printf("BATT_DEBUG: ADC pin=GPIO%d", (int)BOARD_BAT_ADC);
+  #ifdef ADC_CTRL
+        const char* actStr = (ADC_CTRL_ACTIVE == HIGH) ? "HIGH" : "LOW";
+        const char* idlStr = (ADC_CTRL_IDLE   == HIGH) ? "HIGH" : "LOW";
+        Serial.printf(", ADC_CTRL=GPIO%d (active-%s)\n", (int)ADC_CTRL, actStr);
+        // 1) Read with divider IDLE — should be ~0 mV
+        digitalWrite(ADC_CTRL, ADC_CTRL_IDLE);
+        delay(2);
+        int idleMv = analogReadMilliVolts(BOARD_BAT_ADC);
+        Serial.printf("  ADC_CTRL idle %-4s:           %d mV at pin\n", idlStr, idleMv);
+
+        // 2) Pulse active, short settle (current code uses 100µs)
+        digitalWrite(ADC_CTRL, ADC_CTRL_ACTIVE); delayMicroseconds(100);
+        int short100us = analogReadMilliVolts(BOARD_BAT_ADC);
+        digitalWrite(ADC_CTRL, ADC_CTRL_IDLE);
+        Serial.printf("  ADC_CTRL %-4s, 100µs delay:  %d mV at pin → VBAT~%d mV\n",
+                      actStr, short100us, (int)(short100us * battDivider));
+
+        // 3) Pulse active, longer settle (1ms — for filter caps)
+        digitalWrite(ADC_CTRL, ADC_CTRL_ACTIVE); delay(1);
+        int s1ms = analogReadMilliVolts(BOARD_BAT_ADC);
+        digitalWrite(ADC_CTRL, ADC_CTRL_IDLE);
+        Serial.printf("  ADC_CTRL %-4s,   1ms delay:  %d mV at pin → VBAT~%d mV\n",
+                      actStr, s1ms, (int)(s1ms * battDivider));
+
+        // 4) Pulse active, much longer (10ms — definitely settled)
+        digitalWrite(ADC_CTRL, ADC_CTRL_ACTIVE); delay(10);
+        int s10ms = analogReadMilliVolts(BOARD_BAT_ADC);
+        digitalWrite(ADC_CTRL, ADC_CTRL_IDLE);
+        Serial.printf("  ADC_CTRL %-4s,  10ms delay:  %d mV at pin → VBAT~%d mV\n",
+                      actStr, s10ms, (int)(s10ms * battDivider));
+
+        // 5) Held active, 8 averaged samples (what readBatteryMv actually does)
+        digitalWrite(ADC_CTRL, ADC_CTRL_ACTIVE); delay(10);
+        uint32_t sum = 0;
+        for (int i = 0; i < 8; i++) sum += analogReadMilliVolts(BOARD_BAT_ADC);
+        digitalWrite(ADC_CTRL, ADC_CTRL_IDLE);
+        int avg = sum / 8;
+        Serial.printf("  ADC_CTRL %-4s, 10ms+8x avg: %d mV at pin → VBAT~%d mV\n",
+                      actStr, avg, (int)(avg * battDivider));
+  #else
+        Serial.println(", ADC_CTRL=none (always-on divider)");
+        int rawMv = analogReadMilliVolts(BOARD_BAT_ADC);
+        Serial.printf("  read: %d mV at pin → VBAT~%d mV\n",
+                      rawMv, (int)(rawMv * battDivider));
+  #endif
+        Serial.printf("  divider=%.3f  cut=%d  recover=%d\n",
+                      battDivider, (int)battLowMv, (int)battRecoverMv);
+#else
+        Serial.println("BATT_DEBUG: no battery monitoring on this board");
+#endif
+    }
     else if (line == "RESET") {
         strncpy(mesh.localID, "0010", NODE_ID_LEN + 1);
         // Generate random AES key
@@ -3042,6 +3363,19 @@ void updateOLED() {
     oled.setTextColor(SSD1306_WHITE);
     oled.setCursor(0, 0);
     oled.print("MESH RPT "); oled.print(mesh.localID);
+#if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
+    {
+        // Top-right corner: battery in volts (e.g. "4.0V") or "USB" if no batt
+        int mv = readBatteryMv();
+        char buf[8];
+        if (mv < BATT_NO_BATTERY_MV) snprintf(buf, sizeof(buf), "USB");
+        else                          snprintf(buf, sizeof(buf), "%d.%dV", mv/1000, (mv/100)%10);
+        // Right-align by computing pixel width: 6px per char at size=1
+        int w = (int)strlen(buf) * 6;
+        oled.setCursor(OLED_W - w, 0);
+        oled.print(buf);
+    }
+#endif
     oled.drawLine(0, 10, OLED_W, 10, SSD1306_WHITE);
 
     oled.setCursor(0, 14);
@@ -3106,13 +3440,40 @@ void setup() {
     pinMode(VEXT_CTRL, OUTPUT); digitalWrite(VEXT_CTRL, LOW);
 #endif
 #ifdef ADC_CTRL
-    pinMode(ADC_CTRL, OUTPUT); digitalWrite(ADC_CTRL, HIGH);  // Enable battery voltage divider
+    // Idle = divider disconnected (saves ~9µA quiescent on V3/V4).
+    // readBatteryMv() pulses ADC_CTRL_ACTIVE only when actively measuring.
+    pinMode(ADC_CTRL, OUTPUT); digitalWrite(ADC_CTRL, ADC_CTRL_IDLE);
 #endif
 #if defined(BOARD_BUTTON) && BOARD_BUTTON >= 0
     pinMode(BOARD_BUTTON, INPUT_PULLUP);
 #endif
 
+    // EEPROM up early so the battery check honours any runtime override.
     EEPROM.begin(EEPROM_SIZE);
+    loadBattCfg();
+
+    // ─── Early low-battery recovery check ──────────────────────
+    // Only runs if we just woke from a low-battery deep sleep (RTC flag
+    // set by enterLowBatteryShutdown). Fresh power-on or reset — skip
+    // entirely so a bogus reading on first boot can't strand the device
+    // in a sleep loop. Operator always gets a full boot to debug.
+#if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
+    if (rtcLowBattFlag == RTC_LOW_BATT_MAGIC) {
+        int bootMv = readBatteryMv();
+        Serial.printf("Wake from low-batt sleep: VBAT=%dmV (need %dmV to resume)\n",
+                      bootMv, (int)battRecoverMv);
+        Serial.flush();
+        if (bootMv >= BATT_NO_BATTERY_MV && bootMv < (int)battRecoverMv) {
+            // Still below recovery threshold — sleep again
+            delay(500);
+            esp_sleep_enable_timer_wakeup((uint64_t)BATT_SLEEP_INTERVAL_S * 1000000ULL);
+            esp_deep_sleep_start();
+        }
+        // Recovered — clear flag, proceed with full boot
+        rtcLowBattFlag = 0;
+    }
+#endif
+
     loadConfig();
     loadBeaconRules();
 
@@ -3122,6 +3483,7 @@ void setup() {
     mesh.onMessage = handleMessage;
     mesh.onCmd = handleCmd;
     mesh.onNodeDiscovered = handleNodeDiscovered;
+    mesh.onHeartbeatExtra = handleHeartbeatExtra;
     mesh.onAck = handleAck;
 
     // Set board code for heartbeat identification
@@ -3135,6 +3497,8 @@ void setup() {
     strncpy(mesh.boardCode, "XS3", 4);
 #elif defined(BOARD_HELTEC_V2)
     strncpy(mesh.boardCode, "V2", 3);
+#elif defined(BOARD_TIGGYOPENMESH_V1)
+    strncpy(mesh.boardCode, "TM1", 4);
 #endif
     mesh.onCfg = handleCfg;
     mesh.onCfgAck = handleCfgAck;
@@ -3283,6 +3647,7 @@ void setup() {
     Serial.println("Commands: ID xxxx | KEY xxx... | Example : RELAY 2,4,12 | SENSOR 34,36 | GPS <tx>,<rx> | GPS OFF");
     Serial.println("          STATUS | SAVE | RESET | GATEWAY ON/OFF | AUTOPOLL <id> <sec>");
     Serial.println("          PINMODE <pin> PULSE|AUTO | BLEPIN,<6digits> | EEPROM,RESET | REBOOT");
+    Serial.println("          BATT | BATT_CFG | BATT_CFG <div> <low_mv> <rec_mv> | BATT_CFG_RESET");
     debugPrint("Free heap: " + String(ESP.getFreeHeap()));
 }
 
@@ -3323,6 +3688,9 @@ void loop() {
         broadcastGPS();
         executeAutoPoll();
 
+        // Battery: shutdown to deep-sleep if below cutoff
+        checkBatteryAndShutdown();
+
         // BLE + Serial commands — app can toggle solar mode off via BLE
         processBleQueue();
         handleSerialConfig();
@@ -3332,6 +3700,11 @@ void loop() {
         if (!mesh.rxFlag && !Serial.available()) {
             solarLightSleep();
         }
+
+        // Feed the hardware watchdog (30s timer that calls ESP.restart() on
+        // timeout). The normal-loop branch feeds it at the bottom of loop(),
+        // but solar mode returns early — without this it resets every 30s.
+        timerWrite(swWdt, 0);
         return;
     }
 #endif
@@ -3381,6 +3754,9 @@ void loop() {
 
     // 5. Serial config (non-blocking)
     handleSerialConfig();
+
+    // 5b. Battery: shutdown to deep-sleep if below cutoff
+    checkBatteryAndShutdown();
 
     // 6. OLED refresh + periodic reinit (recovers from I2C glitches)
 #if HAS_OLED
