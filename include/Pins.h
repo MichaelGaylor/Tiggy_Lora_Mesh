@@ -25,6 +25,10 @@
 // RADIO_CURRENT_LIMIT  - PA over-current protection in mA (default 140 for SX1262)
 // RADIO_FEM_EN         - Front-end module enable pin (GC1109 on Heltec V4, HIGH = on)
 // RADIO_FEM_TXEN       - Front-end TX enable pin (HIGH = TX/PA, LOW = RX/LNA)
+// ADC_CTRL             - GPIO that gates the battery voltage divider (optional)
+// ADC_CTRL_ACTIVE      - HIGH or LOW: which level enables the divider.
+//                        N-channel low-side switch (V3/V4) → HIGH (default)
+//                        P-channel high-side switch       → LOW
 
 // ═══════════════════════════════════════════════════════════════
 #if defined(BOARD_TDECK_PLUS)
@@ -245,8 +249,12 @@
 // Heltec V3 uses an N-channel low-side switch on the divider, so HIGH
 // turns it on. (Some V3 docs claim active-low — verified empirically
 // via BATT_DEBUG that this batch is active-high.)
+// If you have a V3 batch with a P-channel high-side switch, set
+//   #define ADC_CTRL_ACTIVE  LOW
+// here to flip the polarity.
 #define BOARD_BAT_ADC       1
-#define ADC_CTRL            37    // HIGH = enable battery voltage divider
+#define ADC_CTRL            37    // gate pin
+#define ADC_CTRL_ACTIVE     HIGH  // HIGH = enable divider on this board
 #define BAT_DIVIDER         4.9f  // 100k/(390k+100k) = 0.2041 → mul by 4.9
 #define BAT_LOW_MV          3300  // Cutoff: shut down to protect LiPo
 #define BAT_RECOVER_MV      3700  // Hysteresis: must reach this to wake up
@@ -290,7 +298,8 @@
 // Power
 #define BOARD_POWERON       -1
 #define VEXT_CTRL           36    // Vext power for OLED (LOW = on)
-#define ADC_CTRL            37    // HIGH = enable battery voltage divider (same as V3)
+#define ADC_CTRL            37    // gate pin for battery divider
+#define ADC_CTRL_ACTIVE     HIGH  // HIGH = enable divider (same as V3)
 
 // SPI for LoRa (same bus as V3)
 #define BOARD_SPI_MOSI      10
@@ -706,9 +715,10 @@
 // All four below are runtime-overridable via the BATT_CFG serial command,
 // so wrong compile-time values can be tuned in the field without re-flash.
 //
-// Example: 3S LiPo on GPIO 4, gated by GPIO 5 ──────────────────
+// Example: 3S LiPo on GPIO 4, gated by GPIO 5 (N-channel low-side) ─
 // #define BOARD_BAT_ADC    4
 // #define ADC_CTRL         5
+// #define ADC_CTRL_ACTIVE  HIGH    // or LOW for P-channel high-side
 // #define BAT_DIVIDER      5.7f
 // #define BAT_LOW_MV       9300    // 3 × 3.1V
 // #define BAT_RECOVER_MV   11100   // 3 × 3.7V

@@ -937,6 +937,16 @@ void receiveCheck() {
 RTC_DATA_ATTR uint32_t rtcLowBattFlag = 0;
 #define RTC_LOW_BATT_MAGIC  0xBADBA77Eu
 
+// ADC_CTRL polarity. Default to HIGH (N-channel low-side switch, V3/V4).
+// Boards with a P-channel high-side switch should #define ADC_CTRL_ACTIVE LOW
+// in their Pins.h block.
+#ifdef ADC_CTRL
+  #ifndef ADC_CTRL_ACTIVE
+    #define ADC_CTRL_ACTIVE HIGH
+  #endif
+  #define ADC_CTRL_IDLE  ((ADC_CTRL_ACTIVE) == HIGH ? LOW : HIGH)
+#endif
+
 // Runtime values — start at compile-time defaults, overridden from EEPROM.
 float    battDivider     = BAT_DIVIDER;
 uint16_t battLowMv       = BAT_LOW_MV;
@@ -986,19 +996,19 @@ void resetBattCfg() {
 }
 
 // Returns battery voltage in millivolts, or -1 if no battery monitoring.
-// Pulses ADC_CTRL HIGH to enable the divider (if defined), takes 8
-// averaged samples via ESP32's calibrated reading, then idles LOW again.
-// Heltec V3/V4 use an N-channel low-side switch on the divider — verified
-// empirically via BATT_DEBUG that HIGH connects the divider to GND.
+// Pulses ADC_CTRL to its ACTIVE level (HIGH or LOW per board), takes 8
+// averaged samples via ESP32's calibrated reading, then returns to IDLE.
+// Polarity is set by ADC_CTRL_ACTIVE in Pins.h (default HIGH for V3/V4
+// N-channel low-side switch; set LOW for P-channel high-side designs).
 int readBatteryMv() {
   #ifdef ADC_CTRL
-    digitalWrite(ADC_CTRL, HIGH);    // Enable divider
-    delayMicroseconds(100);          // Settling time
+    digitalWrite(ADC_CTRL, ADC_CTRL_ACTIVE);   // Enable divider
+    delayMicroseconds(100);                    // Settling time
   #endif
     uint32_t sum = 0;
     for (int i = 0; i < 8; i++) sum += analogReadMilliVolts(BOARD_BAT_ADC);
   #ifdef ADC_CTRL
-    digitalWrite(ADC_CTRL, LOW);     // Idle: divider off, no quiescent draw
+    digitalWrite(ADC_CTRL, ADC_CTRL_IDLE);     // Idle: divider off, no quiescent draw
   #endif
     int dividerMv = sum / 8;
     return (int)(dividerMv * battDivider);
@@ -2709,42 +2719,44 @@ void handleSerialConfig() {
 #if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
         Serial.printf("BATT_DEBUG: ADC pin=GPIO%d", (int)BOARD_BAT_ADC);
   #ifdef ADC_CTRL
-        Serial.printf(", ADC_CTRL=GPIO%d (active-HIGH)\n", (int)ADC_CTRL);
-        // 1) Read with divider IDLE (ADC_CTRL low) — should be ~0 mV
-        digitalWrite(ADC_CTRL, LOW);
+        const char* actStr = (ADC_CTRL_ACTIVE == HIGH) ? "HIGH" : "LOW";
+        const char* idlStr = (ADC_CTRL_IDLE   == HIGH) ? "HIGH" : "LOW";
+        Serial.printf(", ADC_CTRL=GPIO%d (active-%s)\n", (int)ADC_CTRL, actStr);
+        // 1) Read with divider IDLE — should be ~0 mV
+        digitalWrite(ADC_CTRL, ADC_CTRL_IDLE);
         delay(2);
         int idleMv = analogReadMilliVolts(BOARD_BAT_ADC);
-        Serial.printf("  ADC_CTRL idle LOW:          %d mV at pin\n", idleMv);
+        Serial.printf("  ADC_CTRL idle %-4s:           %d mV at pin\n", idlStr, idleMv);
 
-        // 2) Pulse high, short settle (current code uses 100µs)
-        digitalWrite(ADC_CTRL, HIGH); delayMicroseconds(100);
+        // 2) Pulse active, short settle (current code uses 100µs)
+        digitalWrite(ADC_CTRL, ADC_CTRL_ACTIVE); delayMicroseconds(100);
         int short100us = analogReadMilliVolts(BOARD_BAT_ADC);
-        digitalWrite(ADC_CTRL, LOW);
-        Serial.printf("  ADC_CTRL high, 100µs delay: %d mV at pin → VBAT~%d mV\n",
-                      short100us, (int)(short100us * battDivider));
+        digitalWrite(ADC_CTRL, ADC_CTRL_IDLE);
+        Serial.printf("  ADC_CTRL %-4s, 100µs delay:  %d mV at pin → VBAT~%d mV\n",
+                      actStr, short100us, (int)(short100us * battDivider));
 
-        // 3) Pulse high, longer settle (1ms — for filter caps)
-        digitalWrite(ADC_CTRL, HIGH); delay(1);
+        // 3) Pulse active, longer settle (1ms — for filter caps)
+        digitalWrite(ADC_CTRL, ADC_CTRL_ACTIVE); delay(1);
         int s1ms = analogReadMilliVolts(BOARD_BAT_ADC);
-        digitalWrite(ADC_CTRL, LOW);
-        Serial.printf("  ADC_CTRL high,   1ms delay: %d mV at pin → VBAT~%d mV\n",
-                      s1ms, (int)(s1ms * battDivider));
+        digitalWrite(ADC_CTRL, ADC_CTRL_IDLE);
+        Serial.printf("  ADC_CTRL %-4s,   1ms delay:  %d mV at pin → VBAT~%d mV\n",
+                      actStr, s1ms, (int)(s1ms * battDivider));
 
-        // 4) Pulse high, much longer (10ms — definitely settled)
-        digitalWrite(ADC_CTRL, HIGH); delay(10);
+        // 4) Pulse active, much longer (10ms — definitely settled)
+        digitalWrite(ADC_CTRL, ADC_CTRL_ACTIVE); delay(10);
         int s10ms = analogReadMilliVolts(BOARD_BAT_ADC);
-        digitalWrite(ADC_CTRL, LOW);
-        Serial.printf("  ADC_CTRL high,  10ms delay: %d mV at pin → VBAT~%d mV\n",
-                      s10ms, (int)(s10ms * battDivider));
+        digitalWrite(ADC_CTRL, ADC_CTRL_IDLE);
+        Serial.printf("  ADC_CTRL %-4s,  10ms delay:  %d mV at pin → VBAT~%d mV\n",
+                      actStr, s10ms, (int)(s10ms * battDivider));
 
-        // 5) Held high, 8 averaged samples (what readBatteryMv actually does)
-        digitalWrite(ADC_CTRL, HIGH); delay(10);
+        // 5) Held active, 8 averaged samples (what readBatteryMv actually does)
+        digitalWrite(ADC_CTRL, ADC_CTRL_ACTIVE); delay(10);
         uint32_t sum = 0;
         for (int i = 0; i < 8; i++) sum += analogReadMilliVolts(BOARD_BAT_ADC);
-        digitalWrite(ADC_CTRL, LOW);
+        digitalWrite(ADC_CTRL, ADC_CTRL_IDLE);
         int avg = sum / 8;
-        Serial.printf("  ADC_CTRL high, 10ms+8x avg: %d mV at pin → VBAT~%d mV\n",
-                      avg, (int)(avg * battDivider));
+        Serial.printf("  ADC_CTRL %-4s, 10ms+8x avg: %d mV at pin → VBAT~%d mV\n",
+                      actStr, avg, (int)(avg * battDivider));
   #else
         Serial.println(", ADC_CTRL=none (always-on divider)");
         int rawMv = analogReadMilliVolts(BOARD_BAT_ADC);
@@ -3401,9 +3413,9 @@ void setup() {
     pinMode(VEXT_CTRL, OUTPUT); digitalWrite(VEXT_CTRL, LOW);
 #endif
 #ifdef ADC_CTRL
-    // Idle LOW = divider disconnected (saves ~9µA quiescent on V3/V4).
-    // readBatteryMv() pulses HIGH only when actively measuring.
-    pinMode(ADC_CTRL, OUTPUT); digitalWrite(ADC_CTRL, LOW);
+    // Idle = divider disconnected (saves ~9µA quiescent on V3/V4).
+    // readBatteryMv() pulses ADC_CTRL_ACTIVE only when actively measuring.
+    pinMode(ADC_CTRL, OUTPUT); digitalWrite(ADC_CTRL, ADC_CTRL_IDLE);
 #endif
 #if defined(BOARD_BUTTON) && BOARD_BUTTON >= 0
     pinMode(BOARD_BUTTON, INPUT_PULLUP);
