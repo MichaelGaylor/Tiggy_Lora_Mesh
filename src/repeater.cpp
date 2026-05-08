@@ -473,6 +473,13 @@ void sendHeartbeatWithFlags() {
     // heartbeat builder.
     mesh.batteryMv = (int16_t)readBatteryMv();
     mesh.sendHeartbeat();
+
+    // In gateway mode, publish our own battery to serial — remote nodes
+    // hear our heartbeats over LoRa, but we don't hear our own, so the GUI
+    // would never see the local node's battery without this.
+    if (gatewayMode && mesh.batteryMv >= 0) {
+        bleSend("BATT," + String(mesh.localID) + "," + String((int)mesh.batteryMv));
+    }
 }
 
 // ─── IO Expansion Board (UART2) ─────────────────────────────
