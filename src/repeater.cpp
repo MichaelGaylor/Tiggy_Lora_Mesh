@@ -915,6 +915,138 @@ void receiveCheck() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// SECTION: Battery monitor — V3/V4 reference impl, plus runtime
+//          override via EEPROM (BATT_CFG serial command).
+//
+// Compile-time defaults come from Pins.h (BAT_DIVIDER, BAT_LOW_MV,
+// BAT_RECOVER_MV). At boot we load any EEPROM override on top.
+// Custom boards: define those four in Pins.h and the rest works.
+// Must be defined BEFORE solarCheckButton/handleSerialConfig/updateOLED
+// since they all call readBatteryMv().
+// ═══════════════════════════════════════════════════════════════
+#if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
+
+// Treat readings below this as "no battery / USB only" — never auto-shutdown.
+#define BATT_NO_BATTERY_MV     500
+#define BATT_CHECK_INTERVAL_MS 60000UL   // Re-check while running every 60s
+#define BATT_SLEEP_INTERVAL_S  300       // Deep-sleep 5min between recovery polls
+
+// Runtime values — start at compile-time defaults, overridden from EEPROM.
+float    battDivider     = BAT_DIVIDER;
+uint16_t battLowMv       = BAT_LOW_MV;
+uint16_t battRecoverMv   = BAT_RECOVER_MV;
+bool     battCfgIsCustom = false;
+
+struct __attribute__((packed)) BattCfgEEPROM {
+    uint16_t magic;
+    float    divider;
+    uint16_t lowMv;
+    uint16_t recoverMv;
+};
+
+void loadBattCfg() {
+    BattCfgEEPROM e;
+    EEPROM.get(EEPROM_BATTCFG_ADDR, e);
+    // Validate: magic + sane ranges. Reject NaN/inf via simple bounds.
+    if (e.magic == EEPROM_BATTCFG_MAGIC
+        && e.divider >= 0.5f && e.divider <= 50.0f
+        && e.lowMv >= 1000 && e.lowMv <= 60000
+        && e.recoverMv > e.lowMv && e.recoverMv <= 60000) {
+        battDivider     = e.divider;
+        battLowMv       = e.lowMv;
+        battRecoverMv   = e.recoverMv;
+        battCfgIsCustom = true;
+    }
+}
+
+void saveBattCfg(float divider, uint16_t lowMv, uint16_t recoverMv) {
+    BattCfgEEPROM e = { EEPROM_BATTCFG_MAGIC, divider, lowMv, recoverMv };
+    EEPROM.put(EEPROM_BATTCFG_ADDR, e);
+    EEPROM.commit();
+    battDivider     = divider;
+    battLowMv       = lowMv;
+    battRecoverMv   = recoverMv;
+    battCfgIsCustom = true;
+}
+
+void resetBattCfg() {
+    BattCfgEEPROM e = { 0, 0.0f, 0, 0 };
+    EEPROM.put(EEPROM_BATTCFG_ADDR, e);
+    EEPROM.commit();
+    battDivider     = BAT_DIVIDER;
+    battLowMv       = BAT_LOW_MV;
+    battRecoverMv   = BAT_RECOVER_MV;
+    battCfgIsCustom = false;
+}
+
+// Returns battery voltage in millivolts, or -1 if no battery monitoring.
+// Pulses ADC_CTRL low to enable the divider (if defined), takes 8
+// averaged samples via ESP32's calibrated reading, then idles HIGH again.
+int readBatteryMv() {
+  #ifdef ADC_CTRL
+    digitalWrite(ADC_CTRL, LOW);     // Enable divider
+    delayMicroseconds(100);          // Settling time
+  #endif
+    uint32_t sum = 0;
+    for (int i = 0; i < 8; i++) sum += analogReadMilliVolts(BOARD_BAT_ADC);
+  #ifdef ADC_CTRL
+    digitalWrite(ADC_CTRL, HIGH);    // Idle: divider off, no quiescent draw
+  #endif
+    int dividerMv = sum / 8;
+    return (int)(dividerMv * battDivider);
+}
+
+void enterLowBatteryShutdown(int mv) {
+    Serial.printf("\n!!! BATTERY LOW (%dmV < %dmV) — entering deep sleep\n",
+                  mv, (int)battLowMv);
+    Serial.flush();
+    EEPROM.commit();   // Persist any pending state before we cut power
+
+    if (oledAvailable) {
+        oled.clearDisplay();
+        oled.setTextSize(2); oled.setTextColor(SSD1306_WHITE);
+        oled.setCursor(0, 0); oled.println("LOW BATT");
+        oled.setTextSize(1);
+        oled.setCursor(0, 24);
+        oled.printf("%dmV (cut %d)\n", mv, (int)battLowMv);
+        oled.println("Sleeping until");
+        oled.printf("%dmV recovery\n", (int)battRecoverMv);
+        oled.display();
+        delay(2000);
+        oled.clearDisplay(); oled.display();
+    }
+
+  #ifdef VEXT_CTRL
+    digitalWrite(VEXT_CTRL, HIGH);   // OLED OFF (active-low)
+  #endif
+  #if defined(RADIO_FEM_EN)
+    digitalWrite(RADIO_FEM_EN, LOW); // Cut FEM power on V4
+  #endif
+    radio.sleep(false);              // SX1262 cold sleep, lowest current
+
+    esp_sleep_enable_timer_wakeup((uint64_t)BATT_SLEEP_INTERVAL_S * 1000000ULL);
+    esp_deep_sleep_start();
+    // Deep sleep does not return — wake = full reboot, setup() runs again.
+}
+
+void checkBatteryAndShutdown() {
+    static uint32_t lastCheck = 0;
+    uint32_t now = millis();
+    if (now - lastCheck < BATT_CHECK_INTERVAL_MS) return;
+    lastCheck = now;
+    int mv = readBatteryMv();
+    if (mv < BATT_NO_BATTERY_MV) return;   // No battery / USB — skip
+    if (mv < (int)battLowMv) enterLowBatteryShutdown(mv);
+}
+
+#else   // No battery monitoring on this board
+inline int  readBatteryMv()             { return -1; }
+inline void checkBatteryAndShutdown()   { }
+inline void loadBattCfg()               { }
+inline void resetBattCfg()              { }
+#endif
+
+// ═══════════════════════════════════════════════════════════════
 // SECTION: Solar Mode (SX1262 boards only)
 // ═══════════════════════════════════════════════════════════════
 #if defined(RADIO_SX1262)
@@ -3168,136 +3300,6 @@ void updateOLED() {
 
     oled.display();
 }
-
-// ═══════════════════════════════════════════════════════════════
-// SECTION: Battery monitor — V3/V4 reference impl, plus runtime
-//          override via EEPROM (BATT_CFG serial command).
-//
-// Compile-time defaults come from Pins.h (BAT_DIVIDER, BAT_LOW_MV,
-// BAT_RECOVER_MV). At boot we load any EEPROM override on top.
-// Custom boards: define those four in Pins.h and the rest works.
-// ═══════════════════════════════════════════════════════════════
-#if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
-
-// Treat readings below this as "no battery / USB only" — never auto-shutdown.
-#define BATT_NO_BATTERY_MV     500
-#define BATT_CHECK_INTERVAL_MS 60000UL   // Re-check while running every 60s
-#define BATT_SLEEP_INTERVAL_S  300       // Deep-sleep 5min between recovery polls
-
-// Runtime values — start at compile-time defaults, overridden from EEPROM.
-float    battDivider     = BAT_DIVIDER;
-uint16_t battLowMv       = BAT_LOW_MV;
-uint16_t battRecoverMv   = BAT_RECOVER_MV;
-bool     battCfgIsCustom = false;
-
-struct __attribute__((packed)) BattCfgEEPROM {
-    uint16_t magic;
-    float    divider;
-    uint16_t lowMv;
-    uint16_t recoverMv;
-};
-
-void loadBattCfg() {
-    BattCfgEEPROM e;
-    EEPROM.get(EEPROM_BATTCFG_ADDR, e);
-    // Validate: magic + sane ranges. Reject NaN/inf via simple bounds.
-    if (e.magic == EEPROM_BATTCFG_MAGIC
-        && e.divider >= 0.5f && e.divider <= 50.0f
-        && e.lowMv >= 1000 && e.lowMv <= 60000
-        && e.recoverMv > e.lowMv && e.recoverMv <= 60000) {
-        battDivider     = e.divider;
-        battLowMv       = e.lowMv;
-        battRecoverMv   = e.recoverMv;
-        battCfgIsCustom = true;
-    }
-}
-
-void saveBattCfg(float divider, uint16_t lowMv, uint16_t recoverMv) {
-    BattCfgEEPROM e = { EEPROM_BATTCFG_MAGIC, divider, lowMv, recoverMv };
-    EEPROM.put(EEPROM_BATTCFG_ADDR, e);
-    EEPROM.commit();
-    battDivider     = divider;
-    battLowMv       = lowMv;
-    battRecoverMv   = recoverMv;
-    battCfgIsCustom = true;
-}
-
-void resetBattCfg() {
-    BattCfgEEPROM e = { 0, 0.0f, 0, 0 };
-    EEPROM.put(EEPROM_BATTCFG_ADDR, e);
-    EEPROM.commit();
-    battDivider     = BAT_DIVIDER;
-    battLowMv       = BAT_LOW_MV;
-    battRecoverMv   = BAT_RECOVER_MV;
-    battCfgIsCustom = false;
-}
-
-// Returns battery voltage in millivolts, or -1 if no battery monitoring.
-// Pulses ADC_CTRL low to enable the divider (if defined), takes 8
-// averaged samples via ESP32's calibrated reading, then idles HIGH again.
-int readBatteryMv() {
-  #ifdef ADC_CTRL
-    digitalWrite(ADC_CTRL, LOW);     // Enable divider
-    delayMicroseconds(100);          // Settling time
-  #endif
-    uint32_t sum = 0;
-    for (int i = 0; i < 8; i++) sum += analogReadMilliVolts(BOARD_BAT_ADC);
-  #ifdef ADC_CTRL
-    digitalWrite(ADC_CTRL, HIGH);    // Idle: divider off, no quiescent draw
-  #endif
-    int dividerMv = sum / 8;
-    return (int)(dividerMv * battDivider);
-}
-
-void enterLowBatteryShutdown(int mv) {
-    Serial.printf("\n!!! BATTERY LOW (%dmV < %dmV) — entering deep sleep\n",
-                  mv, (int)battLowMv);
-    Serial.flush();
-    EEPROM.commit();   // Persist any pending state before we cut power
-
-    if (oledAvailable) {
-        oled.clearDisplay();
-        oled.setTextSize(2); oled.setTextColor(SSD1306_WHITE);
-        oled.setCursor(0, 0); oled.println("LOW BATT");
-        oled.setTextSize(1);
-        oled.setCursor(0, 24);
-        oled.printf("%dmV (cut %d)\n", mv, (int)battLowMv);
-        oled.println("Sleeping until");
-        oled.printf("%dmV recovery\n", (int)battRecoverMv);
-        oled.display();
-        delay(2000);
-        oled.clearDisplay(); oled.display();
-    }
-
-  #ifdef VEXT_CTRL
-    digitalWrite(VEXT_CTRL, HIGH);   // OLED OFF (active-low)
-  #endif
-  #if defined(RADIO_FEM_EN)
-    digitalWrite(RADIO_FEM_EN, LOW); // Cut FEM power on V4
-  #endif
-    radio.sleep(false);              // SX1262 cold sleep, lowest current
-
-    esp_sleep_enable_timer_wakeup((uint64_t)BATT_SLEEP_INTERVAL_S * 1000000ULL);
-    esp_deep_sleep_start();
-    // Deep sleep does not return — wake = full reboot, setup() runs again.
-}
-
-void checkBatteryAndShutdown() {
-    static uint32_t lastCheck = 0;
-    uint32_t now = millis();
-    if (now - lastCheck < BATT_CHECK_INTERVAL_MS) return;
-    lastCheck = now;
-    int mv = readBatteryMv();
-    if (mv < BATT_NO_BATTERY_MV) return;   // No battery / USB — skip
-    if (mv < (int)battLowMv) enterLowBatteryShutdown(mv);
-}
-
-#else   // No battery monitoring on this board
-inline int  readBatteryMv()             { return -1; }
-inline void checkBatteryAndShutdown()   { }
-inline void loadBattCfg()               { }
-inline void resetBattCfg()              { }
-#endif
 
 // ═══════════════════════════════════════════════════════════════
 // SECTION: Setup & Loop
