@@ -2690,6 +2690,58 @@ void handleSerialConfig() {
         Serial.println("ERR: no battery monitoring on this board");
 #endif
     }
+    else if (line == "BATT_DEBUG") {
+#if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
+        Serial.printf("BATT_DEBUG: ADC pin=GPIO%d", (int)BOARD_BAT_ADC);
+  #ifdef ADC_CTRL
+        Serial.printf(", ADC_CTRL=GPIO%d (active-low)\n", (int)ADC_CTRL);
+        // 1) Read with divider IDLE (ADC_CTRL high) — should be ~0 mV
+        digitalWrite(ADC_CTRL, HIGH);
+        delay(2);
+        int idleMv = analogReadMilliVolts(BOARD_BAT_ADC);
+        Serial.printf("  ADC_CTRL idle HIGH:        %d mV at pin\n", idleMv);
+
+        // 2) Pulse low, short settle (current code uses 100µs)
+        digitalWrite(ADC_CTRL, LOW); delayMicroseconds(100);
+        int short100us = analogReadMilliVolts(BOARD_BAT_ADC);
+        digitalWrite(ADC_CTRL, HIGH);
+        Serial.printf("  ADC_CTRL low,  100µs delay: %d mV at pin → VBAT~%d mV\n",
+                      short100us, (int)(short100us * battDivider));
+
+        // 3) Pulse low, longer settle (1ms — for filter caps)
+        digitalWrite(ADC_CTRL, LOW); delay(1);
+        int s1ms = analogReadMilliVolts(BOARD_BAT_ADC);
+        digitalWrite(ADC_CTRL, HIGH);
+        Serial.printf("  ADC_CTRL low,    1ms delay: %d mV at pin → VBAT~%d mV\n",
+                      s1ms, (int)(s1ms * battDivider));
+
+        // 4) Pulse low, much longer (10ms — definitely settled)
+        digitalWrite(ADC_CTRL, LOW); delay(10);
+        int s10ms = analogReadMilliVolts(BOARD_BAT_ADC);
+        digitalWrite(ADC_CTRL, HIGH);
+        Serial.printf("  ADC_CTRL low,   10ms delay: %d mV at pin → VBAT~%d mV\n",
+                      s10ms, (int)(s10ms * battDivider));
+
+        // 5) Held low, 8 averaged samples (what readBatteryMv actually does)
+        digitalWrite(ADC_CTRL, LOW); delay(10);
+        uint32_t sum = 0;
+        for (int i = 0; i < 8; i++) sum += analogReadMilliVolts(BOARD_BAT_ADC);
+        digitalWrite(ADC_CTRL, HIGH);
+        int avg = sum / 8;
+        Serial.printf("  ADC_CTRL low, 10ms+8x avg: %d mV at pin → VBAT~%d mV\n",
+                      avg, (int)(avg * battDivider));
+  #else
+        Serial.println(", ADC_CTRL=none (always-on divider)");
+        int rawMv = analogReadMilliVolts(BOARD_BAT_ADC);
+        Serial.printf("  read: %d mV at pin → VBAT~%d mV\n",
+                      rawMv, (int)(rawMv * battDivider));
+  #endif
+        Serial.printf("  divider=%.3f  cut=%d  recover=%d\n",
+                      battDivider, (int)battLowMv, (int)battRecoverMv);
+#else
+        Serial.println("BATT_DEBUG: no battery monitoring on this board");
+#endif
+    }
     else if (line == "RESET") {
         strncpy(mesh.localID, "0010", NODE_ID_LEN + 1);
         // Generate random AES key
