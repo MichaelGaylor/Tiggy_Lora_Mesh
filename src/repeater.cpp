@@ -992,6 +992,15 @@ void solarCheckButton() {
             oled.print("Up:");
             if (up > 3600) { oled.print(up / 3600); oled.print("h"); }
             oled.print((up % 3600) / 60); oled.print("m");
+#if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
+            {
+                int mv = readBatteryMv();
+                if (mv >= BATT_NO_BATTERY_MV) {
+                    oled.print(" "); oled.print(mv/1000); oled.print(".");
+                    oled.print((mv/100)%10); oled.print("V");
+                }
+            }
+#endif
             oled.display();
         }
     }
@@ -2456,6 +2465,17 @@ void handleSerialConfig() {
         Serial.println("Heap:     " + String(ESP.getFreeHeap()));
         Serial.println("Gateway:  " + String(gatewayMode ? "ON" : "OFF"));
         Serial.println("Solar:    " + String(solarMode ? "ON" : "OFF"));
+#if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
+        {
+            int mv = readBatteryMv();
+            if (mv < BATT_NO_BATTERY_MV) {
+                Serial.println("Battery:  USB (no batt detected)");
+            } else {
+                Serial.printf("Battery:  %dmV  (cut %d / wake %d)\n",
+                              mv, BAT_LOW_MV, BAT_RECOVER_MV);
+            }
+        }
+#endif
 #if IO_EXPAND_TX >= 0
         Serial.println("Expand:   " + String(ioExpandEnabled ? "ON" : "OFF"));
 #endif
@@ -2475,6 +2495,18 @@ void handleSerialConfig() {
         Serial.println(pins);
     }
     else if (line == "SAVE") { saveConfig(); Serial.println("OK: Saved"); }
+    else if (line == "BATT") {
+#if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
+        int mv = readBatteryMv();
+        if (mv < BATT_NO_BATTERY_MV) {
+            Serial.println("BATT,USB,no battery detected");
+        } else {
+            Serial.printf("BATT,%d,cut=%d,wake=%d\n", mv, BAT_LOW_MV, BAT_RECOVER_MV);
+        }
+#else
+        Serial.println("BATT,N/A,no monitoring on this board");
+#endif
+    }
     else if (line == "RESET") {
         strncpy(mesh.localID, "0010", NODE_ID_LEN + 1);
         // Generate random AES key
@@ -3042,6 +3074,19 @@ void updateOLED() {
     oled.setTextColor(SSD1306_WHITE);
     oled.setCursor(0, 0);
     oled.print("MESH RPT "); oled.print(mesh.localID);
+#if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
+    {
+        // Top-right corner: battery in volts (e.g. "4.0V") or "USB" if no batt
+        int mv = readBatteryMv();
+        char buf[8];
+        if (mv < BATT_NO_BATTERY_MV) snprintf(buf, sizeof(buf), "USB");
+        else                          snprintf(buf, sizeof(buf), "%d.%dV", mv/1000, (mv/100)%10);
+        // Right-align by computing pixel width: 6px per char at size=1
+        int w = (int)strlen(buf) * 6;
+        oled.setCursor(OLED_W - w, 0);
+        oled.print(buf);
+    }
+#endif
     oled.drawLine(0, 10, OLED_W, 10, SSD1306_WHITE);
 
     oled.setCursor(0, 14);
@@ -3072,6 +3117,86 @@ void updateOLED() {
 
     oled.display();
 }
+
+// ═══════════════════════════════════════════════════════════════
+// SECTION: Battery monitor (V3 / V4 — 390k/100k divider on VBAT,
+//          gated by ADC_CTRL active-low. Other boards: no-op stubs.)
+// ═══════════════════════════════════════════════════════════════
+#if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
+
+// Returns battery voltage in millivolts, or -1 if no battery monitoring.
+// Pulses ADC_CTRL low to enable the divider, takes 8 averaged samples
+// using the ESP32's calibrated mV reading, then idles ADC_CTRL high
+// again to disconnect the divider (saves ~9µA quiescent).
+int readBatteryMv() {
+  #ifdef ADC_CTRL
+    digitalWrite(ADC_CTRL, LOW);     // Enable divider
+    delayMicroseconds(100);          // Settling time
+  #endif
+    uint32_t sum = 0;
+    for (int i = 0; i < 8; i++) sum += analogReadMilliVolts(BOARD_BAT_ADC);
+  #ifdef ADC_CTRL
+    digitalWrite(ADC_CTRL, HIGH);    // Idle: divider off, no quiescent draw
+  #endif
+    int dividerMv = sum / 8;
+    return (int)(dividerMv * BAT_DIVIDER);
+}
+
+// Treat readings below this as "no battery / USB only" — never auto-shutdown.
+// 500mV is well below any real LiPo voltage but above ADC noise floor.
+#define BATT_NO_BATTERY_MV   500
+#define BATT_CHECK_INTERVAL_MS  60000UL   // Re-check while running every 60s
+#define BATT_SLEEP_INTERVAL_S   300       // Deep-sleep 5min between recovery polls
+
+bool batteryShutdownPending = false;
+
+void enterLowBatteryShutdown(int mv) {
+    Serial.printf("\n!!! BATTERY LOW (%dmV < %dmV) — entering deep sleep\n",
+                  mv, BAT_LOW_MV);
+    Serial.flush();
+    EEPROM.commit();   // Persist any pending state before we cut power
+
+    if (oledAvailable) {
+        oled.clearDisplay();
+        oled.setTextSize(2); oled.setTextColor(SSD1306_WHITE);
+        oled.setCursor(0, 0); oled.println("LOW BATT");
+        oled.setTextSize(1);
+        oled.setCursor(0, 24);
+        oled.printf("%dmV (cut %d)\n", mv, BAT_LOW_MV);
+        oled.println("Sleeping until");
+        oled.printf("%dmV recovery\n", BAT_RECOVER_MV);
+        oled.display();
+        delay(2000);
+        oled.clearDisplay(); oled.display();
+    }
+
+  #ifdef VEXT_CTRL
+    digitalWrite(VEXT_CTRL, HIGH);   // OLED OFF (active-low)
+  #endif
+  #if defined(RADIO_FEM_EN)
+    digitalWrite(RADIO_FEM_EN, LOW); // Cut FEM power on V4
+  #endif
+    radio.sleep(false);              // SX1262 cold sleep, lowest current
+
+    esp_sleep_enable_timer_wakeup((uint64_t)BATT_SLEEP_INTERVAL_S * 1000000ULL);
+    esp_deep_sleep_start();
+    // Deep sleep does not return — wake = full reboot, setup() runs again.
+}
+
+void checkBatteryAndShutdown() {
+    static uint32_t lastCheck = 0;
+    uint32_t now = millis();
+    if (now - lastCheck < BATT_CHECK_INTERVAL_MS) return;
+    lastCheck = now;
+    int mv = readBatteryMv();
+    if (mv < BATT_NO_BATTERY_MV) return;   // No battery / USB — skip
+    if (mv < BAT_LOW_MV) enterLowBatteryShutdown(mv);
+}
+
+#else   // No battery monitoring on this board
+inline int  readBatteryMv()             { return -1; }
+inline void checkBatteryAndShutdown()   { }
+#endif
 
 // ═══════════════════════════════════════════════════════════════
 // SECTION: Setup & Loop
@@ -3106,10 +3231,29 @@ void setup() {
     pinMode(VEXT_CTRL, OUTPUT); digitalWrite(VEXT_CTRL, LOW);
 #endif
 #ifdef ADC_CTRL
-    pinMode(ADC_CTRL, OUTPUT); digitalWrite(ADC_CTRL, HIGH);  // Enable battery voltage divider
+    // Idle HIGH = divider disconnected (saves ~9µA quiescent).
+    // readBatteryMv() pulses LOW only when actively measuring.
+    pinMode(ADC_CTRL, OUTPUT); digitalWrite(ADC_CTRL, HIGH);
 #endif
 #if defined(BOARD_BUTTON) && BOARD_BUTTON >= 0
     pinMode(BOARD_BUTTON, INPUT_PULLUP);
+#endif
+
+    // ─── Early low-battery check ──────────────────────────────
+    // If we just woke from a low-batt deep sleep, abort boot and sleep
+    // again until we reach BAT_RECOVER_MV. Avoids burning energy on full
+    // radio/BLE init when we'll just shut down 30s later anyway.
+#if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
+    {
+        int bootMv = readBatteryMv();
+        if (bootMv >= BATT_NO_BATTERY_MV && bootMv < BAT_RECOVER_MV) {
+            Serial.printf("Boot batt: %dmV (recovery at %dmV) — back to sleep\n",
+                          bootMv, BAT_RECOVER_MV);
+            Serial.flush();
+            esp_sleep_enable_timer_wakeup((uint64_t)BATT_SLEEP_INTERVAL_S * 1000000ULL);
+            esp_deep_sleep_start();
+        }
+    }
 #endif
 
     EEPROM.begin(EEPROM_SIZE);
@@ -3323,6 +3467,9 @@ void loop() {
         broadcastGPS();
         executeAutoPoll();
 
+        // Battery: shutdown to deep-sleep if below cutoff
+        checkBatteryAndShutdown();
+
         // BLE + Serial commands — app can toggle solar mode off via BLE
         processBleQueue();
         handleSerialConfig();
@@ -3381,6 +3528,9 @@ void loop() {
 
     // 5. Serial config (non-blocking)
     handleSerialConfig();
+
+    // 5b. Battery: shutdown to deep-sleep if below cutoff
+    checkBatteryAndShutdown();
 
     // 6. OLED refresh + periodic reinit (recovers from I2C glitches)
 #if HAS_OLED

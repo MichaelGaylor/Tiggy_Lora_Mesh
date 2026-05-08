@@ -241,8 +241,12 @@
 // No SD Card
 #define BOARD_SDCARD_CS     -1
 
-// Battery
+// Battery (390k/100k divider on VBAT, gated by ADC_CTRL active-low)
 #define BOARD_BAT_ADC       1
+#define ADC_CTRL            37    // LOW = enable battery voltage divider
+#define BAT_DIVIDER         4.9f  // 100k/(390k+100k) = 0.2041 → mul by 4.9
+#define BAT_LOW_MV          3300  // Cutoff: shut down to protect LiPo
+#define BAT_RECOVER_MV      3700  // Hysteresis: must reach this to wake up
 
 // LED
 #define BOARD_LED           35
@@ -283,7 +287,7 @@
 // Power
 #define BOARD_POWERON       -1
 #define VEXT_CTRL           36    // Vext power for OLED (LOW = on)
-#define ADC_CTRL            37    // HIGH = enable battery voltage divider
+#define ADC_CTRL            37    // LOW = enable battery voltage divider (active-low)
 
 // SPI for LoRa (same bus as V3)
 #define BOARD_SPI_MOSI      10
@@ -323,8 +327,11 @@
 // No SD Card
 #define BOARD_SDCARD_CS     -1
 
-// Battery (must set ADC_CTRL HIGH before reading)
+// Battery (390k/100k divider on VBAT, gated by ADC_CTRL active-low)
 #define BOARD_BAT_ADC       1
+#define BAT_DIVIDER         4.9f  // 100k/(390k+100k) = 0.2041 → mul by 4.9
+#define BAT_LOW_MV          3300  // Cutoff: shut down to protect LiPo
+#define BAT_RECOVER_MV      3700  // Hysteresis: must reach this to wake up
 
 // LED
 #define BOARD_LED           35
