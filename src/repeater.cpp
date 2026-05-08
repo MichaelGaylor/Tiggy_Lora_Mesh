@@ -3672,6 +3672,11 @@ void loop() {
         if (!mesh.rxFlag && !Serial.available()) {
             solarLightSleep();
         }
+
+        // Feed the hardware watchdog (30s timer that calls ESP.restart() on
+        // timeout). The normal-loop branch feeds it at the bottom of loop(),
+        // but solar mode returns early — without this it resets every 30s.
+        timerWrite(swWdt, 0);
         return;
     }
 #endif
