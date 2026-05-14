@@ -907,6 +907,15 @@ void receiveCheck() {
     radioStartListening();
     if (state != RADIOLIB_ERR_NONE) return;
 
+    // RX activity indicator (Tiggy / any board with BOARD_LED2). Short
+    // 2 ms pulse so frequent receives don't waste energy. BOARD_LED is the
+    // TX/heartbeat indicator on the same boards.
+#ifdef BOARD_LED2
+    if (BOARD_LED2 >= 0) {
+        digitalWrite(BOARD_LED2, HIGH); delayMicroseconds(2000); digitalWrite(BOARD_LED2, LOW);
+    }
+#endif
+
     MeshPacket mp;
     if (mesh.parseRawPacket(pkt, len, mp)) {
         mesh.processPacket(mp);
@@ -1225,6 +1234,9 @@ bool isPinSafe(int pin) {
 #endif
 #if BOARD_LED >= 0
         BOARD_LED,
+#endif
+#ifdef BOARD_LED2
+        BOARD_LED2,
 #endif
 #if defined(BOARD_GPS_TX) && BOARD_GPS_TX >= 0
         BOARD_GPS_TX, BOARD_GPS_RX,
@@ -3436,6 +3448,11 @@ void setup() {
     randomSeed(esp_random() ^ macSeed);
 
     if (BOARD_LED >= 0) { pinMode(BOARD_LED, OUTPUT); digitalWrite(BOARD_LED, LOW); }
+#ifdef BOARD_LED2
+    // Second LED — used as an RX activity indicator (BOARD_LED is the TX/HB
+    // indicator). Only present on boards that have two user LEDs (Tiggy).
+    if (BOARD_LED2 >= 0) { pinMode(BOARD_LED2, OUTPUT); digitalWrite(BOARD_LED2, LOW); }
+#endif
 #ifdef VEXT_CTRL
     pinMode(VEXT_CTRL, OUTPUT); digitalWrite(VEXT_CTRL, LOW);
 #endif
