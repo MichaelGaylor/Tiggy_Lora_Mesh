@@ -758,3 +758,17 @@
     #define IO_EXPAND_RX  -1
   #endif
 #endif
+
+// ─── DRV8871 actuator (optional, any board) ─────────────────
+// IN1 / IN2 GPIOs for an H-bridge motor driver. Set to actual pin
+// numbers in your board's section above to enable the actuator
+// feature; leave at the -1 fallback to disable. The firmware checks
+// at runtime — no #ifdefs needed — so the same binary supports any
+// board configuration. Adding the actuator to a new board is purely
+// a Pins.h edit.
+#ifndef ACTUATOR_IN1
+  #define ACTUATOR_IN1 -1
+#endif
+#ifndef ACTUATOR_IN2
+  #define ACTUATOR_IN2 -1
+#endif

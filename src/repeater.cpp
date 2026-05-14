@@ -3459,13 +3459,15 @@ void setup() {
     // indicator). Only present on boards that have two user LEDs (Tiggy).
     if (BOARD_LED2 >= 0) { pinMode(BOARD_LED2, OUTPUT); digitalWrite(BOARD_LED2, LOW); }
 #endif
-#if defined(ACTUATOR_IN1) && defined(ACTUATOR_IN2)
     // DRV8871 actuator driver: both inputs LOW = coast/idle. Pulling them
     // up at boot would cause the motor to twitch as soon as power comes
     // on. Pin assignments come from Pins.h (ACTUATOR_IN1/IN2 defines).
-    pinMode(ACTUATOR_IN1, OUTPUT); digitalWrite(ACTUATOR_IN1, LOW);
-    pinMode(ACTUATOR_IN2, OUTPUT); digitalWrite(ACTUATOR_IN2, LOW);
-#endif
+    // Runtime check (not #if) so any board can enable by setting the pins
+    // in Pins.h to actual GPIOs; -1 disables. Same binary, all boards.
+    if (ACTUATOR_IN1 >= 0 && ACTUATOR_IN2 >= 0) {
+        pinMode(ACTUATOR_IN1, OUTPUT); digitalWrite(ACTUATOR_IN1, LOW);
+        pinMode(ACTUATOR_IN2, OUTPUT); digitalWrite(ACTUATOR_IN2, LOW);
+    }
 #ifdef VEXT_CTRL
     pinMode(VEXT_CTRL, OUTPUT); digitalWrite(VEXT_CTRL, LOW);
 #endif
