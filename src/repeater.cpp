@@ -524,9 +524,10 @@ struct SetpointRule {
     float scaleOffset;
     uint16_t debounceMs;     // Hold time before firing (0=immediate)
     char targetNode[NODE_ID_LEN + 1];
-    uint8_t actionType;      // 0=RELAY, 1=MSG
+    uint8_t actionType;      // 0=RELAY, 1=MSG, 2=PULSE (Phase 4)
     uint8_t relayPin;
     uint8_t action;          // RELAY: 0=LOW, 1=HIGH
+    uint16_t pulseMs;        // PULSE: duration in ms (only for actionType==2). Phase 4.
     char msgTrue[SETPOINT_MSG_LEN + 1];
     char msgFalse[SETPOINT_MSG_LEN + 1];
     bool triggered;
@@ -1562,6 +1563,9 @@ String processSetpointCommand(const String& args) {
             if (setpoints[i].actionType == 1) {
                 resp += "MSG:" + String(setpoints[i].msgTrue);
                 if (setpoints[i].msgFalse[0]) resp += "/" + String(setpoints[i].msgFalse);
+            } else if (setpoints[i].actionType == 2) {
+                resp += "PULSE:" + String(setpoints[i].relayPin) + ":" +
+                        String(setpoints[i].pulseMs) + "ms";
             } else {
                 resp += String(setpoints[i].targetNode) + ":" +
                         String(setpoints[i].relayPin) + ":" +
@@ -1664,6 +1668,26 @@ String processSetpointCommand(const String& args) {
         strncpy(setpoints[slot].targetNode, mesh.localID, NODE_ID_LEN);
         resp += ",MSG," + msgTrue;
         if (msgFalse.length() > 0) resp += "," + msgFalse;
+    } else if (actionPart.startsWith("PULSE,")) {
+        // Phase 4: PULSE,<pin>,<duration_ms>
+        // Sensor-threshold-triggered pulse using the same non-blocking
+        // pulse timer infrastructure as Phase 1/2. Local pin only.
+        String pulsePart = actionPart.substring(6);
+        int pc = pulsePart.indexOf(',');
+        if (pc < 0) return "ERR,SETPOINT,PULSE_FORMAT";
+        int pin = pulsePart.substring(0, pc).toInt();
+        int durMs = pulsePart.substring(pc + 1).toInt();
+        if (!isPinConfigurable(pin) || durMs <= 0 || durMs > PULSE_MAX_MS)
+            return "ERR,SETPOINT,BADPULSE";
+
+        setpoints[slot].actionType = 2;
+        setpoints[slot].relayPin = (uint8_t)pin;
+        setpoints[slot].pulseMs = (uint16_t)durMs;
+        // PULSE is always local — store our own ID in targetNode so the
+        // local-vs-remote check in fireSetpointAction picks the local path.
+        strncpy(setpoints[slot].targetNode, mesh.localID, NODE_ID_LEN);
+        setpoints[slot].targetNode[NODE_ID_LEN] = '\0';
+        resp += ",PULSE," + String(pin) + "," + String(durMs);
     } else {
         int rc1 = actionPart.indexOf(',');
         int rc2 = (rc1 > 0) ? actionPart.indexOf(',', rc1 + 1) : -1;
@@ -1795,6 +1819,20 @@ bool fireSetpointAction(SetpointRule& sp, int value, bool triggered) {
                    " -> broadcast '" + String(msg) + "'");
         bleSend("SETPOINT,MSG," + String(sp.sensorPin) + "," + String(value) + "," + String(msg));
         return true;  // Radio TX happened
+    }
+    else if (sp.actionType == 2) {
+        // Phase 4: PULSE action — local pin, non-blocking pulse via the
+        // Phase 1 timer ring buffer. Only fires on rising edge.
+        if (!triggered) return false;
+        if (sp.relayPin > 0 && sp.pulseMs > 0) {
+            setupDigitalOutput(sp.relayPin);
+            startPulse(sp.relayPin, sp.pulseMs);
+            debugPrint("SETPOINT PULSE: pin " + String(sp.sensorPin) + "=" + String(value) +
+                       " -> pulse pin " + String(sp.relayPin) + " " + String(sp.pulseMs) + "ms");
+            bleSend("SETPOINT,FIRED," + String(sp.sensorPin) + "," + String(value) +
+                    ",PULSE," + String(sp.relayPin) + "," + String(sp.pulseMs));
+        }
+        return false;  // No radio TX (local pin only)
     }
     return false;
 }
