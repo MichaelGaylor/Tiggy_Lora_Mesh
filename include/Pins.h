@@ -638,7 +638,7 @@
 //   ⚠️ V1 rework: physical pin moved from GPIO 37 → GPIO 1 by fly-wire.
 //   Divider math: (1M + 220k) / 220k = 5.545 (multiplier ADC→VBAT)
 //   ADC sees max 12.6V × 0.180 = 2.27V (within ESP32-S3 2.4V headroom)
-#define BOARD_BAT_ADC       1     // ADC1_CH0 (after rework)
+#define BOARD_BAT_ADC       1     // ADC1_CH0 GPIO1 (after rework)
 #define BAT_DIVIDER         5.545f
 #define BAT_LOW_MV          9300    // 3 × 3.1V LiPo cutoff
 #define BAT_RECOVER_MV      11100   // 3 × 3.7V LiPo recovery
