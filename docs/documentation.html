@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>TiggyOpenMesh v4.1 - Complete Documentation</title>
+<title>TiggyOpenMesh v4.2 - Complete Documentation</title>
 <style>
   :root {
     --bg: #0a0e14;
@@ -476,6 +476,61 @@
     margin-top: -60px;
     visibility: hidden;
   }
+
+  /* ── Logic Builder block diagrams ─────────────────────────────────── */
+  /* Compact SVG mockups of each block as it appears on the canvas.
+     Stroke colour mirrors the in-app border colour for the block category. */
+  .lb-block-svg {
+    display: block;
+    margin: 8px 0;
+  }
+  .lb-block-svg text { font-family: 'Cascadia Code','Fira Code',monospace; }
+  .lb-block-svg .lb-title { fill: var(--white); font-size: 13px; font-weight: 700; }
+  .lb-block-svg .lb-sub   { fill: var(--dim);   font-size: 10px; }
+  .lb-block-svg .lb-port  { stroke: #111; stroke-width: 1; }
+  .lb-block-svg .lb-port-label { fill: var(--dim); font-size: 9px; }
+
+  /* Wiring-pattern gallery: each card holds one SVG + a caption */
+  .lb-wiring-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+    gap: 18px;
+    margin: 18px 0 22px;
+  }
+  .lb-wiring-card {
+    background: var(--panel);
+    border: 1px solid var(--faint);
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .lb-wiring-card h4 {
+    margin: 0 0 6px;
+    color: var(--cyan);
+    font-size: 1em;
+  }
+  .lb-wiring-card p {
+    color: var(--dim);
+    font-size: 0.85em;
+    margin: 4px 0 8px;
+  }
+  .lb-wiring-card svg { width: 100%; height: auto; display: block; }
+
+  /* Status pills used by the GUI for block visual state */
+  .status-pill {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 0.8em;
+    font-weight: 700;
+    font-family: 'Cascadia Code', monospace;
+    color: #000;
+  }
+  .status-pill.idle      { background: #555; color: #fff; }
+  .status-pill.triggered { background: #ffe000; }
+  .status-pill.retrying  { background: #FF9800; }
+  .status-pill.delivered { background: #00E676; }
+  .status-pill.failed    { background: #FF1744; color: #fff; }
+  .status-pill.active    { background: #00e5ff; }
 </style>
 </head>
 <body>
@@ -483,11 +538,28 @@
 <!-- ═══════════════ HERO ═══════════════ -->
 <div class="hero">
   <h1>TiggyOpenMesh</h1>
-  <div class="subtitle">T-Deck Plus &bull; LoRa32 &bull; Heltec V3 &bull; Heltec V4 &bull; XIAO ESP32S3</div>
-  <span class="version">v4.1 &mdash; MeshCore Architecture</span>
+  <div class="subtitle">T-Deck Plus &bull; LoRa32 &bull; Heltec V3 &bull; Heltec V4 &bull; XIAO ESP32S3 &bull; TiggyOpenMesh V1</div>
+  <span class="version">v4.2 &mdash; MeshCore Architecture</span>
   <p style="color:var(--dim); margin-top:16px; font-size:0.95em;">
     Complete technical documentation &mdash; hardware, protocol, menus, code architecture &amp; API
   </p>
+</div>
+
+<!-- ═══════════════ CHANGELOG v4.2 ═══════════════ -->
+<div style="max-width:1100px; margin:24px auto 0; padding:0 40px;">
+  <div class="info-box cyan" style="margin:0;">
+    <p style="color:var(--white); font-weight:700; font-size:1.05em; margin-bottom:8px;">What's new in v4.2</p>
+    <ul style="color:var(--dim); padding-left:22px; margin:0;">
+      <li><strong>TiggyOpenMesh V1 board</strong> &mdash; custom ESP32-S3 + Wio-SX1262 + DRV8871 actuator + 3S LiPo battery monitor. <a href="#hardware" style="color:var(--cyan);">See Hardware &sect;2</a>.</li>
+      <li><strong>Actuator Open / Actuator Close</strong> Logic Builder blocks for the DRV8871 H-bridge. Pins come from <code>board_pins.json</code> &mdash; no firmware changes needed to add the feature to a new board. <a href="#logic-builder" style="color:var(--cyan);">See Logic Builder &sect;22</a>.</li>
+      <li><strong>Battery telemetry</strong> piggybacks on the regular heartbeat (<code>HB,&lt;id&gt;,&lt;board&gt;,&hellip;,B&lt;mv&gt;</code>) &mdash; every node card in the GUI now shows a live voltage chip. <a href="#battery-monitor" style="color:var(--cyan);">See Battery Monitoring &sect;49</a>.</li>
+      <li><strong>Graceful low-battery shutdown</strong> &mdash; Heltec V3, V4 and TM1 deep-sleep when the pack drops below cutoff and wake when it recovers. EEPROM-tunable in the field via <code>BATT_CFG</code>.</li>
+      <li><strong>Logic Builder ACK tracking</strong> &mdash; relay commands now show <span style="color:#FF9800;">retrying</span> &rarr; <span style="color:#00E676;">delivered</span> or <span style="color:#FF1744;">failed</span> based on the firmware's ACK/DELIVERED/FAILED serial replies. Three GUI-level retries layered on top of the firmware's 5&times;8 s retry window. <a href="#delivery-tracking" style="color:var(--cyan);">See Delivery Tracking &sect;25</a>.</li>
+      <li><strong>Visual block reference</strong> &mdash; every Logic Builder block now has an inline SVG diagram, plus a new "Typical Wiring Patterns" gallery showing how blocks connect. <a href="#logic-builder" style="color:var(--cyan);">See Logic Builder &sect;22</a>.</li>
+      <li><strong>Gateway-mode debug silencing</strong> &mdash; <code>debugPrint(&hellip;)</code> is a no-op when <code>gatewayMode</code> is on so the serial channel stays clean for the GUI's data plane.</li>
+      <li><strong>ACK_TIMEOUT bumped 3 s &rarr; 8 s</strong> and <strong>MAX_RETRIES 3 &rarr; 5</strong> to fix half-duplex collisions when the remote's ACK is still in flight.</li>
+    </ul>
+  </div>
 </div>
 
 <!-- ═══════════════ NAV ═══════════════ -->
@@ -535,6 +607,7 @@
   <a href="#new-board">New Board</a>
   <a href="#beacon-triangulation">Triangulation</a>
   <a href="#command-ref">Command Ref</a>
+  <a href="#battery-monitor">Battery Monitor</a>
 </nav>
 
 <div class="container">
@@ -802,6 +875,33 @@ D6/GPIO43  ●  ● D7 /GPIO44  <span style="color:var(--cyan);">UART TX / RX (I
       <tr><td>Default Relay Pins</td><td style="color:var(--orange);">3, 4</td></tr>
       <tr><td>Default Sensor Pins</td><td style="color:var(--yellow);">5, 6, 15, 16</td></tr>
     </table>
+  </div>
+
+  <!-- TiggyOpenMesh V1 -->
+  <div class="board-card" style="border-top: 3px solid var(--yellow);">
+    <span class="price" style="background:var(--yellow); color:#000;">custom</span>
+    <h4 style="color:var(--yellow);">TiggyOpenMesh V1</h4>
+    <p><strong>MCU:</strong> ESP32-S3-WROOM-1-N8R2 &bull; <strong>Radio:</strong> Wio-SX1262 (header) &bull; <strong>Display:</strong> External I&sup2;C SSD1306 (optional)</p>
+    <p><strong>Purpose-built TiggyOpenMesh PCB.</strong> Includes on-board <strong>DRV8871</strong> H-bridge actuator driver, AP63203 buck regulator, USB-C, 3S LiPo (or 24 V) input with always-on battery monitor, and two indicator LEDs. Board code <code>TM1</code> in heartbeats.</p>
+    <div class="info-box orange" style="margin:8px 0; padding:8px 12px; font-size:0.85em;">
+      <p><strong>PCB rework note:</strong> on the very first batch, the battery divider tap is routed to GPIO 37 &mdash; <strong>ESP32-S3 has no ADC on that pin</strong>. A fly-wire to GPIO 1 (ADC1_CH0) is required. The firmware reflects this in <code>BOARD_BAT_ADC = 1</code>. Future PCB revs will route the divider to GPIO 1 directly.</p>
+    </div>
+    <table style="font-size:0.8em;">
+      <tr><th>Function</th><th>GPIO</th></tr>
+      <tr><td>SPI MOSI / MISO / SCK</td><td>10 / 11 / 9</td></tr>
+      <tr><td>Radio CS / RST / DIO1 / BUSY</td><td>8 / 12 / 14 / 13</td></tr>
+      <tr><td>Radio RX_EN (FEM)</td><td>47</td></tr>
+      <tr><td>I&sup2;C SDA / SCL / OLED RST</td><td>17 / 18 / 21</td></tr>
+      <tr><td>GPS TX / RX (external header)</td><td>38 / 39</td></tr>
+      <tr><td>Battery ADC <em>(after rework)</em></td><td style="color:var(--orange);">1 (ADC1_CH0)</td></tr>
+      <tr><td>LED 1 / LED 2</td><td>35 / 36</td></tr>
+      <tr><td><strong>DRV8871 IN1 / IN2</strong></td><td style="color:var(--green);">41 / 42</td></tr>
+      <tr><td>Default Relay Pins</td><td style="color:var(--orange);">2, 3, 4</td></tr>
+      <tr><td>Default Sensor Pins</td><td style="color:var(--yellow);">5, 6, 7, 15, 16</td></tr>
+      <tr><td>Battery divider</td><td>1 M&Omega; + 220 k&Omega; (5.545&times;)</td></tr>
+      <tr><td>Battery cutoff / recover</td><td>9.3 V / 11.1 V (3 S LiPo)</td></tr>
+    </table>
+    <p style="font-size:0.78em; color:var(--comment); margin-top:8px;">DRV8871 truth table: IN1 H + IN2 L &rarr; forward, IN1 L + IN2 H &rarr; reverse, both L &rarr; coast, both H &rarr; brake. Pulled LOW at boot by firmware.</p>
   </div>
 
 </div>
@@ -1533,9 +1633,13 @@ hash |= <span class="number">1</span>;           <span class="comment">// Never 
 <span class="keyword">EEPROM,RESET</span>           <span class="comment">Factory reset — wipe all EEPROM and restart</span>
 <span class="keyword">GPSPOS</span>                 <span class="comment">Query current GPS position</span>
 <span class="keyword">GPS,&lt;tx&gt;,&lt;rx&gt;</span>          <span class="comment">Set GPS UART pins e.g. GPS,38,39</span>
+<span class="keyword">BATT_CFG</span>               <span class="comment">Show active battery divider + cutoff/recover thresholds</span>
+<span class="keyword">BATT_CFG &lt;div&gt; &lt;low&gt; &lt;rec&gt;</span>  <span class="comment">Override (EEPROM) e.g. BATT_CFG 11.0 21000 24000</span>
+<span class="keyword">BATT_CFG RESET</span>         <span class="comment">Clear EEPROM overrides, use Pins.h defaults</span>
+<span class="keyword">BATT_DEBUG</span>             <span class="comment">One-shot diag: raw ADC, cal mV, divider, pack mV</span>
 
 <span class="comment"># STATUS response includes:</span>
-<span class="comment">#   ID, BOARD, POWER:NORMAL|SOLAR, SF:9, RELAY pins, SENSOR pins</span>
+<span class="comment">#   ID, BOARD, POWER:NORMAL|SOLAR, SF:9, RELAY pins, SENSOR pins, BATT (if wired)</span>
 </pre>
 
 <div class="info-box orange">
@@ -2041,6 +2145,10 @@ android-app/
   <tr><td style="color:var(--dim);">Config</td><td><code>GATEWAY OFF</code></td><td>Disable gateway mode (sent automatically on shutdown)</td></tr>
 </table>
 
+<div class="info-box cyan">
+  <p><strong>Quiet serial in gateway mode (v4.2):</strong> When <code>gatewayMode == true</code>, the firmware's <code>debugPrint(&hellip;)</code> macro is compiled to a no-op so the serial channel carries only the structured data plane that the GUI's parser consumes &mdash; <code>PKT,&hellip;</code>, <code>HB,&hellip;</code>, <code>SDATA,&hellip;</code>, <code>ACK,&hellip;</code>, <code>DELIVERED,&hellip;</code>, <code>FAILED,&hellip;</code>, <code>BATT,&hellip;</code>. This avoids tens of MB/hour of free-form debug log lines clogging the pipe and confusing the GUI's line-oriented dispatcher. Turn gateway mode off and the firmware reverts to chatty debug output for hands-on troubleshooting.</p>
+</div>
+
 <!-- ─── WebSocket Protocols ─── -->
 
 <h3>WebSocket Protocol</h3>
@@ -2289,42 +2397,95 @@ gateway/
 
 <h3>Block Types</h3>
 
+<p>Every block has a coloured border indicating its category and small <strong>ports</strong> (coloured circles) for input/output wiring. Port colour shows the data type: <span style="color:#00E5FF;">cyan = number</span>, <span style="color:#FFE000;">yellow = boolean</span>, <span style="color:#FFFFFF;">white = string</span>.</p>
+
 <h4>Input Blocks (cyan border)</h4>
 <p>Input blocks read data from the mesh or provide constant values.</p>
 <table>
-  <tr><th>Block</th><th>What It Does</th><th>Configuration</th><th>Output</th></tr>
+  <tr><th style="width:170px;">Block</th><th>What It Does</th><th>Configuration</th><th>Output</th></tr>
   <tr>
-    <td style="color:var(--cyan);">Sensor Read</td>
+    <td style="color:var(--cyan); vertical-align:top;">
+      <strong>Sensor Read</strong>
+      <svg class="lb-block-svg" width="150" height="50" viewBox="0 0 150 50" role="img" aria-label="Sensor Read block">
+        <rect x="8" y="4" width="134" height="42" rx="6" fill="#0a2838" stroke="#00E5FF" stroke-width="2"/>
+        <text class="lb-title" x="75" y="22" text-anchor="middle">Sensor Read</text>
+        <text class="lb-sub" x="75" y="38" text-anchor="middle">A1B2:pin5</text>
+        <circle class="lb-port" cx="142" cy="25" r="4" fill="#00E5FF"/>
+      </svg>
+    </td>
     <td>Reads the latest sensor value for a specific pin on a specific node. Uses SDATA data received by the gateway.</td>
     <td><strong>Node ID:</strong> The 4-character hex ID of the node (e.g., A1B2). <strong>Pin:</strong> GPIO pin number. <strong>Label:</strong> Descriptive name (e.g., &ldquo;Wind Sensor&rdquo;).</td>
     <td>A number (the raw sensor reading, 0&ndash;4095 for analog).</td>
   </tr>
   <tr>
-    <td style="color:var(--cyan);">Beacon Detect</td>
+    <td style="color:var(--cyan); vertical-align:top;">
+      <strong>Beacon Detect</strong>
+      <svg class="lb-block-svg" width="150" height="60" viewBox="0 0 150 60" role="img" aria-label="Beacon Detect block">
+        <rect x="8" y="4" width="134" height="52" rx="6" fill="#0a2838" stroke="#00E5FF" stroke-width="2"/>
+        <text class="lb-title" x="75" y="24" text-anchor="middle">Beacon Detect</text>
+        <text class="lb-sub" x="75" y="42" text-anchor="middle">Daisy : -80 dBm</text>
+        <circle class="lb-port" cx="142" cy="20" r="4" fill="#FFE000"/>
+        <text class="lb-port-label" x="138" y="22" text-anchor="end">det</text>
+        <circle class="lb-port" cx="142" cy="40" r="4" fill="#00E5FF"/>
+        <text class="lb-port-label" x="138" y="42" text-anchor="end">rssi</text>
+      </svg>
+    </td>
     <td>Detects an iBeacon tag by UUID or MAC address. Outputs true/false based on proximity (RSSI threshold). See <a href="#ibeacon" style="color:var(--cyan);">Section 38: iBeacon Scanner</a>.</td>
     <td><strong>Beacon ID:</strong> UUID or MAC address. <strong>Name:</strong> Human label. <strong>RSSI Threshold:</strong> Minimum signal strength (e.g., -70 dBm).</td>
     <td><code>detected</code> (bool), <code>rssi</code> (number).</td>
   </tr>
   <tr>
-    <td style="color:var(--cyan);">Constant</td>
+    <td style="color:var(--cyan); vertical-align:top;">
+      <strong>Constant</strong>
+      <svg class="lb-block-svg" width="150" height="50" viewBox="0 0 150 50" role="img" aria-label="Constant block">
+        <rect x="8" y="4" width="134" height="42" rx="6" fill="#0a2838" stroke="#00E5FF" stroke-width="2"/>
+        <text class="lb-title" x="75" y="22" text-anchor="middle">Constant</text>
+        <text class="lb-sub" x="75" y="38" text-anchor="middle">15.0</text>
+        <circle class="lb-port" cx="142" cy="25" r="4" fill="#00E5FF"/>
+      </svg>
+    </td>
     <td>Outputs a fixed number. Use as a threshold for comparisons.</td>
     <td><strong>Value:</strong> Any number (e.g., 2000, 15.5).</td>
     <td>A number.</td>
   </tr>
   <tr>
-    <td style="color:var(--cyan);">Schedule</td>
+    <td style="color:var(--cyan); vertical-align:top;">
+      <strong>Schedule</strong>
+      <svg class="lb-block-svg" width="150" height="50" viewBox="0 0 150 50" role="img" aria-label="Schedule block">
+        <rect x="8" y="4" width="134" height="42" rx="6" fill="#0a2838" stroke="#00E5FF" stroke-width="2"/>
+        <text class="lb-title" x="75" y="22" text-anchor="middle">Schedule</text>
+        <text class="lb-sub" x="75" y="38" text-anchor="middle">06:00&ndash;20:00 M-F</text>
+        <circle class="lb-port" cx="142" cy="25" r="4" fill="#FFE000"/>
+      </svg>
+    </td>
     <td>Time-based trigger. Outputs true during configured hours/days. Uses the gateway PC&rsquo;s clock. Supports overnight schedules (e.g., 22:00&ndash;06:00).</td>
     <td><strong>On time:</strong> HH:MM (24hr). <strong>Off time:</strong> HH:MM. <strong>Days:</strong> Mon,Tue,Wed,Thu,Fri,Sat,Sun (comma-separated, default all).</td>
     <td><code>active</code> (bool) &mdash; true during scheduled hours on selected days.</td>
   </tr>
   <tr>
-    <td style="color:var(--cyan);">Digital Read</td>
+    <td style="color:var(--cyan); vertical-align:top;">
+      <strong>Digital Read</strong>
+      <svg class="lb-block-svg" width="150" height="50" viewBox="0 0 150 50" role="img" aria-label="Digital Read block">
+        <rect x="8" y="4" width="134" height="42" rx="6" fill="#0a2838" stroke="#00E5FF" stroke-width="2"/>
+        <text class="lb-title" x="75" y="22" text-anchor="middle">Digital Read</text>
+        <text class="lb-sub" x="75" y="38" text-anchor="middle">F1E2:pin5</text>
+        <circle class="lb-port" cx="142" cy="25" r="4" fill="#FFE000"/>
+      </svg>
+    </td>
     <td>Reads GPIO state as a boolean (HIGH/LOW). Works with any GPIO pin on any node.</td>
     <td><strong>Node ID:</strong> 4-character hex ID. <strong>Pin:</strong> GPIO pin number. <strong>Label:</strong> Descriptive name.</td>
     <td><code>state</code> (bool).</td>
   </tr>
   <tr>
-    <td style="color:var(--cyan);">Pulse Input</td>
+    <td style="color:var(--cyan); vertical-align:top;">
+      <strong>Pulse Input</strong>
+      <svg class="lb-block-svg" width="150" height="50" viewBox="0 0 150 50" role="img" aria-label="Pulse Input block">
+        <rect x="8" y="4" width="134" height="42" rx="6" fill="#0a2838" stroke="#00E5FF" stroke-width="2"/>
+        <text class="lb-title" x="75" y="22" text-anchor="middle">Pulse Input</text>
+        <text class="lb-sub" x="75" y="38" text-anchor="middle">A1B2:pin5 Hz</text>
+        <circle class="lb-port" cx="142" cy="25" r="4" fill="#00E5FF"/>
+      </svg>
+    </td>
     <td>Counts rising edges on a GPIO pin and reports the rate (pulses/sec). Auto-configures the pin as PULSE mode on the remote node.</td>
     <td><strong>Node ID:</strong> 4-character hex ID. <strong>Pin:</strong> GPIO pin number. <strong>Label:</strong> Descriptive name. <strong>Unit:</strong> Display unit (e.g., &ldquo;Hz&rdquo;, &ldquo;rpm&rdquo;).</td>
     <td><code>rate</code> (number).</td>
@@ -2334,27 +2495,63 @@ gateway/
 <h4>Transform Blocks (green border)</h4>
 <p>Transform blocks convert raw sensor values into meaningful units.</p>
 <table>
-  <tr><th>Block</th><th>What It Does</th><th>Configuration</th><th>Formula</th></tr>
+  <tr><th style="width:170px;">Block</th><th>What It Does</th><th>Configuration</th><th>Formula</th></tr>
   <tr>
-    <td style="color:var(--green);">Scale</td>
+    <td style="color:var(--green); vertical-align:top;">
+      <strong>Scale</strong>
+      <svg class="lb-block-svg" width="150" height="50" viewBox="0 0 150 50" role="img" aria-label="Scale block">
+        <rect x="8" y="4" width="134" height="42" rx="6" fill="#0a2818" stroke="#00E676" stroke-width="2"/>
+        <text class="lb-title" x="75" y="22" text-anchor="middle">Scale</text>
+        <text class="lb-sub" x="75" y="38" text-anchor="middle">&times;0.0278  m/s</text>
+        <circle class="lb-port" cx="8"   cy="25" r="4" fill="#00E5FF"/>
+        <circle class="lb-port" cx="142" cy="25" r="4" fill="#00E5FF"/>
+      </svg>
+    </td>
     <td>Multiplies a value by a factor and adds an offset. Use this to convert raw ADC counts into real-world units.</td>
     <td><strong>Factor:</strong> Multiply value by this number. <strong>Offset:</strong> Add this after multiplying. <strong>Unit:</strong> Label for the result (e.g., &ldquo;m/s&rdquo;, &ldquo;&deg;C&rdquo;).</td>
     <td><code>output = (input &times; factor) + offset</code></td>
   </tr>
   <tr>
-    <td style="color:var(--green);">Moving Average</td>
+    <td style="color:var(--green); vertical-align:top;">
+      <strong>Moving Average</strong>
+      <svg class="lb-block-svg" width="150" height="50" viewBox="0 0 150 50" role="img" aria-label="Moving Average block">
+        <rect x="8" y="4" width="134" height="42" rx="6" fill="#0a2818" stroke="#00E676" stroke-width="2"/>
+        <text class="lb-title" x="75" y="22" text-anchor="middle">Moving Avg</text>
+        <text class="lb-sub" x="75" y="38" text-anchor="middle">window = 5</text>
+        <circle class="lb-port" cx="8"   cy="25" r="4" fill="#00E5FF"/>
+        <circle class="lb-port" cx="142" cy="25" r="4" fill="#00E5FF"/>
+      </svg>
+    </td>
     <td>Smooths a noisy signal by averaging the last N samples.</td>
     <td><strong>Window:</strong> Number of samples to average (e.g., 5).</td>
     <td><code>output = average of last N inputs</code></td>
   </tr>
   <tr>
-    <td style="color:var(--green);">Delta Rate</td>
+    <td style="color:var(--green); vertical-align:top;">
+      <strong>Delta Rate</strong>
+      <svg class="lb-block-svg" width="150" height="50" viewBox="0 0 150 50" role="img" aria-label="Delta Rate block">
+        <rect x="8" y="4" width="134" height="42" rx="6" fill="#0a2818" stroke="#00E676" stroke-width="2"/>
+        <text class="lb-title" x="75" y="22" text-anchor="middle">Delta Rate</text>
+        <text class="lb-sub" x="75" y="38" text-anchor="middle">&Delta; / sec</text>
+        <circle class="lb-port" cx="8"   cy="25" r="4" fill="#00E5FF"/>
+        <circle class="lb-port" cx="142" cy="25" r="4" fill="#00E5FF"/>
+      </svg>
+    </td>
     <td>Calculates the rate of change per second. Useful for converting a growing counter into a speed value.</td>
     <td>None &mdash; automatic.</td>
     <td><code>output = (current &minus; previous) / elapsed_seconds</code></td>
   </tr>
   <tr>
-    <td style="color:var(--green);">Value Map</td>
+    <td style="color:var(--green); vertical-align:top;">
+      <strong>Value Map</strong>
+      <svg class="lb-block-svg" width="150" height="50" viewBox="0 0 150 50" role="img" aria-label="Value Map block">
+        <rect x="8" y="4" width="134" height="42" rx="6" fill="#0a2818" stroke="#00E676" stroke-width="2"/>
+        <text class="lb-title" x="75" y="22" text-anchor="middle">Value Map</text>
+        <text class="lb-sub" x="75" y="38" text-anchor="middle">num &rarr; label</text>
+        <circle class="lb-port" cx="8"   cy="25" r="4" fill="#00E5FF"/>
+        <circle class="lb-port" cx="142" cy="25" r="4" fill="#FFFFFF"/>
+      </svg>
+    </td>
     <td>Classifies a numeric input into a named string category (e.g., ADC counts &rarr; wind direction labels, temperature ranges &rarr; &ldquo;COLD/MILD/HOT&rdquo;). Built-in hysteresis keeps the category stable across noisy boundaries. Output is a <strong>string</strong> &mdash; feed it to an <em>Equals (text)</em> block to drive relays, or straight into Telegram/Broadcast messages.</td>
     <td>
       <strong>Mode:</strong> <code>Center &plusmn; Tol</code> (each row has a centre value and tolerance) <em>or</em> <code>Range</code> (each row has low/high bounds).<br>
@@ -2377,9 +2574,21 @@ gateway/
 <h4>Condition Blocks (yellow border)</h4>
 <p>Condition blocks evaluate true/false logic to decide when actions should fire.</p>
 <table>
-  <tr><th>Block</th><th>What It Does</th><th>Configuration</th></tr>
+  <tr><th style="width:170px;">Block</th><th>What It Does</th><th>Configuration</th></tr>
   <tr>
-    <td style="color:var(--yellow);">Compare</td>
+    <td style="color:var(--yellow); vertical-align:top;">
+      <strong>Compare</strong>
+      <svg class="lb-block-svg" width="150" height="60" viewBox="0 0 150 60" role="img" aria-label="Compare block">
+        <rect x="8" y="4" width="134" height="52" rx="6" fill="#282808" stroke="#FFE000" stroke-width="2"/>
+        <text class="lb-title" x="75" y="24" text-anchor="middle">Compare</text>
+        <text class="lb-sub" x="75" y="42" text-anchor="middle">a &gt; b</text>
+        <circle class="lb-port" cx="8"  cy="20" r="4" fill="#00E5FF"/>
+        <text class="lb-port-label" x="14" y="22">a</text>
+        <circle class="lb-port" cx="8"  cy="40" r="4" fill="#00E5FF"/>
+        <text class="lb-port-label" x="14" y="42">b</text>
+        <circle class="lb-port" cx="142" cy="30" r="4" fill="#FFE000"/>
+      </svg>
+    </td>
     <td>Compares two numbers and outputs true or false.</td>
     <td><strong>Operator</strong> (choose one):
       <table style="margin:8px 0; font-size:0.9em;">
@@ -2394,78 +2603,236 @@ gateway/
     </td>
   </tr>
   <tr>
-    <td style="color:var(--yellow);">AND Gate</td>
+    <td style="color:var(--yellow); vertical-align:top;">
+      <strong>AND Gate</strong>
+      <svg class="lb-block-svg" width="150" height="80" viewBox="0 0 150 80" role="img" aria-label="AND gate block">
+        <rect x="8" y="4" width="134" height="72" rx="6" fill="#282808" stroke="#FFE000" stroke-width="2"/>
+        <text class="lb-title" x="75" y="32" text-anchor="middle">AND</text>
+        <text class="lb-sub" x="75" y="50" text-anchor="middle">all true</text>
+        <circle class="lb-port" cx="8" cy="18" r="3.5" fill="#FFE000"/>
+        <circle class="lb-port" cx="8" cy="34" r="3.5" fill="#FFE000"/>
+        <circle class="lb-port" cx="8" cy="50" r="3.5" fill="#FFE000"/>
+        <circle class="lb-port" cx="8" cy="66" r="3.5" fill="#FFE000"/>
+        <circle class="lb-port" cx="142" cy="40" r="4" fill="#FFE000"/>
+      </svg>
+    </td>
     <td>Outputs true only when <strong>all</strong> connected inputs are true. Has up to 4 inputs (in1&ndash;in4).</td>
     <td>None &mdash; connect 2&ndash;4 boolean inputs.</td>
   </tr>
   <tr>
-    <td style="color:var(--yellow);">OR Gate</td>
+    <td style="color:var(--yellow); vertical-align:top;">
+      <strong>OR Gate</strong>
+      <svg class="lb-block-svg" width="150" height="80" viewBox="0 0 150 80" role="img" aria-label="OR gate block">
+        <rect x="8" y="4" width="134" height="72" rx="6" fill="#282808" stroke="#FFE000" stroke-width="2"/>
+        <text class="lb-title" x="75" y="32" text-anchor="middle">OR</text>
+        <text class="lb-sub" x="75" y="50" text-anchor="middle">any true</text>
+        <circle class="lb-port" cx="8" cy="18" r="3.5" fill="#FFE000"/>
+        <circle class="lb-port" cx="8" cy="34" r="3.5" fill="#FFE000"/>
+        <circle class="lb-port" cx="8" cy="50" r="3.5" fill="#FFE000"/>
+        <circle class="lb-port" cx="8" cy="66" r="3.5" fill="#FFE000"/>
+        <circle class="lb-port" cx="142" cy="40" r="4" fill="#FFE000"/>
+      </svg>
+    </td>
     <td>Outputs true when <strong>any</strong> connected input is true. Has up to 4 inputs (in1&ndash;in4).</td>
     <td>None &mdash; connect 2&ndash;4 boolean inputs.</td>
   </tr>
   <tr>
-    <td style="color:var(--yellow);">NOT Gate</td>
+    <td style="color:var(--yellow); vertical-align:top;">
+      <strong>NOT Gate</strong>
+      <svg class="lb-block-svg" width="150" height="50" viewBox="0 0 150 50" role="img" aria-label="NOT gate block">
+        <rect x="8" y="4" width="134" height="42" rx="6" fill="#282808" stroke="#FFE000" stroke-width="2"/>
+        <text class="lb-title" x="75" y="22" text-anchor="middle">NOT</text>
+        <text class="lb-sub" x="75" y="38" text-anchor="middle">invert bool</text>
+        <circle class="lb-port" cx="8"   cy="25" r="4" fill="#FFE000"/>
+        <circle class="lb-port" cx="142" cy="25" r="4" fill="#FFE000"/>
+      </svg>
+    </td>
     <td>Inverts a boolean: true becomes false, false becomes true.</td>
     <td>None &mdash; one boolean input.</td>
   </tr>
   <tr>
-    <td style="color:var(--yellow);">Debounce</td>
+    <td style="color:var(--yellow); vertical-align:top;">
+      <strong>Debounce</strong>
+      <svg class="lb-block-svg" width="150" height="50" viewBox="0 0 150 50" role="img" aria-label="Debounce block">
+        <rect x="8" y="4" width="134" height="42" rx="6" fill="#282808" stroke="#FFE000" stroke-width="2"/>
+        <text class="lb-title" x="75" y="22" text-anchor="middle">Debounce</text>
+        <text class="lb-sub" x="75" y="38" text-anchor="middle">5 s hold</text>
+        <circle class="lb-port" cx="8"   cy="25" r="4" fill="#FFE000"/>
+        <circle class="lb-port" cx="142" cy="25" r="4" fill="#FFE000"/>
+      </svg>
+    </td>
     <td>Only outputs true after the input has been true for a sustained period. Filters out brief spikes or noise.</td>
     <td><strong>Hold (seconds):</strong> How long the input must stay true before the output becomes true (e.g., 5.0).</td>
   </tr>
   <tr>
-    <td style="color:var(--yellow);">Monostable</td>
+    <td style="color:var(--yellow); vertical-align:top;">
+      <strong>Monostable</strong>
+      <svg class="lb-block-svg" width="150" height="50" viewBox="0 0 150 50" role="img" aria-label="Monostable block">
+        <rect x="8" y="4" width="134" height="42" rx="6" fill="#282808" stroke="#FFE000" stroke-width="2"/>
+        <text class="lb-title" x="75" y="22" text-anchor="middle">Monostable</text>
+        <text class="lb-sub" x="75" y="38" text-anchor="middle">60 s one-shot</text>
+        <circle class="lb-port" cx="8"   cy="25" r="4" fill="#FFE000"/>
+        <circle class="lb-port" cx="142" cy="25" r="4" fill="#FFE000"/>
+      </svg>
+    </td>
     <td>One-shot retriggerable timer. When the trigger input goes true, the output goes true and stays true for the configured hold time. If the trigger fires again before the timer expires, the timer restarts. Useful for beacon-based gate control: &ldquo;keep the gate open while the beacon is nearby, close 60 seconds after it leaves.&rdquo;</td>
     <td><strong>Hold time (seconds):</strong> How long the output stays true after the last trigger (e.g., 60.0).</td>
   </tr>
   <tr>
-    <td style="color:var(--yellow);">Latch (SR Flip-Flop)</td>
+    <td style="color:var(--yellow); vertical-align:top;">
+      <strong>Latch (SR)</strong>
+      <svg class="lb-block-svg" width="150" height="60" viewBox="0 0 150 60" role="img" aria-label="Latch SR flip-flop block">
+        <rect x="8" y="4" width="134" height="52" rx="6" fill="#282808" stroke="#FFE000" stroke-width="2"/>
+        <text class="lb-title" x="75" y="24" text-anchor="middle">Latch</text>
+        <text class="lb-sub" x="75" y="42" text-anchor="middle">SR flip-flop</text>
+        <circle class="lb-port" cx="8"  cy="20" r="4" fill="#FFE000"/>
+        <text class="lb-port-label" x="14" y="22">set</text>
+        <circle class="lb-port" cx="8"  cy="40" r="4" fill="#FFE000"/>
+        <text class="lb-port-label" x="14" y="42">rst</text>
+        <circle class="lb-port" cx="142" cy="30" r="4" fill="#FFE000"/>
+      </svg>
+    </td>
     <td>Once &ldquo;set&rdquo; goes true, the output stays true until &ldquo;reset&rdquo; goes true. Like a physical toggle switch.</td>
     <td>None &mdash; connect a <strong>set</strong> signal and a <strong>reset</strong> signal.</td>
   </tr>
   <tr>
-    <td style="color:var(--yellow);">Geofence</td>
+    <td style="color:var(--yellow); vertical-align:top;">
+      <strong>Geofence</strong>
+      <svg class="lb-block-svg" width="150" height="60" viewBox="0 0 150 60" role="img" aria-label="Geofence block">
+        <rect x="8" y="4" width="134" height="52" rx="6" fill="#282808" stroke="#FFE000" stroke-width="2"/>
+        <text class="lb-title" x="75" y="24" text-anchor="middle">Geofence</text>
+        <text class="lb-sub" x="75" y="42" text-anchor="middle">500 m radius</text>
+        <circle class="lb-port" cx="142" cy="20" r="4" fill="#FFE000"/>
+        <text class="lb-port-label" x="138" y="22" text-anchor="end">in</text>
+        <circle class="lb-port" cx="142" cy="40" r="4" fill="#00E5FF"/>
+        <text class="lb-port-label" x="138" y="42" text-anchor="end">dist</text>
+      </svg>
+    </td>
     <td>GPS boundary detection. Checks if a node&rsquo;s GPS position is inside or outside a circle you define. Outputs distance in metres.</td>
-    <td><strong>Node ID:</strong> which GPS node to track. <strong>Centre Lat/Lon:</strong> fence centre coordinates. <strong>Radius:</strong> metres (default 500).</td>
-    <td><code>inside</code> (bool) &mdash; true if node is within the radius. <code>distance</code> (number) &mdash; metres from centre.</td>
+    <td><strong>Node ID:</strong> which GPS node to track. <strong>Centre Lat/Lon:</strong> fence centre coordinates. <strong>Radius:</strong> metres (default 500). Outputs <code>inside</code> (bool) and <code>distance</code> (number).</td>
   </tr>
   <tr>
-    <td style="color:var(--yellow);">Equals (text)</td>
+    <td style="color:var(--yellow); vertical-align:top;">
+      <strong>Equals (text)</strong>
+      <svg class="lb-block-svg" width="150" height="50" viewBox="0 0 150 50" role="img" aria-label="Equals text block">
+        <rect x="8" y="4" width="134" height="42" rx="6" fill="#282808" stroke="#FFE000" stroke-width="2"/>
+        <text class="lb-title" x="75" y="22" text-anchor="middle">Equals (txt)</text>
+        <text class="lb-sub" x="75" y="38" text-anchor="middle">== &ldquo;N&rdquo;</text>
+        <circle class="lb-port" cx="8"   cy="25" r="4" fill="#FFFFFF"/>
+        <circle class="lb-port" cx="142" cy="25" r="4" fill="#FFE000"/>
+      </svg>
+    </td>
     <td>Compares a <strong>string</strong> input to a configured target value and outputs true / false. Pairs with the <em>Value Map</em> transform block so a classified label (&ldquo;N&rdquo;, &ldquo;COLD&rdquo;, &ldquo;FULL&rdquo;) can drive relays, pulse outputs, broadcasts, or Telegram alerts.</td>
     <td><strong>Compare to:</strong> the target string. <strong>Case sensitive:</strong> checkbox &mdash; if off, &ldquo;N&rdquo; and &ldquo;n&rdquo; both match.</td>
   </tr>
 </table>
 
 <h4>Action Blocks (red border)</h4>
-<p>Action blocks send commands to the mesh when their <strong>trigger</strong> input transitions from false to true (rising edge).</p>
+<p>Action blocks send commands to the mesh when their <strong>trigger</strong> input transitions from false to true (rising edge). They have an input port (the trigger) but no output port &mdash; they're always the end of a chain.</p>
 <table>
-  <tr><th>Block</th><th>What It Does</th><th>Configuration</th></tr>
+  <tr><th style="width:170px;">Block</th><th>What It Does</th><th>Configuration</th></tr>
   <tr>
-    <td style="color:var(--red);">Set Relay</td>
+    <td style="color:#FF5252; vertical-align:top;">
+      <strong>Set Relay</strong>
+      <svg class="lb-block-svg" width="150" height="50" viewBox="0 0 150 50" role="img" aria-label="Set Relay block">
+        <rect x="8" y="4" width="134" height="42" rx="6" fill="#280a0a" stroke="#FF5252" stroke-width="2"/>
+        <text class="lb-title" x="75" y="22" text-anchor="middle">Set Relay</text>
+        <text class="lb-sub" x="75" y="38" text-anchor="middle">C3D4:pin2 = HIGH</text>
+        <circle class="lb-port" cx="8" cy="25" r="4" fill="#FFE000"/>
+      </svg>
+    </td>
     <td>Turns a relay (digital output) on or off on a target node.</td>
     <td><strong>Node ID:</strong> Target node. <strong>Pin:</strong> GPIO pin number. <strong>Action:</strong> HIGH (on) or LOW (off).</td>
   </tr>
   <tr>
-    <td style="color:var(--red);">Pulse Relay</td>
+    <td style="color:#FF5252; vertical-align:top;">
+      <strong>Pulse Relay</strong>
+      <svg class="lb-block-svg" width="150" height="50" viewBox="0 0 150 50" role="img" aria-label="Pulse Relay block">
+        <rect x="8" y="4" width="134" height="42" rx="6" fill="#280a0a" stroke="#FF5252" stroke-width="2"/>
+        <text class="lb-title" x="75" y="22" text-anchor="middle">Pulse Relay</text>
+        <text class="lb-sub" x="75" y="38" text-anchor="middle">pin4 &middot; 500 ms</text>
+        <circle class="lb-port" cx="8" cy="25" r="4" fill="#FFE000"/>
+      </svg>
+    </td>
     <td>Briefly activates a relay for a set duration, then turns it off. Good for solenoids, buzzers, or momentary triggers.</td>
     <td><strong>Node ID:</strong> Target node. <strong>Pin:</strong> GPIO pin number. <strong>Duration (ms):</strong> How long to hold the relay on.</td>
   </tr>
   <tr>
-    <td style="color:var(--red);">Send Broadcast</td>
+    <td style="color:#FF5252; vertical-align:top;">
+      <strong>Actuator Open</strong>
+      <svg class="lb-block-svg" width="150" height="60" viewBox="0 0 150 60" role="img" aria-label="Actuator Open block">
+        <rect x="8" y="4" width="134" height="52" rx="6" fill="#280a0a" stroke="#FF5252" stroke-width="2"/>
+        <text class="lb-title" x="75" y="24" text-anchor="middle">Actuator Open</text>
+        <text class="lb-sub" x="75" y="42" text-anchor="middle">TM1 &middot; 5 s</text>
+        <circle class="lb-port" cx="8" cy="30" r="4" fill="#FFE000"/>
+      </svg>
+    </td>
+    <td>Drives a <strong>DRV8871</strong> H-bridge on the target node in the <em>forward</em> direction (IN1 HIGH, IN2 LOW) for the configured duration, then coasts to OFF (both LOW). Pin numbers come from the board's <code>actuator</code> entry in <code>board_pins.json</code> &mdash; there are no pin fields on the block itself.</td>
+    <td><strong>Node ID:</strong> Target node (must be a board with actuator pins defined, e.g. TiggyOpenMesh V1). <strong>Duration (ms):</strong> motor run time. <strong>Reverse direction:</strong> checkbox &mdash; if ticked, swaps IN1&harr;IN2 so the same block drives the motor backwards (useful if the motor is wired in reverse).</td>
+  </tr>
+  <tr>
+    <td style="color:#FF5252; vertical-align:top;">
+      <strong>Actuator Close</strong>
+      <svg class="lb-block-svg" width="150" height="60" viewBox="0 0 150 60" role="img" aria-label="Actuator Close block">
+        <rect x="8" y="4" width="134" height="52" rx="6" fill="#280a0a" stroke="#FF5252" stroke-width="2"/>
+        <text class="lb-title" x="75" y="24" text-anchor="middle">Actuator Close</text>
+        <text class="lb-sub" x="75" y="42" text-anchor="middle">TM1 &middot; 5 s</text>
+        <circle class="lb-port" cx="8" cy="30" r="4" fill="#FFE000"/>
+      </svg>
+    </td>
+    <td>Drives the DRV8871 in the <em>reverse</em> direction (IN1 LOW, IN2 HIGH) for the configured duration, then coasts. Mirror of Actuator Open with the polarity inverted &mdash; pair them on the same rule to drive a gate / blind / valve both ways.</td>
+    <td>Same fields as Actuator Open. The Reverse toggle still works (swaps the polarity again), so a single hardware install can drive either physical direction per rule.</td>
+  </tr>
+  <tr>
+    <td style="color:#FF5252; vertical-align:top;">
+      <strong>Send Broadcast</strong>
+      <svg class="lb-block-svg" width="150" height="50" viewBox="0 0 150 50" role="img" aria-label="Send Broadcast block">
+        <rect x="8" y="4" width="134" height="42" rx="6" fill="#280a0a" stroke="#FF5252" stroke-width="2"/>
+        <text class="lb-title" x="75" y="22" text-anchor="middle">Broadcast</text>
+        <text class="lb-sub" x="75" y="38" text-anchor="middle">&ldquo;Gate open&rdquo;</text>
+        <circle class="lb-port" cx="8" cy="25" r="4" fill="#FFE000"/>
+      </svg>
+    </td>
     <td>Sends a text message to <strong>all nodes</strong> on the mesh (address FFFF).</td>
     <td><strong>Message (true):</strong> Text sent when trigger becomes true (e.g., &ldquo;Gate open&rdquo;). <strong>Message (false):</strong> Optional text sent when trigger becomes false (e.g., &ldquo;Gate closed&rdquo;).</td>
   </tr>
   <tr>
-    <td style="color:var(--red);">Send Direct</td>
+    <td style="color:#FF5252; vertical-align:top;">
+      <strong>Send Direct</strong>
+      <svg class="lb-block-svg" width="150" height="50" viewBox="0 0 150 50" role="img" aria-label="Send Direct block">
+        <rect x="8" y="4" width="134" height="42" rx="6" fill="#280a0a" stroke="#FF5252" stroke-width="2"/>
+        <text class="lb-title" x="75" y="22" text-anchor="middle">Send Direct</text>
+        <text class="lb-sub" x="75" y="38" text-anchor="middle">&rarr; A1B2</text>
+        <circle class="lb-port" cx="8" cy="25" r="4" fill="#FFE000"/>
+      </svg>
+    </td>
     <td>Sends a text message to a <strong>specific node</strong>.</td>
     <td><strong>Node ID:</strong> Target node. <strong>Message (true):</strong> Text when true. <strong>Message (false):</strong> Optional text when false.</td>
   </tr>
   <tr>
-    <td style="color:var(--red);">Telegram Output</td>
+    <td style="color:#FF5252; vertical-align:top;">
+      <strong>Telegram Output</strong>
+      <svg class="lb-block-svg" width="150" height="50" viewBox="0 0 150 50" role="img" aria-label="Telegram Output block">
+        <rect x="8" y="4" width="134" height="42" rx="6" fill="#280a0a" stroke="#FF5252" stroke-width="2"/>
+        <text class="lb-title" x="75" y="22" text-anchor="middle">Telegram Out</text>
+        <text class="lb-sub" x="75" y="38" text-anchor="middle">#getwind</text>
+        <circle class="lb-port" cx="8" cy="25" r="4" fill="#00E5FF"/>
+      </svg>
+    </td>
     <td>Stores the incoming value for Telegram bot queries. When a user sends the rule's <code>#name</code> command in Telegram (e.g., <code>#getwind</code>), the bot reads this block's last value and replies with a formatted message. Does not fire a LoRa action &mdash; this is a read-only display endpoint.</td>
     <td><strong>Label:</strong> Human name (e.g., &ldquo;Wind Speed&rdquo;). <strong>Unit:</strong> Engineering unit (e.g., &ldquo;m/s&rdquo;). <strong>Format:</strong> Template string (default: <code>{label}: {value} {unit}</code>).</td>
   </tr>
 </table>
+
+<div class="info-box orange">
+  <p><strong>Block status colours:</strong> While a rule is running, action blocks change colour to reflect the most recent fire's progress:
+  <span class="status-pill idle">idle</span>
+  <span class="status-pill triggered">triggered</span>
+  <span class="status-pill retrying">retrying</span>
+  <span class="status-pill delivered">delivered</span>
+  <span class="status-pill failed">failed</span>.
+  See <a href="#delivery-tracking" style="color:var(--cyan);">&sect;25 Message Delivery Tracking</a> for the full ACK / retry pipeline.</p>
+</div>
 
 <!-- ─── Connecting Blocks ─── -->
 
@@ -2569,6 +2936,264 @@ SETPOINT,&lt;pin&gt;,&lt;op&gt;,&lt;threshold&gt;,MSG,&lt;msgTrue&gt;[,&lt;msgFa
 
 <div class="info-box orange">
   <p><strong>Limitation:</strong> Rules using Moving Average, Delta Rate, AND/OR/NOT gates, Latch, Pulse Relay, or Direct Message blocks cannot deploy to node &mdash; they can only run as gateway-evaluated rules. Each node supports a maximum of 4 setpoints (RAM only, lost on reboot).</p>
+</div>
+
+<!-- ─── Typical Wiring Patterns (SVG) ─── -->
+
+<h3>Typical Wiring Patterns</h3>
+<p>Six commonly-built rules, drawn the way they actually look on the canvas. Wires are colour-coded by data type: <span style="color:#00E5FF;">cyan = number</span>, <span style="color:#FFE000;">yellow = boolean</span>, <span style="color:#FFFFFF;">white = string</span>.</p>
+
+<div class="lb-wiring-grid">
+
+  <!-- Pattern 1: Sensor threshold → relay -->
+  <div class="lb-wiring-card">
+    <h4>1. Sensor threshold &rarr; relay</h4>
+    <p>The bread-and-butter: read a sensor, scale it to real units, compare to a constant, fire a relay. Deployable as a firmware setpoint.</p>
+    <svg viewBox="0 0 720 200" xmlns="http://www.w3.org/2000/svg">
+      <!-- Sensor Read -->
+      <g>
+        <rect x="10" y="20" width="140" height="48" rx="6" fill="#0a2838" stroke="#00E5FF" stroke-width="2"/>
+        <text class="lb-title" x="80" y="40" text-anchor="middle">Sensor Read</text>
+        <text class="lb-sub" x="80" y="58" text-anchor="middle">A1B2:pin5</text>
+        <circle cx="150" cy="44" r="5" fill="#00E5FF" stroke="#111"/>
+      </g>
+      <!-- Wire 1 -->
+      <path d="M 150 44 C 185 44 185 44 220 44" stroke="#00E5FF" stroke-width="2" fill="none"/>
+      <!-- Scale -->
+      <g>
+        <rect x="220" y="20" width="120" height="48" rx="6" fill="#0a2818" stroke="#00E676" stroke-width="2"/>
+        <text class="lb-title" x="280" y="40" text-anchor="middle">Scale</text>
+        <text class="lb-sub" x="280" y="58" text-anchor="middle">&times;0.0278 m/s</text>
+        <circle cx="220" cy="44" r="5" fill="#00E5FF" stroke="#111"/>
+        <circle cx="340" cy="44" r="5" fill="#00E5FF" stroke="#111"/>
+      </g>
+      <!-- Wire 2 -->
+      <path d="M 340 44 C 380 44 380 80 410 80" stroke="#00E5FF" stroke-width="2" fill="none"/>
+      <!-- Constant (offset down so it feeds 'b') -->
+      <g>
+        <rect x="220" y="100" width="120" height="48" rx="6" fill="#0a2838" stroke="#00E5FF" stroke-width="2"/>
+        <text class="lb-title" x="280" y="120" text-anchor="middle">Constant</text>
+        <text class="lb-sub" x="280" y="138" text-anchor="middle">15.0</text>
+        <circle cx="340" cy="124" r="5" fill="#00E5FF" stroke="#111"/>
+      </g>
+      <!-- Wire 3 const → compare b -->
+      <path d="M 340 124 C 380 124 380 110 410 110" stroke="#00E5FF" stroke-width="2" fill="none"/>
+      <!-- Compare -->
+      <g>
+        <rect x="410" y="60" width="120" height="68" rx="6" fill="#282808" stroke="#FFE000" stroke-width="2"/>
+        <text class="lb-title" x="470" y="86" text-anchor="middle">Compare</text>
+        <text class="lb-sub" x="470" y="106" text-anchor="middle">a &gt; b</text>
+        <circle cx="410" cy="80" r="5" fill="#00E5FF" stroke="#111"/>
+        <text x="416" y="83" fill="#888" font-size="9">a</text>
+        <circle cx="410" cy="110" r="5" fill="#00E5FF" stroke="#111"/>
+        <text x="416" y="113" fill="#888" font-size="9">b</text>
+        <circle cx="530" cy="94" r="5" fill="#FFE000" stroke="#111"/>
+      </g>
+      <!-- Wire 4 -->
+      <path d="M 530 94 C 570 94 570 94 590 94" stroke="#FFE000" stroke-width="2" fill="none"/>
+      <!-- Set Relay -->
+      <g>
+        <rect x="590" y="70" width="120" height="48" rx="6" fill="#280a0a" stroke="#FF5252" stroke-width="2"/>
+        <text class="lb-title" x="650" y="90" text-anchor="middle">Set Relay</text>
+        <text class="lb-sub" x="650" y="108" text-anchor="middle">C3D4:pin2 HIGH</text>
+        <circle cx="590" cy="94" r="5" fill="#FFE000" stroke="#111"/>
+      </g>
+    </svg>
+  </div>
+
+  <!-- Pattern 2: Beacon → Monostable → Pulse Relay -->
+  <div class="lb-wiring-card">
+    <h4>2. Beacon &rarr; Monostable &rarr; Pulse Relay</h4>
+    <p>Gate opener: when a known iBeacon arrives in range, open the gate for 5 s and keep it triggered for 60 s after the beacon leaves so the operator can drive through.</p>
+    <svg viewBox="0 0 720 180" xmlns="http://www.w3.org/2000/svg">
+      <g>
+        <rect x="10" y="40" width="160" height="68" rx="6" fill="#0a2838" stroke="#00E5FF" stroke-width="2"/>
+        <text class="lb-title" x="90" y="66" text-anchor="middle">Beacon Detect</text>
+        <text class="lb-sub" x="90" y="86" text-anchor="middle">Daisy : -80 dBm</text>
+        <circle cx="170" cy="62" r="5" fill="#FFE000" stroke="#111"/>
+        <text x="164" y="66" fill="#888" font-size="9" text-anchor="end">det</text>
+        <circle cx="170" cy="92" r="5" fill="#00E5FF" stroke="#111"/>
+        <text x="164" y="96" fill="#888" font-size="9" text-anchor="end">rssi</text>
+      </g>
+      <path d="M 170 62 C 220 62 220 74 270 74" stroke="#FFE000" stroke-width="2" fill="none"/>
+      <g>
+        <rect x="270" y="50" width="140" height="48" rx="6" fill="#282808" stroke="#FFE000" stroke-width="2"/>
+        <text class="lb-title" x="340" y="70" text-anchor="middle">Monostable</text>
+        <text class="lb-sub" x="340" y="88" text-anchor="middle">60 s hold</text>
+        <circle cx="270" cy="74" r="5" fill="#FFE000" stroke="#111"/>
+        <circle cx="410" cy="74" r="5" fill="#FFE000" stroke="#111"/>
+      </g>
+      <path d="M 410 74 C 460 74 460 74 510 74" stroke="#FFE000" stroke-width="2" fill="none"/>
+      <g>
+        <rect x="510" y="50" width="160" height="48" rx="6" fill="#280a0a" stroke="#FF5252" stroke-width="2"/>
+        <text class="lb-title" x="590" y="70" text-anchor="middle">Pulse Relay</text>
+        <text class="lb-sub" x="590" y="88" text-anchor="middle">pin4 &middot; 500 ms</text>
+        <circle cx="510" cy="74" r="5" fill="#FFE000" stroke="#111"/>
+      </g>
+    </svg>
+  </div>
+
+  <!-- Pattern 3: Schedule + Compare AND → Set Relay -->
+  <div class="lb-wiring-card">
+    <h4>3. Schedule AND temperature &rarr; heater</h4>
+    <p>Frost protection: heater on only when the schedule is active AND temperature is below threshold. The AND gate gives belt-and-braces control.</p>
+    <svg viewBox="0 0 720 200" xmlns="http://www.w3.org/2000/svg">
+      <g>
+        <rect x="10" y="20" width="140" height="48" rx="6" fill="#0a2838" stroke="#00E5FF" stroke-width="2"/>
+        <text class="lb-title" x="80" y="40" text-anchor="middle">Schedule</text>
+        <text class="lb-sub" x="80" y="58" text-anchor="middle">22:00&ndash;06:00</text>
+        <circle cx="150" cy="44" r="5" fill="#FFE000" stroke="#111"/>
+      </g>
+      <path d="M 150 44 C 210 44 210 60 280 60" stroke="#FFE000" stroke-width="2" fill="none"/>
+
+      <g>
+        <rect x="10" y="100" width="140" height="48" rx="6" fill="#0a2838" stroke="#00E5FF" stroke-width="2"/>
+        <text class="lb-title" x="80" y="120" text-anchor="middle">Sensor Read</text>
+        <text class="lb-sub" x="80" y="138" text-anchor="middle">Temp pin34</text>
+        <circle cx="150" cy="124" r="5" fill="#00E5FF" stroke="#111"/>
+      </g>
+      <path d="M 150 124 C 180 124 180 124 200 124" stroke="#00E5FF" stroke-width="2" fill="none"/>
+      <g>
+        <rect x="200" y="100" width="80" height="48" rx="6" fill="#282808" stroke="#FFE000" stroke-width="2"/>
+        <text class="lb-title" x="240" y="120" text-anchor="middle">Compare</text>
+        <text class="lb-sub" x="240" y="138" text-anchor="middle">&lt; 3&deg;C</text>
+        <circle cx="200" cy="124" r="5" fill="#00E5FF" stroke="#111"/>
+        <circle cx="280" cy="124" r="5" fill="#FFE000" stroke="#111"/>
+      </g>
+      <path d="M 280 124 C 330 124 330 80 380 80" stroke="#FFE000" stroke-width="2" fill="none"/>
+
+      <g>
+        <rect x="380" y="40" width="90" height="80" rx="6" fill="#282808" stroke="#FFE000" stroke-width="2"/>
+        <text class="lb-title" x="425" y="76" text-anchor="middle">AND</text>
+        <circle cx="380" cy="60" r="5" fill="#FFE000" stroke="#111"/>
+        <circle cx="380" cy="80" r="5" fill="#FFE000" stroke="#111"/>
+        <circle cx="470" cy="70" r="5" fill="#FFE000" stroke="#111"/>
+      </g>
+      <path d="M 470 70 C 510 70 510 70 540 70" stroke="#FFE000" stroke-width="2" fill="none"/>
+      <g>
+        <rect x="540" y="46" width="160" height="48" rx="6" fill="#280a0a" stroke="#FF5252" stroke-width="2"/>
+        <text class="lb-title" x="620" y="66" text-anchor="middle">Set Relay</text>
+        <text class="lb-sub" x="620" y="84" text-anchor="middle">heater pin2 HIGH</text>
+        <circle cx="540" cy="70" r="5" fill="#FFE000" stroke="#111"/>
+      </g>
+    </svg>
+  </div>
+
+  <!-- Pattern 4: Pulse → Delta → Scale → Telegram -->
+  <div class="lb-wiring-card">
+    <h4>4. Pulse counter &rarr; wind speed &rarr; Telegram</h4>
+    <p>Anemometer feeding the Telegram bot. Pulse counts &rarr; Delta Rate (Hz) &rarr; Scale (m/s) &rarr; Telegram Output. Replies to <code>#getwind</code> from a phone.</p>
+    <svg viewBox="0 0 720 90" xmlns="http://www.w3.org/2000/svg">
+      <g>
+        <rect x="10" y="20" width="140" height="48" rx="6" fill="#0a2838" stroke="#00E5FF" stroke-width="2"/>
+        <text class="lb-title" x="80" y="40" text-anchor="middle">Pulse Input</text>
+        <text class="lb-sub" x="80" y="58" text-anchor="middle">A1B2:pin5</text>
+        <circle cx="150" cy="44" r="5" fill="#00E5FF" stroke="#111"/>
+      </g>
+      <path d="M 150 44 H 180" stroke="#00E5FF" stroke-width="2" fill="none"/>
+      <g>
+        <rect x="180" y="20" width="120" height="48" rx="6" fill="#0a2818" stroke="#00E676" stroke-width="2"/>
+        <text class="lb-title" x="240" y="40" text-anchor="middle">Delta Rate</text>
+        <text class="lb-sub" x="240" y="58" text-anchor="middle">Hz</text>
+        <circle cx="180" cy="44" r="5" fill="#00E5FF" stroke="#111"/>
+        <circle cx="300" cy="44" r="5" fill="#00E5FF" stroke="#111"/>
+      </g>
+      <path d="M 300 44 H 330" stroke="#00E5FF" stroke-width="2" fill="none"/>
+      <g>
+        <rect x="330" y="20" width="120" height="48" rx="6" fill="#0a2818" stroke="#00E676" stroke-width="2"/>
+        <text class="lb-title" x="390" y="40" text-anchor="middle">Scale</text>
+        <text class="lb-sub" x="390" y="58" text-anchor="middle">&times;0.0278</text>
+        <circle cx="330" cy="44" r="5" fill="#00E5FF" stroke="#111"/>
+        <circle cx="450" cy="44" r="5" fill="#00E5FF" stroke="#111"/>
+      </g>
+      <path d="M 450 44 H 480" stroke="#00E5FF" stroke-width="2" fill="none"/>
+      <g>
+        <rect x="480" y="20" width="180" height="48" rx="6" fill="#280a0a" stroke="#FF5252" stroke-width="2"/>
+        <text class="lb-title" x="570" y="40" text-anchor="middle">Telegram Output</text>
+        <text class="lb-sub" x="570" y="58" text-anchor="middle">Wind: {value} m/s</text>
+        <circle cx="480" cy="44" r="5" fill="#00E5FF" stroke="#111"/>
+      </g>
+    </svg>
+  </div>
+
+  <!-- Pattern 5: Value Map → Equals → Actuator -->
+  <div class="lb-wiring-card">
+    <h4>5. Wind direction &rarr; gate close</h4>
+    <p>Resistor-network wind vane &rarr; Value Map (16 compass labels) &rarr; Equals "N" &rarr; Actuator Close on a TM1 board with DRV8871.</p>
+    <svg viewBox="0 0 720 100" xmlns="http://www.w3.org/2000/svg">
+      <g>
+        <rect x="10" y="20" width="140" height="48" rx="6" fill="#0a2838" stroke="#00E5FF" stroke-width="2"/>
+        <text class="lb-title" x="80" y="40" text-anchor="middle">Sensor Read</text>
+        <text class="lb-sub" x="80" y="58" text-anchor="middle">Vane ADC</text>
+        <circle cx="150" cy="44" r="5" fill="#00E5FF" stroke="#111"/>
+      </g>
+      <path d="M 150 44 H 180" stroke="#00E5FF" stroke-width="2" fill="none"/>
+      <g>
+        <rect x="180" y="20" width="140" height="48" rx="6" fill="#0a2818" stroke="#00E676" stroke-width="2"/>
+        <text class="lb-title" x="250" y="40" text-anchor="middle">Value Map</text>
+        <text class="lb-sub" x="250" y="58" text-anchor="middle">16 compass pts</text>
+        <circle cx="180" cy="44" r="5" fill="#00E5FF" stroke="#111"/>
+        <circle cx="320" cy="44" r="5" fill="#FFFFFF" stroke="#111"/>
+      </g>
+      <path d="M 320 44 H 350" stroke="#FFFFFF" stroke-width="2" fill="none"/>
+      <g>
+        <rect x="350" y="20" width="140" height="48" rx="6" fill="#282808" stroke="#FFE000" stroke-width="2"/>
+        <text class="lb-title" x="420" y="40" text-anchor="middle">Equals (txt)</text>
+        <text class="lb-sub" x="420" y="58" text-anchor="middle">== &ldquo;N&rdquo;</text>
+        <circle cx="350" cy="44" r="5" fill="#FFFFFF" stroke="#111"/>
+        <circle cx="490" cy="44" r="5" fill="#FFE000" stroke="#111"/>
+      </g>
+      <path d="M 490 44 H 520" stroke="#FFE000" stroke-width="2" fill="none"/>
+      <g>
+        <rect x="520" y="20" width="180" height="48" rx="6" fill="#280a0a" stroke="#FF5252" stroke-width="2"/>
+        <text class="lb-title" x="610" y="40" text-anchor="middle">Actuator Close</text>
+        <text class="lb-sub" x="610" y="58" text-anchor="middle">TM1 &middot; 5 s</text>
+        <circle cx="520" cy="44" r="5" fill="#FFE000" stroke="#111"/>
+      </g>
+    </svg>
+  </div>
+
+  <!-- Pattern 6: Digital Read + Latch → Broadcast -->
+  <div class="lb-wiring-card">
+    <h4>6. Door sensor &rarr; latched alarm</h4>
+    <p>A door switch sets a latch; the latch stays true until the user explicitly resets it via a second sensor (key fob, NFC tap). The latch output broadcasts an alert mesh-wide.</p>
+    <svg viewBox="0 0 720 180" xmlns="http://www.w3.org/2000/svg">
+      <g>
+        <rect x="10" y="20" width="150" height="48" rx="6" fill="#0a2838" stroke="#00E5FF" stroke-width="2"/>
+        <text class="lb-title" x="85" y="40" text-anchor="middle">Digital Read</text>
+        <text class="lb-sub" x="85" y="58" text-anchor="middle">door pin5</text>
+        <circle cx="160" cy="44" r="5" fill="#FFE000" stroke="#111"/>
+      </g>
+      <path d="M 160 44 C 230 44 230 70 290 70" stroke="#FFE000" stroke-width="2" fill="none"/>
+
+      <g>
+        <rect x="10" y="100" width="150" height="48" rx="6" fill="#0a2838" stroke="#00E5FF" stroke-width="2"/>
+        <text class="lb-title" x="85" y="120" text-anchor="middle">Digital Read</text>
+        <text class="lb-sub" x="85" y="138" text-anchor="middle">reset pin6</text>
+        <circle cx="160" cy="124" r="5" fill="#FFE000" stroke="#111"/>
+      </g>
+      <path d="M 160 124 C 230 124 230 100 290 100" stroke="#FFE000" stroke-width="2" fill="none"/>
+
+      <g>
+        <rect x="290" y="50" width="120" height="68" rx="6" fill="#282808" stroke="#FFE000" stroke-width="2"/>
+        <text class="lb-title" x="350" y="76" text-anchor="middle">Latch</text>
+        <text class="lb-sub" x="350" y="96" text-anchor="middle">SR</text>
+        <circle cx="290" cy="70" r="5" fill="#FFE000" stroke="#111"/>
+        <text x="296" y="74" fill="#888" font-size="9">s</text>
+        <circle cx="290" cy="100" r="5" fill="#FFE000" stroke="#111"/>
+        <text x="296" y="104" fill="#888" font-size="9">r</text>
+        <circle cx="410" cy="84" r="5" fill="#FFE000" stroke="#111"/>
+      </g>
+      <path d="M 410 84 C 450 84 450 84 480 84" stroke="#FFE000" stroke-width="2" fill="none"/>
+      <g>
+        <rect x="480" y="60" width="220" height="48" rx="6" fill="#280a0a" stroke="#FF5252" stroke-width="2"/>
+        <text class="lb-title" x="590" y="80" text-anchor="middle">Send Broadcast</text>
+        <text class="lb-sub" x="590" y="98" text-anchor="middle">&ldquo;DOOR ALARM!&rdquo;</text>
+        <circle cx="480" cy="84" r="5" fill="#FFE000" stroke="#111"/>
+      </g>
+    </svg>
+  </div>
+
 </div>
 
 <!-- ─── Examples ─── -->
@@ -2938,7 +3563,7 @@ sudo systemctl restart tiggyopenmesh-hub</pre></div>
 </div>
 <div class="flow" style="margin-left:200px; margin-top:8px;">
   <span class="flow-arrow" style="transform:rotate(90deg);">&darr;</span>
-  <span style="color:var(--red); font-size:0.85em;">3s timeout, no ACK</span>
+  <span style="color:var(--red); font-size:0.85em;">8s &times; 5 retries, no ACK</span>
   <span class="flow-arrow">&rarr;</span>
   <div class="flow-box" style="border-color:var(--red);">FAILED<br><span style="color:var(--dim);font-size:0.8em;">No delivery receipt</span></div>
 </div>
@@ -2949,8 +3574,12 @@ sudo systemctl restart tiggyopenmesh-hub</pre></div>
   <li>Radio confirms transmission complete &mdash; firmware sends <code>SENT,&lt;mid&gt;</code> to BLE, state becomes <strong>SENT</strong></li>
   <li>Recipient decrypts the message successfully and sends back a directed plain <code>ACK,&lt;from&gt;,&lt;mid&gt;</code> packet to the original sender</li>
   <li>Sender receives the ACK &mdash; state becomes <strong>DELIVERED</strong></li>
-  <li>If no ACK arrives within <strong>3 seconds</strong>, state becomes <strong>FAILED</strong> (the message may still have been received &mdash; the ACK could have been lost)</li>
+  <li>If no ACK arrives within the firmware's per-attempt window (<strong>8 s in v4.2</strong>, was 3 s pre-v4.2), the firmware retries up to <strong>5 times</strong> before emitting <code>FAILED,&lt;mid&gt;</code> on serial / BLE.</li>
 </ol>
+
+<div class="info-box cyan">
+  <p><strong>Why the timeout was bumped to 8 s:</strong> the previous 3 s window was racing the half-duplex radio. A small fraction of remote-node ACKs arrived <em>just</em> after the local retry transmit started &mdash; the colliding TX clobbered the inbound ACK and forced an unnecessary retry. 8 s &times; 5 attempts gives ~40 s of total ACK window before the firmware emits <code>FAILED</code>, which is enough cover for SF9 round-trip plus channel-busy back-off.</p>
+</div>
 
 <h3>Visual Indicators</h3>
 <table>
@@ -2973,7 +3602,46 @@ sudo systemctl restart tiggyopenmesh-hub</pre></div>
 </div>
 
 <div class="info-box orange">
-  <p><strong>FAILED does not mean undelivered:</strong> A FAILED state means the sender didn't receive an ACK within 3 seconds. The message may have been delivered but the ACK packet was lost in transit. In lossy environments, consider re-sending important messages.</p>
+  <p><strong>FAILED does not mean undelivered:</strong> A FAILED state means the sender didn't receive an ACK within the full retry window. The message may have been delivered but every ACK packet was lost in transit. In lossy environments, consider re-sending important messages.</p>
+</div>
+
+<h3>Logic Builder ACK Tracking (v4.2)</h3>
+<p>The gateway GUI now consumes the firmware's ACK / DELIVERED / FAILED serial replies and feeds them back into Logic Builder action blocks, so the visual state on the canvas reflects what actually happened on the air. This replaces the old behaviour where every relay command silently showed "No ACK" after 15 s even when the relay had toggled correctly.</p>
+
+<h4>Serial protocol consumed by the GUI</h4>
+<table>
+  <tr><th>Line</th><th>What it means</th><th>GUI behaviour</th></tr>
+  <tr><td><code>ACK,&lt;node&gt;,&lt;mid&gt;</code></td><td>The destination decrypted the unicast packet successfully and sent an ACK back over LoRa.</td><td>Marks the oldest pending command targeting <code>&lt;node&gt;</code> as delivered. Block status &rarr; <span class="status-pill delivered">delivered</span>.</td></tr>
+  <tr><td><code>DELIVERED,&lt;mid&gt;</code></td><td>The firmware's per-attempt retry tracker confirmed delivery (ACK matched the most-recent <code>mid</code>).</td><td>Same as ACK &mdash; clears the oldest pending entry. Status &rarr; <span class="status-pill delivered">delivered</span>.</td></tr>
+  <tr><td><code>FAILED,&lt;mid&gt;</code></td><td>The firmware exhausted its 5 retries with no ACK.</td><td>If the GUI has retries remaining for this command (max 3), re-queues with status <span class="status-pill retrying">retrying</span>. Once GUI retries are also exhausted, status &rarr; <span class="status-pill failed">failed</span>.</td></tr>
+</table>
+
+<h4>Two layers of retries</h4>
+<div class="flow" style="flex-wrap:wrap;">
+  <div class="flow-box" style="border-color:#FF5252;">Logic Builder<br><span style="color:var(--dim);font-size:0.8em;">Action block fires</span></div>
+  <span class="flow-arrow">&rarr;</span>
+  <div class="flow-box" style="border-color:var(--cyan);">Send to gateway<br><span style="color:var(--dim);font-size:0.8em;">MSG,&lt;node&gt;,CMD,&hellip;</span></div>
+  <span class="flow-arrow">&rarr;</span>
+  <div class="flow-box" style="border-color:var(--yellow);">Firmware retry loop<br><span style="color:var(--dim);font-size:0.8em;">5 &times; 8 s = 40 s</span></div>
+  <span class="flow-arrow">&rarr;</span>
+  <div class="flow-box" style="border-color:#FF9800;">GUI retry layer<br><span style="color:var(--dim);font-size:0.8em;">3 attempts<br>total &asymp; 2 min</span></div>
+  <span class="flow-arrow">&rarr;</span>
+  <div class="flow-box" style="border-color:#FF1744;">FAILED<br><span style="color:var(--dim);font-size:0.8em;">give up &amp; alert</span></div>
+</div>
+<p>The GUI never gives up on the first <code>FAILED,&lt;mid&gt;</code> &mdash; it tracks per-command retry counts and re-fires automatically up to <code>GUI_MAX_RELAY_RETRIES = 3</code>. Only when the GUI layer is also exhausted does the block go solid <span class="status-pill failed">failed</span> with an error label. The total cover before hard-failing is <strong>about 2 minutes</strong> &mdash; long enough to absorb radio fades but short enough that a genuine outage still surfaces.</p>
+
+<h4>Block status pills on the canvas</h4>
+<table>
+  <tr><th>Status</th><th>Pill</th><th>Meaning</th></tr>
+  <tr><td>idle</td><td><span class="status-pill idle">idle</span></td><td>Block has never fired (or rule disabled).</td></tr>
+  <tr><td>triggered</td><td><span class="status-pill triggered">triggered</span></td><td>Command was just queued; waiting for ACK.</td></tr>
+  <tr><td>retrying</td><td><span class="status-pill retrying">retrying</span></td><td>Firmware reported FAILED but the GUI is re-firing (GUI retry 1 or 2 of 3).</td></tr>
+  <tr><td>delivered</td><td><span class="status-pill delivered">delivered</span></td><td>Remote node ACKed &mdash; the relay/actuator actually changed state.</td></tr>
+  <tr><td>failed</td><td><span class="status-pill failed">failed</span></td><td>All GUI + firmware retries exhausted (~2 min). Block carries an error label until next successful fire.</td></tr>
+</table>
+
+<div class="info-box green">
+  <p><strong>Why this matters for safety blocks:</strong> a dead-man's-switch rule that turns a relay <em>off</em> when an input goes false must NOT believe a command silently succeeded. The new pipeline only marks a command delivered when the firmware reports an ACK on the wire, so any downstream rules that depend on "did this actually arrive?" get an honest answer.</p>
 </div>
 </section>
 
@@ -3658,7 +4326,11 @@ BEACON,REVERTED,Gate</pre>
 <p>The gateway GUI Logic Builder includes a <strong>Beacon Detect</strong> input block that can trigger automation rules based on beacon proximity events received from the mesh. Beacon events (<code>BEACON,TRIGGERED</code> / <code>BEACON,REVERTED</code>) from any node in the mesh are parsed by the gateway and fed into the block evaluation engine.</p>
 
 <div class="info-box">
-  <p><strong>Note:</strong> Beacon scanning is disabled in <strong>solar mode</strong> to conserve power. The BLE GATT server (phone app connection) continues to work alongside scanning in normal mode.</p>
+  <p><strong>Note:</strong> Beacon scanning is disabled in <strong>gateway mode</strong> and in <strong>solar mode</strong> &mdash; the firmware sets <code>beaconScanEnabled = false</code> in both. The BLE GATT server (phone app connection) continues to work alongside scanning in normal mode.</p>
+</div>
+
+<div class="info-box orange">
+  <p><strong>Finding a beacon's MAC:</strong> the Beacon Detect dialog used to have a "Scan for Beacons" button that fired <code>BEACON,SCAN</code> on the gateway. That button has been removed &mdash; the gateway can't scan in gateway mode anyway, and on TM1 gateways BLE is often disabled entirely to avoid stack crashes. Instead, use any phone BLE-scanner app (nRF Connect, BLE Scanner) to read the MAC address from the beacon and paste it into the Beacon ID field.</p>
 </div>
 </section>
 
@@ -4133,16 +4805,106 @@ Response: [{"mac": "dc:0d:30:23:38:1e", "lat": 52.7097, "lon": -0.8414, "accurac
   <p><strong>All commands can be sent to remote nodes</strong> by wrapping in CMD:<br>
   <code>MSG,&lt;nodeId&gt;,CMD,&lt;command&gt;</code> &mdash; e.g., <code>MSG,5041,CMD,SET,3,1</code></p>
 </div>
+
+<h3>Battery Monitor (v4.2)</h3>
+<table>
+  <tr><th>Command</th><th>Format (Serial)</th><th>Format (BLE/App)</th><th>Description</th></tr>
+  <tr><td>Read battery (debug)</td><td><code>BATT_DEBUG</code></td><td>&mdash;</td><td>One-shot diagnostic: prints raw ADC, calibrated mV at the pin, divider applied, and resulting pack mV. Used to verify a new divider.</td></tr>
+  <tr><td>Tune thresholds</td><td><code>BATT_CFG &lt;div&gt; &lt;low_mv&gt; &lt;rec_mv&gt;</code></td><td>&mdash;</td><td>Override BAT_DIVIDER / BAT_LOW_MV / BAT_RECOVER_MV at runtime. Saved to EEPROM, survives reboot.</td></tr>
+  <tr><td>Reset to defaults</td><td><code>BATT_CFG RESET</code></td><td>&mdash;</td><td>Clear EEPROM overrides and return to <code>Pins.h</code> compile-time values.</td></tr>
+  <tr><td>Show current cfg</td><td><code>BATT_CFG</code></td><td>&mdash;</td><td>Print active divider + thresholds.</td></tr>
+</table>
+
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<section id="battery-monitor">
+<h2>49. Battery Monitoring &amp; Auto-Shutdown</h2>
+
+<p>Every supported board with a wired battery divider runs a non-blocking battery monitor that:</p>
+<ol style="color:var(--dim); padding-left:20px;">
+  <li>Reads the pack voltage every few seconds via <code>analogReadMilliVolts()</code> (per-chip calibrated, no manual <code>BAT_VREF</code> needed).</li>
+  <li>Piggybacks the latest voltage onto the regular heartbeat &mdash; the GUI parses it and shows a live voltage chip per node.</li>
+  <li>If the pack drops below <code>BAT_LOW_MV</code> for &ge; 30 s, the node deep-sleeps to protect the LiPo. It wakes only when the pack recovers to <code>BAT_RECOVER_MV</code> (hysteresis prevents flapping).</li>
+</ol>
+
+<h3>Board defaults</h3>
+<table>
+  <tr><th>Board</th><th>ADC GPIO</th><th>Divider</th><th>Cutoff &rarr; Recover</th><th>ADC_CTRL polarity</th></tr>
+  <tr><td>Heltec V3</td><td>1 (ADC1_CH0)</td><td>4.9&times; (100 k / 390 k)</td><td>3.3 V &rarr; 3.7 V</td><td>HIGH = on</td></tr>
+  <tr><td>Heltec V4</td><td>1 (ADC1_CH0)</td><td>4.9&times; (100 k / 390 k)</td><td>3.3 V &rarr; 3.7 V</td><td>HIGH = on</td></tr>
+  <tr><td>LoRa32 T3</td><td>35</td><td>2.0&times;</td><td>3.3 V &rarr; 3.7 V</td><td>n/a (always-on)</td></tr>
+  <tr><td>T-Deck Plus</td><td>4</td><td>2.0&times;</td><td>3.3 V &rarr; 3.7 V</td><td>n/a</td></tr>
+  <tr><td>TiggyOpenMesh V1</td><td>1 (ADC1_CH0, <em>after rework</em>)</td><td>5.545&times; (1 M / 220 k)</td><td>9.3 V &rarr; 11.1 V (3 S LiPo)</td><td>n/a (always-on)</td></tr>
+  <tr><td>XIAO S3</td><td>&mdash; not wired</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td></tr>
+</table>
+
+<h3>Heartbeat tag</h3>
+<p>The heartbeat format gained an optional <code>B&lt;mv&gt;</code> field appended after any existing flags:</p>
+<pre>HB,&lt;id&gt;,&lt;board&gt;[,&lt;flags&gt;][,B&lt;mv&gt;]
+<span class="comment"># Example:</span>
+HB,200D,TM1,SG,B11820
+</pre>
+<p>The <code>B</code> tag is positional &mdash; old gateways that don't know about it simply ignore the extra token. New gateways parse it and update the matching node card's voltage chip immediately.</p>
+
+<h3>Field-tuning the thresholds</h3>
+<p>The cutoff and recovery thresholds (and the divider multiplier itself) are EEPROM-tunable at runtime. Useful when you've swapped resistors, moved from a 3 S LiPo to a 12 V SLA, or just want to be more conservative on a remote installation. Connect over USB serial and use <code>BATT_CFG</code>:</p>
+<pre>
+<span class="comment"># Show what's running</span>
+&gt; <span class="keyword">BATT_CFG</span>
+BATT_CFG: divider=5.545 low_mv=9300 recover_mv=11100  (source: EEPROM)
+
+<span class="comment"># Tune for a 24 V SLA pair (with a 1M + 100k divider = 11x ratio)</span>
+&gt; <span class="keyword">BATT_CFG 11.0 21000 24000</span>
+OK: BATT_CFG saved to EEPROM
+
+<span class="comment"># One-shot diagnostic — useful when fitting a new divider</span>
+&gt; <span class="keyword">BATT_DEBUG</span>
+BATT_DEBUG: pin=1 raw_adc=2148 cal_mv=2132 divider=5.545 pack_mv=11822
+
+<span class="comment"># Wipe overrides, return to compile-time defaults</span>
+&gt; <span class="keyword">BATT_CFG RESET</span>
+OK: BATT_CFG cleared, using Pins.h defaults
+</pre>
+
+<h3>Graceful shutdown sequence</h3>
+<ol style="color:var(--dim); padding-left:20px;">
+  <li>Pack voltage drops below <code>low_mv</code>.</li>
+  <li>5-minute boot grace period must have elapsed (prevents shutdown during the noisy boot-time current spike).</li>
+  <li>If sustained for &ge; 30 s, OLED prints "LOW BATTERY", radio is put to sleep, then <code>esp_deep_sleep_start()</code>.</li>
+  <li>An <code>RTC_DATA_ATTR</code> flag (<code>rtcLowBattFlag</code>) is set so the next boot knows we're waking from low-battery, not a power-on reset.</li>
+  <li>On wake, the firmware reads battery again. If still below <code>recover_mv</code>, it goes straight back to sleep. If above, normal boot resumes.</li>
+</ol>
+
+<div class="info-box red">
+  <p><strong>Resistor / GPIO sanity check:</strong> ESP32-S3 ADC pins are GPIO 1&ndash;20 only. If you wire the divider to anything outside that range you'll see garbage readings (floating-pin noise multiplied by the divider). Symptom: <code>BATT_DEBUG</code> shows a plausible-looking voltage that doesn't change when you disconnect the battery. Always verify with the supply unplugged before trusting the reading.</p>
+</div>
+
+<div class="info-box orange">
+  <p><strong>24 V systems:</strong> The default <code>BAT_DIVIDER</code> for TM1 (5.545&times;) is sized for a 3 S LiPo with a 1 M + 220 k divider. A 24 V pack with the same resistors would put 4.33 V at the ADC pin &mdash; over the 3.3 V max, and the protection diodes will clamp / damage the pin. Either swap the 220 k for a 100 k (ratio = 11&times;) or add a second 1 M in series with the existing 1 M (ratio = 10.09&times;), then update <code>BAT_DIVIDER</code> to match.</p>
+</div>
+
+<h3>GUI: per-node battery chips</h3>
+<p>The gateway GUI's Discovered Nodes panel shows a coloured battery chip on every node card that's reporting a <code>B&lt;mv&gt;</code> heartbeat:</p>
+<table>
+  <tr><th>Chip colour</th><th>Meaning</th></tr>
+  <tr><td><span style="background:#00E676; color:#000; padding:2px 8px; border-radius:8px;">&ge; 12.0 V</span></td><td>Healthy pack &mdash; well above recover threshold.</td></tr>
+  <tr><td><span style="background:#FFE000; color:#000; padding:2px 8px; border-radius:8px;">11.0&ndash;12.0 V</span></td><td>Near recover threshold &mdash; pack is draining.</td></tr>
+  <tr><td><span style="background:#FF9800; color:#000; padding:2px 8px; border-radius:8px;">&lt; 11.0 V</span></td><td>Approaching cutoff &mdash; node may auto-shutdown soon.</td></tr>
+  <tr><td><span style="background:#444; color:#fff; padding:2px 8px; border-radius:8px;">stale</span></td><td>No <code>B</code> field in the last heartbeat (older firmware or board with no divider).</td></tr>
+</table>
+
+<p>Chip thresholds above are for the default 3 S LiPo profile. For a different chemistry (12 V SLA, 7 S LiPo, 8 S LiFePO4) set thresholds via <code>BATT_CFG</code> and the chip colour will track them.</p>
 </section>
 
 </div>
 
 <!-- Footer -->
 <div style="background:var(--panel); border-top:1px solid var(--faint); padding:30px 40px; text-align:center; color:var(--faint); font-size:0.85em;">
-  <p>TiggyOpenMesh v4.1 &mdash; MeshCore Architecture</p>
-  <p>T-Deck Plus &bull; LoRa32 T3 V1.6.1 &bull; Heltec WiFi LoRa 32 V3 &bull; Heltec WiFi LoRa 32 V4 &bull; XIAO ESP32S3</p>
-  <p>48 sections &mdash; Hardware, Protocol, UI, BLE, Gateway, Logic Builder, Timers, Setpoints, Sensors, Pulse Counters, SOS, Map, Solar, Delivery, SF Change, Collision Detection, IO Expansion, GPS, Device Management, Signal Routing, iBeacon Scanner, Meshtastic Bridge, Telegram Bot (Gateway), Sensor Dashboard, HW Watchdog, Heltec V4 USB/FEM, Web Gauge, Licensing, Adding a New Board, Beacon Triangulation, Command Reference, Caveats</p>
-  <p style="margin-top:8px;">Documentation updated April 2026</p>
+  <p>TiggyOpenMesh v4.2 &mdash; MeshCore Architecture</p>
+  <p>T-Deck Plus &bull; LoRa32 T3 V1.6.1 &bull; Heltec WiFi LoRa 32 V3 &bull; Heltec WiFi LoRa 32 V4 &bull; XIAO ESP32S3 &bull; TiggyOpenMesh V1</p>
+  <p>49 sections &mdash; Hardware, Protocol, UI, BLE, Gateway, Logic Builder, Timers, Setpoints, Sensors, Pulse Counters, SOS, Map, Solar, Delivery, SF Change, Collision Detection, IO Expansion, GPS, Device Management, Signal Routing, iBeacon Scanner, Meshtastic Bridge, Telegram Bot (Gateway), Sensor Dashboard, HW Watchdog, Heltec V4 USB/FEM, Web Gauge, Licensing, Adding a New Board, Beacon Triangulation, Command Reference, Caveats, <strong>Battery Monitoring</strong></p>
+  <p style="margin-top:8px;">Documentation updated May 2026</p>
 </div>
 
 </body>

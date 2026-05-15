@@ -38,8 +38,17 @@
 #define AES_KEY_LEN     16
 #define TTL_DEFAULT     5         // Increased from 3 for larger meshes
 
-#define ACK_TIMEOUT     3000
-#define MAX_RETRIES     3
+// ACK wait window per attempt. Was 3000ms but the LoRa round-trip after a
+// SET command at SF9/125kHz takes ~2s on a quiet link (CMD,RSP TX ~600ms,
+// then ACK TX ~200ms, plus propagation/processing) and longer when the
+// remote is in solar/light-sleep or mid-transmission of something else.
+// At 3s the gateway often started its OWN retry TX while the remote's
+// ACK was still in the air — half-duplex collision, both packets lost.
+// Verified by running 10 manual sends in succession: some timed out even
+// with no Logic Builder activity. 8s × 5 retries = ~40s total patience,
+// well under the GUI's 60s backup. Eliminates the retry/ACK collision.
+#define ACK_TIMEOUT     8000
+#define MAX_RETRIES     5
 #define CFG_SWITCH_DELAY 2000  // ms delay after CFGGO before applying SF change
 #define HB_INTERVAL     30000UL
 #define HB_INTERVAL_SOLAR 60000UL // Solar mode: 60s heartbeat (saves power)

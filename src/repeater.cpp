@@ -59,8 +59,14 @@ bool oledAvailable = false;
 #ifndef DEBUG
 #define DEBUG 1
 #endif
+// In gateway mode the host PC's GUI is consuming our serial output as
+// structured data (PKT, RX, ACK, SENT, DELIVERED, FAILED, BATT, etc.).
+// Mixing in debugPrint chatter caused two problems: the GUI's line-by-
+// line parser had to step over noise, and the extra UART traffic was
+// contributing to USB-CDC saturation when both nodes were plugged in.
+// debugPrint stays loud in repeater/standalone mode, silent in gateway.
 #if DEBUG
-  #define debugPrint(x) Serial.println(x)
+  #define debugPrint(x) do { if (!gatewayMode) Serial.println(x); } while(0)
 #else
   #define debugPrint(x)
 #endif
@@ -907,6 +913,15 @@ void receiveCheck() {
     radioStartListening();
     if (state != RADIOLIB_ERR_NONE) return;
 
+    // RX activity indicator (Tiggy / any board with BOARD_LED2). Short
+    // 2 ms pulse so frequent receives don't waste energy. BOARD_LED is the
+    // TX/heartbeat indicator on the same boards.
+#ifdef BOARD_LED2
+    if (BOARD_LED2 >= 0) {
+        digitalWrite(BOARD_LED2, HIGH); delayMicroseconds(2000); digitalWrite(BOARD_LED2, LOW);
+    }
+#endif
+
     MeshPacket mp;
     if (mesh.parseRawPacket(pkt, len, mp)) {
         mesh.processPacket(mp);
@@ -1225,6 +1240,9 @@ bool isPinSafe(int pin) {
 #endif
 #if BOARD_LED >= 0
         BOARD_LED,
+#endif
+#ifdef BOARD_LED2
+        BOARD_LED2,
 #endif
 #if defined(BOARD_GPS_TX) && BOARD_GPS_TX >= 0
         BOARD_GPS_TX, BOARD_GPS_RX,
@@ -3436,6 +3454,20 @@ void setup() {
     randomSeed(esp_random() ^ macSeed);
 
     if (BOARD_LED >= 0) { pinMode(BOARD_LED, OUTPUT); digitalWrite(BOARD_LED, LOW); }
+#ifdef BOARD_LED2
+    // Second LED — used as an RX activity indicator (BOARD_LED is the TX/HB
+    // indicator). Only present on boards that have two user LEDs (Tiggy).
+    if (BOARD_LED2 >= 0) { pinMode(BOARD_LED2, OUTPUT); digitalWrite(BOARD_LED2, LOW); }
+#endif
+    // DRV8871 actuator driver: both inputs LOW = coast/idle. Pulling them
+    // up at boot would cause the motor to twitch as soon as power comes
+    // on. Pin assignments come from Pins.h (ACTUATOR_IN1/IN2 defines).
+    // Runtime check (not #if) so any board can enable by setting the pins
+    // in Pins.h to actual GPIOs; -1 disables. Same binary, all boards.
+    if (ACTUATOR_IN1 >= 0 && ACTUATOR_IN2 >= 0) {
+        pinMode(ACTUATOR_IN1, OUTPUT); digitalWrite(ACTUATOR_IN1, LOW);
+        pinMode(ACTUATOR_IN2, OUTPUT); digitalWrite(ACTUATOR_IN2, LOW);
+    }
 #ifdef VEXT_CTRL
     pinMode(VEXT_CTRL, OUTPUT); digitalWrite(VEXT_CTRL, LOW);
 #endif

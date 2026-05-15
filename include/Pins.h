@@ -101,6 +101,10 @@
 // LED (none on T-Deck Plus)
 #define BOARD_LED           -1
 
+// DRV8871 actuator (none on T-Deck Plus)
+#define ACTUATOR_IN1        -1
+#define ACTUATOR_IN2        -1
+
 // User GPIO pins available for relays/sensors
 // (T-Deck Plus has limited free pins since most are used)
 // Use the Grove connector or solder to test pads
@@ -172,6 +176,10 @@
 
 // Button
 #define BOARD_BUTTON        0
+
+// DRV8871 actuator (none wired by default — set to GPIOs to enable)
+#define ACTUATOR_IN1        -1
+#define ACTUATOR_IN2        -1
 
 // ─── User GPIO for relays & sensors ─────────────────────────
 // These pins are FREE on the LoRa32 for relay/sensor use.
@@ -265,6 +273,10 @@
 // Button (PRG button)
 #define BOARD_BUTTON        0
 
+// DRV8871 actuator (none wired by default — set to GPIOs to enable)
+#define ACTUATOR_IN1        -1
+#define ACTUATOR_IN2        -1
+
 // ─── User GPIO for relays & sensors ─────────────────────────
 // Free pins on Heltec V3:
 // 2, 3, 4, 5, 6, 7, 33, 34, 40, 41, 42, 45, 46, 47, 48
@@ -350,6 +362,10 @@
 
 // Button (PRG button)
 #define BOARD_BUTTON        0
+
+// DRV8871 actuator (none wired by default — set to GPIOs to enable)
+#define ACTUATOR_IN1        -1
+#define ACTUATOR_IN2        -1
 
 // ─── User GPIO for relays & sensors ─────────────────────────
 // Free pins on Heltec V4 (verified from V4 pinmap):
@@ -459,6 +475,10 @@
 // Boot button
 #define BOARD_BUTTON        0
 
+// DRV8871 actuator (none wired by default — set to GPIOs to enable)
+#define ACTUATOR_IN1        -1
+#define ACTUATOR_IN2        -1
+
 // ─── User GPIO for relays & sensors ─────────────────────────
 // Free header pins (B2B baseboard reserves only the underside pads):
 //   D0/GPIO1, D1/GPIO2, D2/GPIO3, D3/GPIO4, D4/GPIO5, D5/GPIO6,
@@ -537,6 +557,10 @@
 // Button (PRG/BOOT button)
 #define BOARD_BUTTON        0
 
+// DRV8871 actuator (none wired by default — set to GPIOs to enable)
+#define ACTUATOR_IN1        -1
+#define ACTUATOR_IN2        -1
+
 // ─── User GPIO for relays & sensors ─────────────────────────
 // Free pins on Heltec V2:
 // 2, 12, 13, 17, 36, 39 — others are used by radio/OLED/SPI
@@ -614,7 +638,7 @@
 //   ⚠️ V1 rework: physical pin moved from GPIO 37 → GPIO 1 by fly-wire.
 //   Divider math: (1M + 220k) / 220k = 5.545 (multiplier ADC→VBAT)
 //   ADC sees max 12.6V × 0.180 = 2.27V (within ESP32-S3 2.4V headroom)
-#define BOARD_BAT_ADC       1     // ADC1_CH0 (after rework)
+#define BOARD_BAT_ADC       1     // ADC1_CH0 GPIO1 (after rework)
 #define BAT_DIVIDER         5.545f
 #define BAT_LOW_MV          9300    // 3 × 3.1V LiPo cutoff
 #define BAT_RECOVER_MV      11100   // 3 × 3.7V LiPo recovery
@@ -692,6 +716,10 @@
 #define BOARD_LED           -1
 #define BOARD_BUTTON        -1
 
+// DRV8871 actuator (none wired by default — set to GPIOs to enable)
+#define ACTUATOR_IN1        -1
+#define ACTUATOR_IN2        -1
+
 // ─── Battery monitoring (optional, V3/V4 reference impl) ────
 // 1) Pick BOARD_BAT_ADC = an ADC1 GPIO (1–10 on ESP32-S3, 32–39 on ESP32).
 // 2) Optional ADC_CTRL: gate pin to disconnect divider (active-low). Skip
@@ -758,3 +786,9 @@
     #define IO_EXPAND_RX  -1
   #endif
 #endif
+
+// Every board section above must define ACTUATOR_IN1 / ACTUATOR_IN2
+// (use -1 if no DRV8871 wired). Same pattern as BOARD_GPS_TX, BOARD_LED
+// etc — explicit per-board so adding a new board can't accidentally
+// leave the actuator init pointing at random pins. The firmware checks
+// at runtime: ACTUATOR_IN1 >= 0 → drive LOW at boot, else skip.
