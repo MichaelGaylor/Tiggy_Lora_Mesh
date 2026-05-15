@@ -284,6 +284,74 @@ void setupGPS();      // defined after forward declarations
 void readGPS();
 void broadcastGPS();
 
+// ─── Non-blocking pulse timers ───────────────────────────────
+// Shared infrastructure used by:
+//   - direct CMD,PULSE,<pin>,<ms>            (was blocking delay() — now async)
+//   - BEACON,ADD,...,PULSE,<pin>,<ms>        (Phase 2)
+//   - SETPOINT,...,PULSE,<pin>,<ms>          (Phase 4)
+// startPulse() sets the pin HIGH and registers a deadline; checkPulseTimers()
+// (called every loop iteration) clears the pin when the deadline passes.
+// Up to MAX_PENDING_PULSES concurrent pulses on different pins.
+#define MAX_PENDING_PULSES 8
+#define PULSE_MAX_MS 30000  // Same cap as the old blocking CMD,PULSE
+struct PendingPulse {
+    bool active;
+    uint8_t pin;
+    unsigned long deadline;  // millis() value when pin must go LOW
+};
+static PendingPulse pendingPulses[MAX_PENDING_PULSES];
+
+// Schedule a pulse on `pin` for `ms` milliseconds.
+// Returns true if the pulse was registered. Returns false if the ring buffer
+// is full or if (ms == 0 || ms > PULSE_MAX_MS). If the pin is already pulsing
+// the existing entry is updated (the deadline restarts) — last-write-wins.
+static bool startPulse(uint8_t pin, uint16_t ms) {
+    if (ms == 0 || ms > PULSE_MAX_MS) return false;
+    unsigned long deadline = millis() + ms;
+    // Drive pin HIGH immediately
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, HIGH);
+    // Update existing entry for this pin, else find a free slot
+    int freeSlot = -1;
+    for (int i = 0; i < MAX_PENDING_PULSES; i++) {
+        if (pendingPulses[i].active && pendingPulses[i].pin == pin) {
+            pendingPulses[i].deadline = deadline;  // Restart timer
+            return true;
+        }
+        if (!pendingPulses[i].active && freeSlot < 0) freeSlot = i;
+    }
+    if (freeSlot < 0) return false;  // Buffer full
+    pendingPulses[freeSlot].active = true;
+    pendingPulses[freeSlot].pin = pin;
+    pendingPulses[freeSlot].deadline = deadline;
+    return true;
+}
+
+// Called every loop iteration. Walks the ring buffer and clears any pins
+// whose deadline has passed. Cheap — MAX_PENDING_PULSES is tiny.
+static void checkPulseTimers() {
+    unsigned long now = millis();
+    for (int i = 0; i < MAX_PENDING_PULSES; i++) {
+        if (!pendingPulses[i].active) continue;
+        if ((long)(now - pendingPulses[i].deadline) >= 0) {
+            digitalWrite(pendingPulses[i].pin, LOW);
+            pendingPulses[i].active = false;
+        }
+    }
+}
+
+// Force-stop any in-flight pulse on a given pin (or all if pin == 255).
+// Used by entering solar mode / EEPROM reset so we never leave a pin HIGH.
+static void stopPulses(uint8_t pin) {
+    for (int i = 0; i < MAX_PENDING_PULSES; i++) {
+        if (!pendingPulses[i].active) continue;
+        if (pin == 255 || pendingPulses[i].pin == pin) {
+            digitalWrite(pendingPulses[i].pin, LOW);
+            pendingPulses[i].active = false;
+        }
+    }
+}
+
 // ─── iBeacon Scanner ─────────────────────────────────────────
 #define MAX_BEACON_RULES 8
 #define EEPROM_BEACON_ADDR 512  // After magic byte at 508
@@ -1813,17 +1881,23 @@ void handleCmd(const String& from, const String& cmdBody) {
         if (c2 < 0) return;
         int pin = rest.substring(0, c2).toInt();
         int ms  = rest.substring(c2 + 1).toInt();
-        if (!isPinConfigurable(pin) || ms > 30000) return;
+        if (!isPinConfigurable(pin) || ms <= 0 || ms > PULSE_MAX_MS) return;
         setupDigitalOutput(pin);
-        setDigital(pin, 1); delay(ms); setDigital(pin, 0);
+        // Non-blocking: schedule the pulse and let checkPulseTimers() clear
+        // the pin when the deadline expires. Firmware loop stays responsive
+        // (heartbeats, mesh RX, etc. keep running during the pulse).
+        if (!startPulse((uint8_t)pin, (uint16_t)ms)) return;
         mesh.cmdsExecuted++;
+        // Acknowledge immediately — the pulse is now in flight. The "0" in
+        // the response is the *eventual* state once the pulse completes;
+        // callers that need a stricter handshake should poll the pin state.
         String mid = mesh.generateMsgID();
-        String rsp = "CMD,RSP," + String(pin) + ",0";
+        String rsp = "CMD,RSP," + String(pin) + ",PULSE_OK," + String(ms);
         String hex = mesh.encryptMsg(rsp);
         String payload = String(mesh.localID) + "," + from + "," + mid + "," +
                          String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
         mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
-        bleSend("CMD,RSP," + String(pin) + ",0");
+        bleSend("CMD,RSP," + String(pin) + ",PULSE_OK," + String(ms));
     }
     else if (action == "LIST") {
         String rsp = "PINS,R:";
@@ -3713,6 +3787,7 @@ void loop() {
 
         // Timers, IO expansion, pulse rates, setpoints, GPS, and auto-poll still run
         processTimers();
+        checkPulseTimers();   // Phase 1: clear pins whose pulse deadline has passed
         ioExpandPoll();
         updatePulseRates();
         checkSetpoints();
@@ -3844,6 +3919,7 @@ void loop() {
 
     // 7. Relay timers
     processTimers();
+    checkPulseTimers();   // Phase 1: clear pins whose pulse deadline has passed
 
     // 8. IO expansion, pulse rates, setpoint rules
     ioExpandPoll();
