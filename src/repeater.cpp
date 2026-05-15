@@ -718,6 +718,21 @@ void executeBeaconAction(BeaconRule& r) {
         }
         r.triggered = true;
         notifyBeaconEvent("BEACON,TRIGGERED," + String(r.name) + ",RELAY," + String(r.relayPin), true);  // Edge: broadcast once
+    } else if (r.actionType == 2) {
+        // Phase 2: PULSE action — drive pin HIGH for revertMs, then auto-LOW
+        // via the non-blocking pulse infrastructure. revertMs holds the pulse
+        // duration (we reuse the existing field — no struct layout change).
+        // Local pin only (Actuator and Pulse Relay always target the scanning
+        // node's own GPIO; cross-node pulse via beacon is out of scope).
+        if (r.relayPin > 0 && r.revertMs > 0) {
+            setupDigitalOutput(r.relayPin);
+            startPulse((uint8_t)r.relayPin, r.revertMs);
+            debugPrint("BEACON: " + String(r.name) + " -> PULSE pin " + String(r.relayPin) + " " + String(r.revertMs) + "ms");
+        } else {
+            debugPrint("BEACON: " + String(r.name) + " -> PULSE skipped (bad pin/ms)");
+        }
+        r.triggered = true;
+        notifyBeaconEvent("BEACON,TRIGGERED," + String(r.name) + ",PULSE," + String(r.relayPin) + "," + String(r.revertMs), true);
     } else {
         // Broadcast message over mesh
         String mid = mesh.generateMsgID();
@@ -789,6 +804,19 @@ void checkBeaconReverts() {
     for (int i = 0; i < MAX_BEACON_RULES; i++) {
         BeaconRule& r = beaconRules[i];
         if (!r.active || !r.triggered || r.revertMs == 0) continue;
+        if (r.actionType == 2) {
+            // Phase 2: PULSE — pin is auto-cleared by checkPulseTimers().
+            // Here we just clear the triggered flag once the beacon has
+            // been gone long enough that a future re-entry should fire a
+            // fresh pulse. Using cooldownMs as the "gone for this long"
+            // grace period (default 10s if unset).
+            unsigned long grace = r.cooldownMs > 0 ? r.cooldownMs : 10000;
+            if (now - r.lastSeen > grace) {
+                r.triggered = false;
+                debugPrint("BEACON: " + String(r.name) + " -> PULSE rearmed");
+            }
+            continue;
+        }
         if (r.actionType != 0) continue;  // Only relay actions revert
 
         // Tag gone for longer than revertMs → revert relay
@@ -3138,6 +3166,24 @@ void loadBeaconRules() {
             !mesh.isValidNodeID(String(beaconRules[i].targetNode))) {
             beaconRules[i].targetNode[0] = '\0';  // Clear garbage → local relay
         }
+        // Phase 2: validate actionType — accept 0 (RELAY), 1 (MSG), 2 (PULSE).
+        // Anything else came from a corrupt EEPROM record or a future firmware
+        // — disable the rule so we don't fire random pin states.
+        if (beaconRules[i].actionType > 2) {
+            beaconRules[i].active = false;
+            continue;
+        }
+        // For PULSE rules: belt-and-braces check the pin is configurable and
+        // duration is within cap. Stops a corrupt record from driving a
+        // reserved pin (radio/SPI/etc.) for an absurd duration.
+        if (beaconRules[i].actionType == 2) {
+            if (!isPinConfigurable(beaconRules[i].relayPin) ||
+                beaconRules[i].revertMs == 0 ||
+                beaconRules[i].revertMs > PULSE_MAX_MS) {
+                beaconRules[i].active = false;
+                continue;
+            }
+        }
         beaconRules[i].lastTrigger = 0;
         beaconRules[i].lastSeen = 0;
         beaconRules[i].triggered = false;
@@ -3157,9 +3203,15 @@ String processBeaconCommand(const String& args) {
             resp += ":" + String(beaconRules[i].rssiThresh) + "dBm";
             if (beaconRules[i].actionType == 0)
                 resp += ":RELAY" + String(beaconRules[i].relayPin);
+            else if (beaconRules[i].actionType == 2)
+                resp += ":PULSE" + String(beaconRules[i].relayPin) +
+                        ":" + String(beaconRules[i].revertMs) + "ms";
             else
                 resp += ":MSG";
-            if (beaconRules[i].revertMs > 0)
+            // For actionType == 2 the revertMs is the pulse duration, already
+            // printed inline above — only emit the legacy REVERT suffix for
+            // actionType == 0 (relay with auto-revert on beacon loss).
+            if (beaconRules[i].actionType == 0 && beaconRules[i].revertMs > 0)
                 resp += ":REVERT" + String(beaconRules[i].revertMs) + "ms";
         }
         if (count == 0) resp += ",NONE";
@@ -3299,6 +3351,31 @@ String processBeaconCommand(const String& args) {
                 strncpy(r.message, actionArgs.substring(0, c5).c_str(), 31); r.message[31] = '\0';
                 r.cooldownMs = actionArgs.substring(c5 + 1).toInt();
             }
+        } else if (actionStr == "PULSE") {
+            // Phase 2: PULSE,<pin>,<duration_ms>[,<cooldown_ms>]
+            // Fire a non-blocking HIGH pulse on <pin> for <duration_ms>.
+            // Reuses BeaconRule.relayPin for the pin and revertMs for the
+            // duration — no struct layout change. Local pin only.
+            r.actionType = 2;
+            r.targetNode[0] = '\0';   // PULSE is local only
+            int c5 = actionArgs.indexOf(',');
+            if (c5 < 0) return "ERR,BEACON,FORMAT";
+            int pin = actionArgs.substring(0, c5).toInt();
+            String rest5 = actionArgs.substring(c5 + 1);
+            int c6 = rest5.indexOf(',');
+            int durMs;
+            if (c6 < 0) {
+                durMs = rest5.toInt();
+                r.cooldownMs = 10000;  // Default 10s cooldown
+            } else {
+                durMs = rest5.substring(0, c6).toInt();
+                r.cooldownMs = rest5.substring(c6 + 1).toInt();
+            }
+            if (!isPinConfigurable(pin) || durMs <= 0 || durMs > PULSE_MAX_MS)
+                return "ERR,BEACON,BADPULSE";
+            r.relayPin  = (uint8_t)pin;
+            r.relayState = 1;            // Unused for PULSE but set for safety
+            r.revertMs  = (uint16_t)durMs;
         } else {
             return "ERR,BEACON,BADACTION";
         }
