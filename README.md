@@ -24,7 +24,7 @@ Supported boards:
 
 ## 📱 Android App
 
-Download the latest APK from the [Releases page](../../releases/latest) — no Play Store needed.
+Download the latest APK from the [`android-latest` release](../../releases/tag/android-latest) — auto-built on every push to `main`, no Play Store needed.
 
 Connect via Bluetooth to any mesh node to send messages, view the mesh, and set up Telegram alerts.
 
