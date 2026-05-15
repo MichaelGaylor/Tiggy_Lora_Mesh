@@ -39,11 +39,28 @@ jobs:
           name: TiggyOpenMesh-Android-debug
           path: android-app/app/build/outputs/apk/debug/app-debug.apk
 
-      - name: Rename APK for release
-        if: github.event_name == 'release'
+      - name: Rename APK for download
         run: cp android-app/app/build/outputs/apk/debug/app-debug.apk android-app/app/build/outputs/apk/debug/TiggyOpenMesh.apk
 
-      - name: Attach to release
+      # Rolling 'android-latest' release — auto-updated on every push to main.
+      # README points users to /releases/tag/android-latest, so this URL is
+      # stable forever regardless of any other versioned releases.
+      - name: Publish rolling android-latest release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: android-latest
+          name: "TiggyOpenMesh Android APK (latest)"
+          body: |
+            Auto-built debug APK from the latest commit on `main`.
+            Updated automatically by `.github/workflows/build-android.yml` on every push.
+
+            **Install:** download the APK below, then on Android allow "Install from unknown sources" and tap the file.
+          files: android-app/app/build/outputs/apk/debug/TiggyOpenMesh.apk
+          prerelease: false
+          make_latest: "false"
+
+      - name: Attach to manually-published release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
