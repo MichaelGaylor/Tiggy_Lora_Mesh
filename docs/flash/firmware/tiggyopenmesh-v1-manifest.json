@@ -1,0 +1,13 @@
+{
+  "name": "LoRa Mesh — TiggyOpenMesh V1 (ESP32-S3 + Wio-SX1262 + DRV8871)",
+  "version": "1.0.0",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        { "path": "tiggyopenmesh-v1.bin", "offset": 0 }
+      ]
+    }
+  ]
+}

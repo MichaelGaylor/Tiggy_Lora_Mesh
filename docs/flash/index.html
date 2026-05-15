@@ -132,6 +132,7 @@
         <option value="lora32">LilyGO LoRa32 T3 V1.6 (~£15) — ESP32 + SX1276 repeater</option>
         <option value="heltec-v3">Heltec WiFi LoRa 32 V3 (~£18) — repeater with OLED status</option>
         <option value="heltec-v4">Heltec WiFi LoRa 32 V4 (~£20) — best repeater, 28dBm, solar</option>
+        <option value="tiggyopenmesh-v1">TiggyOpenMesh V1 (custom PCB) — ESP32-S3 + Wio-SX1262 + DRV8871 actuator</option>
       </optgroup>
       <optgroup label="── WiFi Gateway (bridge to cloud hub) ──">
         <option value="gateway-heltec-v2">Heltec WiFi LoRa 32 V2 (~£15) — ESP32 + SX1276 gateway</option>
@@ -195,6 +196,7 @@ const boardInfo = {
   'lora32':    '📡 REPEATER — LilyGO LoRa32 with 0.96" OLED status screen. Uses SX1276 radio (slightly less sensitive than SX1262).',
   'heltec-v3': '📡 REPEATER — Heltec V3 with 0.96" OLED. SX1262 radio, good range, compact.',
   'heltec-v4': '📡 REPEATER — Best repeater. SX1262 + 28dBm PA (double the range), solar input, 16MB flash. Runs indefinitely on a 1W panel.',
+  'tiggyopenmesh-v1': '⚙️ REPEATER + ACTUATOR — Custom TiggyOpenMesh PCB. ESP32-S3-WROOM-1-N8R2, Wio-SX1262, on-board DRV8871 H-bridge (GPIO 41/42) for gate / blind / valve, 3S LiPo battery monitor with graceful shutdown, AP63203 buck reg, USB-C.',
   'gateway-heltec-v2': '🌐 GATEWAY — WiFi bridge to cloud hub. Heltec V2 (ESP32 + SX1276). Configure via BLE: WiFi credentials, hub URL, gateway name.',
   'gateway-heltec-v3': '🌐 GATEWAY — WiFi bridge to cloud hub. Heltec V3 (ESP32-S3 + SX1262). Better radio sensitivity than V2. OLED status display.',
   'gateway-heltec-v4': '🌐 GATEWAY — Best gateway option. Heltec V4 (ESP32-S3 + SX1262 + 28dBm PA), solar input, 16MB flash. Maximum range.',
