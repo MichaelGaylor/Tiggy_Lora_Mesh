@@ -24,12 +24,13 @@ jobs:
       - name: Install PlatformIO and esptool
         run: pip install platformio esptool
 
-      - name: Build repeater targets (Heltec V3, V4, LoRa32, XIAO)
+      - name: Build repeater targets (Heltec V3, V4, LoRa32, XIAO, TiggyOpenMesh V1)
         run: |
           pio run -e heltec-v3
           pio run -e heltec-v4
           pio run -e lora32
           pio run -e xiao-s3
+          pio run -e tiggyopenmesh-v1
 
       - name: Build IO expansion board
         run: pio run -e io-expansion
@@ -79,6 +80,15 @@ jobs:
             0x8000  .pio/build/heltec-v3/partitions.bin \
             0xe000  "$BOOT_APP0" \
             0x10000 .pio/build/heltec-v3/firmware.bin
+
+          # TiggyOpenMesh V1 — custom ESP32-S3 + Wio-SX1262 + DRV8871 (8MB flash, N8R2)
+          esptool.py --chip esp32s3 merge_bin \
+            -o docs/flash/firmware/tiggyopenmesh-v1.bin \
+            --flash_mode dio --flash_freq 80m --flash_size 8MB \
+            0x0     .pio/build/tiggyopenmesh-v1/bootloader.bin \
+            0x8000  .pio/build/tiggyopenmesh-v1/partitions.bin \
+            0xe000  "$BOOT_APP0" \
+            0x10000 .pio/build/tiggyopenmesh-v1/firmware.bin
 
           # Heltec V4 — repeater (ESP32-S3, 16MB flash)
           esptool.py --chip esp32s3 merge_bin \
