@@ -363,14 +363,22 @@ struct BeaconRule {
     char uuid[37];       // iBeacon UUID (empty = match by MAC only)
     char mac[18];        // MAC address (empty = match by UUID only)
     char name[16];       // Human label
-    int8_t rssiThresh;   // Min RSSI to trigger (e.g. -70)
-    uint8_t actionType;  // 0=relay, 1=message
-    uint8_t relayPin;    // For relay action
-    uint8_t relayState;  // 0=OFF, 1=ON
+    int8_t rssiThresh;   // Min RSSI to trigger enter (e.g. -70)
+    uint8_t actionType;  // 0=relay, 1=message, 2=pulse (Phase 2)
+    uint8_t relayPin;    // For relay/pulse action
+    uint8_t relayState;  // 0=OFF, 1=ON (unused for PULSE)
     char targetNode[5];  // For remote relay: target node ID (e.g., "C706")
     char message[32];    // For message action
-    uint16_t cooldownMs; // Min time between triggers
-    uint16_t revertMs;   // 0=one-shot, >0=auto-revert after tag gone for X ms
+    uint16_t cooldownMs; // Min time between triggers; also "gone for this long" before leave/rearm
+    uint16_t revertMs;   // For RELAY: auto-revert delay. For PULSE: pulse duration.
+    // ─── Phase 3: optional asymmetric leave action ────────────────────
+    // Appended at the end of the struct so old EEPROM records load fine
+    // (these 4 bytes get read as 0/0xFF and treated as "no leave action").
+    int8_t  leaveRssi;     // RSSI below which beacon counts as "gone for leave purposes".
+                           //   0 = use rssiThresh (no asymmetric hysteresis).
+                           //   Set < rssiThresh for the "open at close range, close when farther" pattern.
+    uint8_t leavePin;      // Pin to pulse when beacon leaves. 0 = no leave action configured.
+    uint16_t leavePulseMs; // Duration of the leave pulse (1..PULSE_MAX_MS).
     // Runtime only (not saved)
     unsigned long lastTrigger;
     unsigned long lastSeen;
@@ -772,7 +780,15 @@ void matchBeacon(BLEAdvertisedDevice& dev) {
     for (int i = 0; i < MAX_BEACON_RULES; i++) {
         BeaconRule& r = beaconRules[i];
         if (!r.active) continue;
-        if (rssi < r.rssiThresh) continue;
+
+        // Phase 3: asymmetric threshold. When a leave action is configured
+        // with a separate leaveRssi, a "weak but present" reading (between
+        // leaveRssi and rssiThresh) still updates lastSeen so we don't fire
+        // a premature leave. Without an explicit leaveRssi we fall back to
+        // the original single-threshold behaviour.
+        int8_t effectiveThresh = (r.leaveRssi != 0 && r.leaveRssi < r.rssiThresh)
+                                  ? r.leaveRssi : r.rssiThresh;
+        if (rssi < effectiveThresh) continue;
 
         bool match = false;
         if (r.uuid[0] && uuid.equalsIgnoreCase(String(r.uuid))) match = true;
@@ -780,6 +796,11 @@ void matchBeacon(BLEAdvertisedDevice& dev) {
         if (!match) continue;
 
         r.lastSeen = now;
+
+        // Only fire the enter action when RSSI is above the proper enter
+        // threshold — weak detections between leaveRssi and rssiThresh keep
+        // the rule "live" but don't re-fire.
+        if (rssi < r.rssiThresh) continue;
 
         // Cooldown — don't re-trigger too fast
         if (now - r.lastTrigger < r.cooldownMs) continue;
@@ -805,15 +826,26 @@ void checkBeaconReverts() {
         BeaconRule& r = beaconRules[i];
         if (!r.active || !r.triggered || r.revertMs == 0) continue;
         if (r.actionType == 2) {
-            // Phase 2: PULSE — pin is auto-cleared by checkPulseTimers().
-            // Here we just clear the triggered flag once the beacon has
-            // been gone long enough that a future re-entry should fire a
-            // fresh pulse. Using cooldownMs as the "gone for this long"
-            // grace period (default 10s if unset).
+            // Phase 2/3: PULSE — pin is auto-cleared by checkPulseTimers().
+            // Once the beacon has been gone for cooldownMs (default 10s):
+            //   - if a leave action is configured (leavePin > 0), fire it
+            //   - then reset triggered so a fresh enter pulse can fire on
+            //     re-entry.
             unsigned long grace = r.cooldownMs > 0 ? r.cooldownMs : 10000;
             if (now - r.lastSeen > grace) {
+                if (r.leavePin > 0 && r.leavePulseMs > 0 &&
+                    isPinConfigurable(r.leavePin)) {
+                    // Phase 3: fire the leave pulse
+                    setupDigitalOutput(r.leavePin);
+                    startPulse(r.leavePin, r.leavePulseMs);
+                    debugPrint("BEACON: " + String(r.name) + " -> LEAVE pulse pin " +
+                               String(r.leavePin) + " " + String(r.leavePulseMs) + "ms");
+                    notifyBeaconEvent("BEACON,LEAVE," + String(r.name) + "," +
+                                      String(r.leavePin) + "," + String(r.leavePulseMs), true);
+                } else {
+                    debugPrint("BEACON: " + String(r.name) + " -> PULSE rearmed");
+                }
                 r.triggered = false;
-                debugPrint("BEACON: " + String(r.name) + " -> PULSE rearmed");
             }
             continue;
         }
@@ -3139,6 +3171,12 @@ void saveBeaconRules() {
         EEPROM.put(addr + 108, beaconRules[i].cooldownMs);
         EEPROM.put(addr + 110, beaconRules[i].revertMs);
         EEPROM.put(addr + 112, beaconRules[i].targetNode);
+        // Phase 3 leave-action fields appended at offsets 117..120.
+        // Old firmware leaves these untouched (will be 0xFF on first save
+        // by new firmware — the load path treats out-of-range as disabled).
+        EEPROM.write(addr + 117, (uint8_t)beaconRules[i].leaveRssi);
+        EEPROM.write(addr + 118, beaconRules[i].leavePin);
+        EEPROM.put(addr + 119, beaconRules[i].leavePulseMs);
     }
     EEPROM.commit();
 }
@@ -3165,6 +3203,22 @@ void loadBeaconRules() {
         if (beaconRules[i].targetNode[0] &&
             !mesh.isValidNodeID(String(beaconRules[i].targetNode))) {
             beaconRules[i].targetNode[0] = '\0';  // Clear garbage → local relay
+        }
+        // Phase 3 leave-action fields. Old EEPROM (written by pre-Phase-3
+        // firmware) will read 0xFF in these slots — we sanitise to 0.
+        beaconRules[i].leaveRssi    = (int8_t)EEPROM.read(addr + 117);
+        beaconRules[i].leavePin     = EEPROM.read(addr + 118);
+        EEPROM.get(addr + 119, beaconRules[i].leavePulseMs);
+        // Sanitise: leavePin must be configurable, leavePulseMs in range,
+        // leaveRssi a plausible dBm value. Anything else → disable leave.
+        if (beaconRules[i].leavePin == 0xFF ||
+            !isPinConfigurable(beaconRules[i].leavePin) ||
+            beaconRules[i].leavePulseMs == 0 ||
+            beaconRules[i].leavePulseMs > PULSE_MAX_MS ||
+            beaconRules[i].leaveRssi > 0) {
+            beaconRules[i].leaveRssi = 0;
+            beaconRules[i].leavePin = 0;
+            beaconRules[i].leavePulseMs = 0;
         }
         // Phase 2: validate actionType — accept 0 (RELAY), 1 (MSG), 2 (PULSE).
         // Anything else came from a corrupt EEPROM record or a future firmware
@@ -3213,6 +3267,11 @@ String processBeaconCommand(const String& args) {
             // actionType == 0 (relay with auto-revert on beacon loss).
             if (beaconRules[i].actionType == 0 && beaconRules[i].revertMs > 0)
                 resp += ":REVERT" + String(beaconRules[i].revertMs) + "ms";
+            // Phase 3: print the leave clause if configured.
+            if (beaconRules[i].actionType == 2 && beaconRules[i].leavePin > 0)
+                resp += ":LEAVE" + String(beaconRules[i].leavePin) +
+                        "@" + String(beaconRules[i].leaveRssi) + "dBm" +
+                        ":" + String(beaconRules[i].leavePulseMs) + "ms";
         }
         if (count == 0) resp += ",NONE";
         return resp;
@@ -3352,21 +3411,33 @@ String processBeaconCommand(const String& args) {
                 r.cooldownMs = actionArgs.substring(c5 + 1).toInt();
             }
         } else if (actionStr == "PULSE") {
-            // Phase 2: PULSE,<pin>,<duration_ms>[,<cooldown_ms>]
-            // Fire a non-blocking HIGH pulse on <pin> for <duration_ms>.
-            // Reuses BeaconRule.relayPin for the pin and revertMs for the
-            // duration — no struct layout change. Local pin only.
+            // Phase 2 base format:
+            //   PULSE,<pin>,<duration_ms>[,<cooldown_ms>]
+            // Phase 3 optional LEAVE suffix for asymmetric enter/leave on
+            // a single rule (gate opens at close range, closes when farther):
+            //   ...,LEAVE,<leaveRssi>,<leavePin>,<leavePulseMs>
             r.actionType = 2;
             r.targetNode[0] = '\0';   // PULSE is local only
-            int c5 = actionArgs.indexOf(',');
+            // Reset Phase 3 fields — old EEPROM bytes might have leftovers.
+            r.leaveRssi = 0;
+            r.leavePin = 0;
+            r.leavePulseMs = 0;
+
+            // Split on ",LEAVE," to isolate the base and the leave clause.
+            int leaveIdx = actionArgs.indexOf(",LEAVE,");
+            String baseArgs  = (leaveIdx >= 0) ? actionArgs.substring(0, leaveIdx) : actionArgs;
+            String leaveArgs = (leaveIdx >= 0) ? actionArgs.substring(leaveIdx + 7) : String("");
+
+            // ── Base: <pin>,<duration_ms>[,<cooldown_ms>] ──
+            int c5 = baseArgs.indexOf(',');
             if (c5 < 0) return "ERR,BEACON,FORMAT";
-            int pin = actionArgs.substring(0, c5).toInt();
-            String rest5 = actionArgs.substring(c5 + 1);
+            int pin = baseArgs.substring(0, c5).toInt();
+            String rest5 = baseArgs.substring(c5 + 1);
             int c6 = rest5.indexOf(',');
             int durMs;
             if (c6 < 0) {
                 durMs = rest5.toInt();
-                r.cooldownMs = 10000;  // Default 10s cooldown
+                r.cooldownMs = 10000;  // Default 10s cooldown / leave grace
             } else {
                 durMs = rest5.substring(0, c6).toInt();
                 r.cooldownMs = rest5.substring(c6 + 1).toInt();
@@ -3374,8 +3445,27 @@ String processBeaconCommand(const String& args) {
             if (!isPinConfigurable(pin) || durMs <= 0 || durMs > PULSE_MAX_MS)
                 return "ERR,BEACON,BADPULSE";
             r.relayPin  = (uint8_t)pin;
-            r.relayState = 1;            // Unused for PULSE but set for safety
+            r.relayState = 1;
             r.revertMs  = (uint16_t)durMs;
+
+            // ── Optional LEAVE: <leaveRssi>,<leavePin>,<leavePulseMs> ──
+            if (leaveIdx >= 0) {
+                int la = leaveArgs.indexOf(',');
+                if (la < 0) return "ERR,BEACON,LEAVE_FORMAT";
+                int lb = leaveArgs.indexOf(',', la + 1);
+                if (lb < 0) return "ERR,BEACON,LEAVE_FORMAT";
+                int leaveRssi    = leaveArgs.substring(0, la).toInt();
+                int leavePin     = leaveArgs.substring(la + 1, lb).toInt();
+                int leavePulseMs = leaveArgs.substring(lb + 1).toInt();
+                // leaveRssi: must be a plausible dBm value, weaker than enter
+                if (leaveRssi < -128 || leaveRssi > 0 ||
+                    !isPinConfigurable(leavePin) ||
+                    leavePulseMs <= 0 || leavePulseMs > PULSE_MAX_MS)
+                    return "ERR,BEACON,LEAVE_BADARGS";
+                r.leaveRssi    = (int8_t)leaveRssi;
+                r.leavePin     = (uint8_t)leavePin;
+                r.leavePulseMs = (uint16_t)leavePulseMs;
+            }
         } else {
             return "ERR,BEACON,BADACTION";
         }
