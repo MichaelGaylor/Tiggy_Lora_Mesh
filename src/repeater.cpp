@@ -933,6 +933,41 @@ void checkBeacons() {
         lastScanCompleteAt = now;  // suppress duplicate fires until next real complete
     }
 
+    // Watchdog C: BLE is "alive" (scans completing on schedule) but going
+    // deaf — the controller decodes nothing for a stretch even with the
+    // target tag right next to it. Mike confirmed this is what's happening
+    // on the gate node: tag tested fine on a phone, scans completing every
+    // 5s on schedule (Watchdog B never trips), yet matchBeacon never finds
+    // his MAC for 60+s and the Monostable's revert fires.
+    //
+    // Trigger: any rule that WAS triggered (tag was here recently) hasn't
+    // been re-seen for > 30s. We KNOW the tag should still be there, so
+    // this is the radio going deaf. Soft restart (stop+clear) clearly
+    // doesn't fix it (Watchdog B does that and didn't help), so do a full
+    // BLEDevice::deinit + setupBLE() — recycles the entire BLE stack.
+    //
+    // Throttled to once per 60s to avoid hammering the stack. The 30s
+    // silence threshold is well below the typical 60s Monostable hold,
+    // giving the reset time to recover before REVERT fires.
+    static unsigned long lastFullReset = 0;
+    if (now - lastFullReset > 60000) {
+        for (int i = 0; i < MAX_BEACON_RULES; i++) {
+            BeaconRule& r = beaconRules[i];
+            if (!r.active || !r.triggered) continue;
+            unsigned long silent = (r.lastSeen > 0) ? (now - r.lastSeen) : 0;
+            if (silent > 30000) {
+                Serial.printf("BLE,RESET,rule=%s,silent=%lums\n", r.name, silent);
+                if (pBLEScan) pBLEScan->stop();
+                BLEDevice::deinit(true);   // full release
+                delay(100);                 // let internal cleanup settle
+                setupBLE();                 // rebuild stack from scratch
+                lastFullReset = now;
+                lastScanCompleteAt = now;   // reset Watchdog B timer too
+                return;                     // bail out — scan loop will pick up next tick
+            }
+        }
+    }
+
     // Start a new scan periodically
     if (!beaconScanActive && now - lastScanStart > BEACON_SCAN_INTERVAL) {
         beaconScanActive = true;
