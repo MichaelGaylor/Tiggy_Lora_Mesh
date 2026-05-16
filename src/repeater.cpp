@@ -355,8 +355,15 @@ static void stopPulses(uint8_t pin) {
 // ─── iBeacon Scanner ─────────────────────────────────────────
 #define MAX_BEACON_RULES 8
 #define EEPROM_BEACON_ADDR 512  // After magic byte at 508
-#define BEACON_SCAN_DURATION 12   // seconds per scan (covers 10s Eddystone cycle)
-#define BEACON_SCAN_INTERVAL 30000 // ms between scans (18s clean gap for LoRa)
+// Detection-latency tuning. Old values were 12s scan / 30s interval (18s
+// dead window) which gave up to 18s before a tag could be detected — too
+// slow for gate-opener use cases where the user is walking/driving in.
+// New: 3s scan / 5s interval (2s dead window). Worst-case detection
+// latency ~2-3s. iBeacon advertises every 100ms-1s by default so a 3s
+// window catches it reliably. Slow Eddystone tags (10s adv cycle) won't
+// be caught reliably — if you need them, bump these back up.
+#define BEACON_SCAN_DURATION 3     // seconds per scan
+#define BEACON_SCAN_INTERVAL 5000  // ms between scan starts (=2s dead window)
 
 struct BeaconRule {
     bool active;
@@ -782,25 +789,40 @@ void matchBeacon(BLEAdvertisedDevice& dev) {
         BeaconRule& r = beaconRules[i];
         if (!r.active) continue;
 
-        // Phase 3: asymmetric threshold. When a leave action is configured
-        // with a separate leaveRssi, a "weak but present" reading (between
-        // leaveRssi and rssiThresh) still updates lastSeen so we don't fire
-        // a premature leave. Without an explicit leaveRssi we fall back to
-        // the original single-threshold behaviour.
-        int8_t effectiveThresh = (r.leaveRssi != 0 && r.leaveRssi < r.rssiThresh)
-                                  ? r.leaveRssi : r.rssiThresh;
-        if (rssi < effectiveThresh) continue;
-
+        // ── Identity match first (regardless of RSSI). ─────────────────
+        // BLE RSSI is noisy even with the tag at zero distance — momentary
+        // dips below rssiThresh are normal. We must NOT let an unlucky
+        // weak reading hide the fact that we saw the tag, or the leave
+        // timer will expire on a still-present beacon and fire a phantom
+        // close pulse (catastrophic if it's a gate with a car under it).
         bool match = false;
         if (r.uuid[0] && uuid.equalsIgnoreCase(String(r.uuid))) match = true;
         if (r.mac[0] && mac.equalsIgnoreCase(String(r.mac))) match = true;
         if (!match) continue;
 
-        r.lastSeen = now;
+        // ── Presence update. ───────────────────────────────────────────
+        // Default mode (leaveRssi == 0): ANY detection of the target MAC
+        //   counts as "still here" — the leave action only fires once the
+        //   tag is completely out of BLE range. Safe default for gates.
+        // Asymmetric mode (leaveRssi < 0): user opted in to distance-based
+        //   leave — only detections at or above leaveRssi count as "here",
+        //   so a weak reading lets the leave timer tick down. Use this if
+        //   you want the gate to close once the user has moved a configured
+        //   distance away rather than waiting for total signal loss.
+        bool counts_as_present;
+        if (r.leaveRssi < 0) {
+            counts_as_present = (rssi >= r.leaveRssi);
+        } else {
+            counts_as_present = true;
+        }
+        if (counts_as_present) {
+            r.lastSeen = now;
+        }
 
-        // Only fire the enter action when RSSI is above the proper enter
-        // threshold — weak detections between leaveRssi and rssiThresh keep
-        // the rule "live" but don't re-fire.
+        // ── Enter trigger. ────────────────────────────────────────────
+        // The user-set rssiThresh gates whether THIS detection is strong
+        // enough to fire the enter action. Weak readings update presence
+        // (above) but don't re-fire.
         if (rssi < r.rssiThresh) continue;
 
         // Cooldown — don't re-trigger too fast
