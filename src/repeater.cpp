@@ -917,7 +917,13 @@ void checkBeacons() {
     // checkBeacons iteration starts a fresh scan. ~10 line of recovery,
     // no extra load, just monitors and revives. The lastScanCompleteAt
     // self-reset avoids spamming this branch every loop iteration.
+    //
+    // One log line per trip (rare event) so we can tell whether dropouts
+    // are 'BLE hang → watchdog recovers' (we'll see this line during the
+    // gap) or 'scans complete fine but no decode' (we won't).
     if (lastScanCompleteAt > 0 && now - lastScanCompleteAt > 30000) {
+        unsigned long gap = now - lastScanCompleteAt;
+        Serial.printf("BLE,WATCHDOG,recovering,gap=%lums\n", gap);
         if (pBLEScan) {
             pBLEScan->stop();
             pBLEScan->clearResults();
