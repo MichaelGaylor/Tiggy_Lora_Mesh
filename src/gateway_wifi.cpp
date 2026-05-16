@@ -33,10 +33,10 @@
 #include <Preferences.h>
 #include <RadioLib.h>
 #include <WebSocketsClient.h>
-#include <BLEDevice.h>
-#include <BLEServer.h>
-#include <BLEUtils.h>
-#include <BLE2902.h>
+// BLE stack: NimBLE-Arduino (replaces bluedroid). Single header pulls in
+// the full GATT server / characteristic / advertising API. The 2902 CCC
+// descriptor is auto-attached when NOTIFY is set, so no separate include.
+#include <NimBLEDevice.h>
 #include "Pins.h"
 
 // ─── Hardware Timer Watchdog (30s, independent of RTOS) ─────
@@ -497,8 +497,8 @@ void checkWifi() {
 }
 
 // ─── BLE ─────────────────────────────────────────────────────
-static BLEServer* bleServer = nullptr;
-static BLECharacteristic* bleNotifyChar = nullptr;
+static NimBLEServer* bleServer = nullptr;
+static NimBLECharacteristic* bleNotifyChar = nullptr;
 static bool bleConnected = false;
 static bool bleAuthenticated = false;  // Must AUTH before config commands
 static String bleRxBuffer;
@@ -506,13 +506,13 @@ static String bleRxBuffer;
 // Forward declaration
 void processBleCommand(const String& line);
 
-class BleServerCB : public BLEServerCallbacks {
-    void onConnect(BLEServer* s)    override { bleConnected = true;  dbg("BLE: connected"); }
-    void onDisconnect(BLEServer* s) override { bleConnected = false; bleAuthenticated = false; dbg("BLE: disconnected"); s->startAdvertising(); }
+class BleServerCB : public NimBLEServerCallbacks {
+    void onConnect(NimBLEServer* s)    override { bleConnected = true;  dbg("BLE: connected"); }
+    void onDisconnect(NimBLEServer* s) override { bleConnected = false; bleAuthenticated = false; dbg("BLE: disconnected"); s->startAdvertising(); }
 };
 
-class BleWriteCB : public BLECharacteristicCallbacks {
-    void onWrite(BLECharacteristic* c) override {
+class BleWriteCB : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic* c) override {
         String data = c->getValue().c_str();
         bleRxBuffer += data;
         while (bleRxBuffer.indexOf('\n') >= 0) {
@@ -662,30 +662,34 @@ void processBleCommand(const String& line) {
 
 void setupBLE() {
     String bleName = "LoRaGW-" + String(cfg.gw_name).substring(0, 10);
-    BLEDevice::init(bleName.c_str());
-    bleServer = BLEDevice::createServer();
+    NimBLEDevice::init(bleName.c_str());
+    bleServer = NimBLEDevice::createServer();
     bleServer->setCallbacks(new BleServerCB());
 
-    BLEService* service = bleServer->createService(BLE_SERVICE_UUID);
+    NimBLEService* service = bleServer->createService(BLE_SERVICE_UUID);
 
-    // Write characteristic (phone writes commands here)
-    BLECharacteristic* writeChar = service->createCharacteristic(
+    // Write characteristic (phone writes commands here). NimBLE uses the
+    // NIMBLE_PROPERTY:: enum for permission bits, not characteristic-class
+    // static constants.
+    NimBLECharacteristic* writeChar = service->createCharacteristic(
         BLE_TX_CHAR_UUID,
-        BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
+        NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
     writeChar->setCallbacks(new BleWriteCB());
 
-    // Notify characteristic (gateway replies via this)
+    // Notify characteristic (gateway replies via this). NimBLE auto-attaches
+    // the 0x2902 CCC descriptor when NOTIFY is set, so the addDescriptor()
+    // call from the bluedroid era is no longer needed.
     bleNotifyChar = service->createCharacteristic(
-        BLE_RX_CHAR_UUID, BLECharacteristic::PROPERTY_NOTIFY);
-    bleNotifyChar->addDescriptor(new BLE2902());
+        BLE_RX_CHAR_UUID, NIMBLE_PROPERTY::NOTIFY);
 
     service->start();
-    BLEAdvertising* adv = BLEDevice::getAdvertising();
+    NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
     adv->addServiceUUID(BLE_SERVICE_UUID);
     adv->setScanResponse(true);
-    adv->setMinPreferred(0x06);
-    BLEDevice::startAdvertising();
-    dbg("BLE ready: " + bleName);
+    // setMinPreferred(0x06) was a bluedroid hint for slave-preferred
+    // connection interval. NimBLE manages this per-connection — dropped.
+    NimBLEDevice::startAdvertising();
+    dbg("BLE ready: " + bleName + " (NimBLE)");
 }
 
 // ─── OLED Display ─────────────────────────────────────────────
