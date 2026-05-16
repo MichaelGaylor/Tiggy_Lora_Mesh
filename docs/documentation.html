@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>TiggyOpenMesh v4.2 - Complete Documentation</title>
+<title>TiggyOpenMesh v4.3 - Complete Documentation</title>
 <style>
   :root {
     --bg: #0a0e14;
@@ -539,14 +539,24 @@
 <div class="hero">
   <h1>TiggyOpenMesh</h1>
   <div class="subtitle">T-Deck Plus &bull; LoRa32 &bull; Heltec V3 &bull; Heltec V4 &bull; XIAO ESP32S3 &bull; TiggyOpenMesh V1</div>
-  <span class="version">v4.2 &mdash; MeshCore Architecture</span>
+  <span class="version">v4.3 &mdash; MeshCore Architecture</span>
   <p style="color:var(--dim); margin-top:16px; font-size:0.95em;">
     Complete technical documentation &mdash; hardware, protocol, menus, code architecture &amp; API
   </p>
 </div>
 
-<!-- ═══════════════ CHANGELOG v4.2 ═══════════════ -->
+<!-- ═══════════════ CHANGELOG v4.3 ═══════════════ -->
 <div style="max-width:1100px; margin:24px auto 0; padding:0 40px;">
+  <div class="info-box green" style="margin:0 0 16px 0;">
+    <p style="color:var(--white); font-weight:700; font-size:1.05em; margin-bottom:8px;">What's new in v4.3</p>
+    <ul style="color:var(--dim); padding-left:22px; margin:0;">
+      <li><strong>BLE stack migration: bluedroid &rarr; NimBLE.</strong> The Arduino-bundled bluedroid BLE library had a long-standing bug in dual-mode (GATT server + scanner running concurrently) where the radio would silently stop decoding adverts after a few minutes, producing 60+ second "tag dropouts" on beacon-deployed nodes even with the iBeacon physically touching the device. Replaced with the <a href="https://github.com/h2zero/NimBLE-Arduino" style="color:var(--cyan);">NimBLE-Arduino</a> library &mdash; same API shape, dramatically more stable in dual-mode. <strong>Side benefit:</strong> ~14 kB less RAM, ~400 kB less flash on every board. <a href="#ibeacon" style="color:var(--cyan);">See iBeacon Scanner &sect;38</a>.</li>
+      <li><strong>Premium GUI: multi-beacon deploy.</strong> Up to 8 BLE fobs can now be wired to a single Logic Builder rule (one Beacon Detect block per fob, all OR'd into the same Actuator). Deploy sends one <code>BEACON,CLEAR</code> then N <code>BEACON,ADD</code> commands to the scanner node. Each fob keeps its own MAC, name, RSSI threshold, and optional close-RSSI.</li>
+      <li><strong>Premium GUI: deploy confirmation.</strong> Clicking Deploy now waits for the firmware's <code>OK,BEACON,ADD,&lt;slot&gt;,&lt;name&gt;</code> reply (round-trip via mesh for remote scanner nodes), shows a live elapsed timer, and only flips to <strong>DEPLOYED (node)</strong> when every beacon in the rule has been confirmed by the firmware. Bad pins / full slot tables / format errors now surface as <strong>FAILED: &lt;reason&gt;</strong> instead of falsely claiming success.</li>
+      <li><strong>Premium GUI: firmware-deployed rules don't double-fire in the GUI engine.</strong> Once a rule is firmware-deployed, the gateway's Python evaluator skips it so the on-node autonomous action isn't shadowed by a duplicate from the gateway side.</li>
+    </ul>
+  </div>
+
   <div class="info-box cyan" style="margin:0;">
     <p style="color:var(--white); font-weight:700; font-size:1.05em; margin-bottom:8px;">What's new in v4.2</p>
     <ul style="color:var(--dim); padding-left:22px; margin:0;">
@@ -4330,7 +4340,11 @@ BEACON,REVERTED,Gate</pre>
 </div>
 
 <div class="info-box orange">
-  <p><strong>Finding a beacon's MAC:</strong> the Beacon Detect dialog used to have a "Scan for Beacons" button that fired <code>BEACON,SCAN</code> on the gateway. That button has been removed &mdash; the gateway can't scan in gateway mode anyway, and on TM1 gateways BLE is often disabled entirely to avoid stack crashes. Instead, use any phone BLE-scanner app (nRF Connect, BLE Scanner) to read the MAC address from the beacon and paste it into the Beacon ID field.</p>
+  <p><strong>Finding a beacon's MAC:</strong> the Beacon Detect dialog used to have a "Scan for Beacons" button that fired <code>BEACON,SCAN</code> on the gateway. That button has been removed &mdash; the gateway can't scan in gateway mode anyway. Use any phone BLE-scanner app (nRF Connect, BLE Scanner) to read the MAC address from the beacon and paste it into the Beacon ID field.</p>
+</div>
+
+<div class="info-box green">
+  <p><strong>BLE stack &mdash; NimBLE (v4.3+):</strong> the firmware now uses the <a href="https://github.com/h2zero/NimBLE-Arduino" style="color:var(--cyan);">NimBLE-Arduino</a> library instead of the Arduino-bundled bluedroid stack. Bluedroid in dual-mode (GATT server + scanner running concurrently) had a long-standing bug where the BLE radio would silently stop decoding adverts after a few minutes, producing 60+ second "tag dropouts" even with the beacon physically sitting on the node. NimBLE handles dual-mode cleanly &mdash; the issue is gone &mdash; and as a bonus uses ~14 kB less RAM and ~400 kB less flash on each board. No user-visible API change.</p>
 </div>
 </section>
 
@@ -4901,7 +4915,7 @@ OK: BATT_CFG cleared, using Pins.h defaults
 
 <!-- Footer -->
 <div style="background:var(--panel); border-top:1px solid var(--faint); padding:30px 40px; text-align:center; color:var(--faint); font-size:0.85em;">
-  <p>TiggyOpenMesh v4.2 &mdash; MeshCore Architecture</p>
+  <p>TiggyOpenMesh v4.3 &mdash; MeshCore Architecture</p>
   <p>T-Deck Plus &bull; LoRa32 T3 V1.6.1 &bull; Heltec WiFi LoRa 32 V3 &bull; Heltec WiFi LoRa 32 V4 &bull; XIAO ESP32S3 &bull; TiggyOpenMesh V1</p>
   <p>49 sections &mdash; Hardware, Protocol, UI, BLE, Gateway, Logic Builder, Timers, Setpoints, Sensors, Pulse Counters, SOS, Map, Solar, Delivery, SF Change, Collision Detection, IO Expansion, GPS, Device Management, Signal Routing, iBeacon Scanner, Meshtastic Bridge, Telegram Bot (Gateway), Sensor Dashboard, HW Watchdog, Heltec V4 USB/FEM, Web Gauge, Licensing, Adding a New Board, Beacon Triangulation, Command Reference, Caveats, <strong>Battery Monitoring</strong></p>
   <p style="margin-top:8px;">Documentation updated May 2026</p>
