@@ -2509,8 +2509,17 @@ void serialDrain() {
 }
 
 void bleSend(const String& line) {
-    // Echo BLE responses to serial when in gateway mode (queued, non-blocking)
-    if (gatewayMode) serialEnqueue(line);
+    // Echo BLE responses to serial when in gateway mode (queued, non-blocking).
+    if (gatewayMode) {
+        serialEnqueue(line);
+    } else if (!bleConnected) {
+        // Normal mode + no phone over BLE = the user is talking to the node
+        // via USB serial directly (interactive debug, BEACON,DEBUG,ON output,
+        // command replies, etc.). Without this branch every bleSend reply was
+        // silently dropped, leaving the user wondering why BEACON,LIST and
+        // friends "returned nothing".
+        Serial.println(line);
+    }
     if (!bleConnected || !bleRxChar) return;
     String msg = line + "\n";
     for (unsigned int i = 0; i < msg.length(); i += 20) {
