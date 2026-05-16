@@ -399,6 +399,15 @@ static volatile bool beaconScanDone = false;
 static bool beaconScanActive = false;  // Track scan state (BLEScan has no isScanning)
 bool beaconScanEnabled = true;  // Can be disabled to save power
 
+// BEACON,DEBUG,ON enables per-detection logging over USB serial:
+//   BLE,SCAN,START            — each scan window begins
+//   BLE,SCAN,DONE,<count>     — each scan window ends with N de-duplicated devices
+//   BLE,DEV,<mac>,<rssi>      — one line per device seen in the results
+//   BLE,MATCH,<name>,<rssi>   — one line per device that matched a rule
+// Use to diagnose "tag dropped out" gaps in the keepalive stream.
+static bool beaconVerbose = false;
+static unsigned long lastScanCompleteAt = 0;  // For the stuck-scan watchdog
+
 void bleSend(const String& line);  // Forward declaration
 
 // ─── Node RSSI Response (for LoRa-based node triangulation) ──────────
@@ -436,6 +445,7 @@ void checkBeacons();  // Forward declaration
 static void onScanComplete(BLEScanResults results) {
     beaconScanDone = true;
     beaconScanActive = false;
+    lastScanCompleteAt = millis();
 }
 
 static void stopBeaconScanNow() {
@@ -799,6 +809,9 @@ void matchBeacon(BLEAdvertisedDevice& dev) {
         if (r.uuid[0] && uuid.equalsIgnoreCase(String(r.uuid))) match = true;
         if (r.mac[0] && mac.equalsIgnoreCase(String(r.mac))) match = true;
         if (!match) continue;
+        if (beaconVerbose) {
+            Serial.printf("BLE,MATCH,%s,%d\n", r.name, rssi);
+        }
 
         // ── Presence update. ───────────────────────────────────────────
         // Default mode (leaveRssi == 0): ANY detection of the target MAC
@@ -894,13 +907,38 @@ void checkBeacons() {
     if (solarMode || !beaconScanEnabled || !pBLEScan) return;
 
     static unsigned long lastScanStart = 0;
+    static unsigned long lastStuckLog = 0;
     unsigned long now = millis();
 
-    // Watchdog: if scan callback was lost, force-reset
+    // Watchdog A: if scan stayed "active" too long (callback was lost),
+    // force-reset. Catches scans that hang past their advertised duration.
     if (beaconScanActive && now - lastScanStart > (BEACON_SCAN_DURATION * 1000 + 5000)) {
         pBLEScan->stop();
         beaconScanActive = false;
         beaconScanDone = false;
+        if (beaconVerbose || (now - lastStuckLog > 60000)) {
+            Serial.println("BLE,WATCHDOG,scan_active_timeout");
+            lastStuckLog = now;
+        }
+    }
+
+    // Watchdog B: if no scan has COMPLETED for a long time, something
+    // killed the BLE stack between scans (e.g., dropped onScanComplete).
+    // Re-init via stop + restart on next cycle. 30s is generous — at
+    // BEACON_SCAN_INTERVAL=5s we should complete a scan every 5-8s.
+    if (lastScanCompleteAt > 0 && now - lastScanCompleteAt > 30000) {
+        if (beaconVerbose || (now - lastStuckLog > 60000)) {
+            Serial.printf("BLE,WATCHDOG,no_scan_complete_for_%lums\n",
+                          now - lastScanCompleteAt);
+            lastStuckLog = now;
+        }
+        if (pBLEScan) {
+            pBLEScan->stop();
+            pBLEScan->clearResults();
+        }
+        beaconScanActive = false;
+        beaconScanDone = false;
+        lastScanCompleteAt = now;  // Avoid spamming this branch
     }
 
     // Start a new scan periodically
@@ -908,14 +946,24 @@ void checkBeacons() {
         beaconScanActive = true;
         pBLEScan->start(BEACON_SCAN_DURATION, onScanComplete, false);
         lastScanStart = now;
+        if (beaconVerbose) Serial.println("BLE,SCAN,START");
     }
 
     // Process completed scan results
     if (beaconScanDone) {
         beaconScanDone = false;
         BLEScanResults results = pBLEScan->getResults();
-        for (int i = 0; i < results.getCount(); i++) {
+        int n = results.getCount();
+        if (beaconVerbose) {
+            Serial.printf("BLE,SCAN,DONE,%d\n", n);
+        }
+        for (int i = 0; i < n; i++) {
             BLEAdvertisedDevice dev = results.getDevice(i);
+            if (beaconVerbose) {
+                Serial.printf("BLE,DEV,%s,%d\n",
+                              dev.getAddress().toString().c_str(),
+                              dev.getRSSI());
+            }
             matchBeacon(dev);
         }
         pBLEScan->clearResults();
@@ -3341,6 +3389,17 @@ String processBeaconCommand(const String& args) {
         for (int i = 0; i < MAX_BEACON_RULES; i++) beaconRules[i].active = false;
         saveBeaconRules();
         return "OK,BEACON,CLEAR";
+    }
+
+    // Diagnostic verbosity — see "BLE,*" logging in checkBeacons / matchBeacon.
+    // Use to figure out where keepalives are dropping in real time.
+    if (args == "DEBUG,ON" || args == "DEBUG ON") {
+        beaconVerbose = true;
+        return "OK,BEACON,DEBUG,ON";
+    }
+    if (args == "DEBUG,OFF" || args == "DEBUG OFF") {
+        beaconVerbose = false;
+        return "OK,BEACON,DEBUG,OFF";
     }
 
     if (args == "SCAN") {
