@@ -2122,6 +2122,17 @@ void handleCmd(const String& from, const String& cmdBody) {
     else if (action == "BEACON") {
         String result = processBeaconCommand(rest);
         bleSend(result);
+        // Cross-mesh response routing: when CMD,BEACON arrived over the
+        // air (from != "LOCAL"), the requesting gateway also needs to see
+        // the OK,BEACON,ADD,<slot>,<name> reply so its deploy-confirmation
+        // logic can flip rule.deploy_status to "confirmed". Wrap in the
+        // existing BEACONEVT pattern — gateway's BEACONEVT handler does
+        // bleSend(rest) which emits the OK reply onto its USB serial,
+        // where the Premium GUI's serial dispatcher picks it up via the
+        // note_beacon_add_ok() / note_beacon_add_err() path.
+        if (from != "LOCAL") {
+            notifyBeaconEvent(result, true);
+        }
     }
     else if (action == "SENSOR") {
         processBleCommand("SENSOR " + rest);
