@@ -214,6 +214,25 @@ class BleManager(private val context: Context) {
             }, 500)
         }
 
+        // Write completion — releases the writeInProgress flag so the next
+        // chunk / next send() can issue its writeCharacteristic. On Android
+        // 13+ the new writeCharacteristic API rejects overlapping writes
+        // with ERROR_GATT_WRITE_REQUEST_BUSY (silent — int return value);
+        // bluedroid firmware acked fast enough to dodge this, but NimBLE's
+        // slower ack exposed it. We now block each chunk on this callback.
+        override fun onCharacteristicWrite(
+            g: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            status: Int
+        ) {
+            if (characteristic.uuid == BLE_TX_CHAR_UUID) {
+                synchronized(writeLock) {
+                    writeInProgress = false
+                    writeLock.notifyAll()
+                }
+            }
+        }
+
         // Android 13+ uses new signature with value parameter
         override fun onCharacteristicChanged(
             g: BluetoothGatt,
@@ -245,13 +264,41 @@ class BleManager(private val context: Context) {
         }
     }
 
+    // Write serialization — Android 13+'s new writeCharacteristic API rejects
+    // overlapping writes with ERROR_GATT_WRITE_REQUEST_BUSY (silently — the
+    // return code is an int the old code threw away). The MainActivity
+    // LaunchedEffect fires STATUS / CMD,LIST / NODES back-to-back on connect;
+    // only STATUS won, the other two were silently rejected, so the Control
+    // screen had no pins and the Nodes tab stayed empty. Worked on bluedroid
+    // firmware only because writes completed fast enough to dodge the BUSY
+    // window — NimBLE's slower write ack exposed the latent race.
+    //
+    // We now block each chunk until onCharacteristicWrite fires (real
+    // completion, not an arbitrary delay), with a 500ms safety timeout
+    // in case a write goes missing. @Synchronized serializes concurrent
+    // send() calls — the second send() blocks on the intrinsic lock until
+    // the first finishes its chunks.
+    private val writeLock = Object()
+    private var writeInProgress = false
+
     // ─── Send data to node ───────────────────────────────────
+    @Synchronized
     fun send(data: String) {
         val char = txCharacteristic ?: return
         val g = gatt ?: return
         val bytes = (data + "\n").toByteArray(Charsets.UTF_8)
         val chunkSize = 20
         for (i in bytes.indices step chunkSize) {
+            // Wait for previous write's completion callback before issuing the next
+            synchronized(writeLock) {
+                val deadline = System.currentTimeMillis() + 500
+                while (writeInProgress) {
+                    val remaining = deadline - System.currentTimeMillis()
+                    if (remaining <= 0) break  // safety timeout — proceed
+                    try { writeLock.wait(remaining) } catch (_: InterruptedException) { break }
+                }
+                writeInProgress = true
+            }
             val chunk = bytes.sliceArray(i until minOf(i + chunkSize, bytes.size))
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 g.writeCharacteristic(char, chunk, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
@@ -261,7 +308,9 @@ class BleManager(private val context: Context) {
                 @Suppress("DEPRECATION")
                 g.writeCharacteristic(char)
             }
-            if (i + chunkSize < bytes.size) Thread.sleep(30)
+            // No Thread.sleep here — we now wait for the actual completion
+            // callback at the top of the next iteration. Real pacing, not
+            // arbitrary fixed delay.
         }
     }
 
