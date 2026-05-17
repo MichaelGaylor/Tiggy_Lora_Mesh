@@ -545,44 +545,7 @@
   </p>
 </div>
 
-<!-- ═══════════════ CHANGELOG v4.4 ═══════════════ -->
-<div style="max-width:1100px; margin:24px auto 0; padding:0 40px;">
-  <div class="info-box green" style="margin:0 0 16px 0;">
-    <p style="color:var(--white); font-weight:700; font-size:1.05em; margin-bottom:8px;">What's new in v4.4</p>
-    <ul style="color:var(--dim); padding-left:22px; margin:0;">
-      <li><strong>Fix: Android app no longer shows empty pin/node lists.</strong> The bluedroid &rarr; NimBLE migration silently broke every BLE notify since v4.3. Cause: <code>bleRxChar-&gt;setValue(chunk.c_str())</code> &mdash; the <code>const char*</code> argument was getting caught by NimBLE-Arduino's template <code>setValue&lt;T&gt;(const T&amp;)</code> overload, which serialised the <em>pointer bytes</em> (4 bytes on ESP32-S3) instead of the string contents. Bluedroid's <code>setValue(const char*)</code> was a proper explicit overload that handled this correctly. Fix: use the explicit <code>(const uint8_t*, size_t)</code> overload &mdash; <code>setValue(msgBytes + i, chunkLen)</code> &mdash; pointing into the long-lived <code>msg</code> buffer (not a temporary <code>substring()</code> that could free before async notify reads it). Applied to both <code>repeater.cpp</code> and <code>gateway_wifi.cpp</code>.</li>
-      <li><strong>Fix: Android writes to firmware no longer silently dropped on Android 13+.</strong> The new <code>writeCharacteristic(char, value, writeType)</code> API (used on Tiramisu+) rejects overlapping writes with <code>ERROR_GATT_WRITE_REQUEST_BUSY</code> &mdash; an <code>int</code> return value the old code threw away. The on-connect burst (STATUS / CMD,LIST / NODES) won the race for STATUS only; CMD,LIST and NODES were silently rejected, so pins and the Nodes tab stayed empty. <code>BleManager.send()</code> now waits on <code>onCharacteristicWrite</code> before issuing the next write, with a 500 ms safety timeout.</li>
-      <li><strong>Fix: rapid notify lines no longer conflated away on the Android side.</strong> <code>_incomingData</code> was a <code>MutableStateFlow&lt;String&gt;</code>; if multiple lines arrived faster than the collector ran, only the latest survived. Replaced with <code>MutableSharedFlow</code> (replay=0, extraBufferCapacity=64, DROP_OLDEST) so every emitted line reaches <code>parseLine</code>.</li>
-      <li><strong>Firmware: bleSend pacing.</strong> A 30 ms tail delay restores the implicit per-packet pacing bluedroid gave us for free &mdash; NimBLE's <code>notify()</code> is asynchronous and overflows its ~9-packet TX queue on burst responses (NODES handler: <code>NODELIST</code> + N&times;<code>NODE</code> + <code>NODEEND</code>). Now bursts pace and the full reply reaches the phone.</li>
-      <li><strong>Firmware: STATUS reply now also emits PINS.</strong> The Android app fires <code>STATUS</code> 500 ms after BLE connect, so piggy-backing the <code>PINS,R:&hellip;|S:&hellip;</code> line on that reply lets the Control screen populate immediately on connect &mdash; no manual refresh tap needed.</li>
-      <li><strong>Firmware: <code>PULSE_MAX_MS</code> bumped 30 s &rarr; 60 s.</strong> Slow gate actuators (motorised DRV8871-driven mechanical gates) need pulses longer than 30 s for full open/close cycles. <code>BEACON,ADD</code> rules with <code>pulse_ms</code> in <code>(30000, 60000]</code> are now accepted instead of returning <code>BAD_PULSE</code>. Fits in the existing <code>uint16_t</code> storage with headroom.</li>
-    </ul>
-  </div>
-
-  <div class="info-box cyan" style="margin:0 0 16px 0;">
-    <p style="color:var(--white); font-weight:700; font-size:1.05em; margin-bottom:8px;">What's new in v4.3</p>
-    <ul style="color:var(--dim); padding-left:22px; margin:0;">
-      <li><strong>BLE stack migration: bluedroid &rarr; NimBLE.</strong> The Arduino-bundled bluedroid BLE library had a long-standing bug in dual-mode (GATT server + scanner running concurrently) where the radio would silently stop decoding adverts after a few minutes, producing 60+ second "tag dropouts" on beacon-deployed nodes even with the iBeacon physically touching the device. Replaced with the <a href="https://github.com/h2zero/NimBLE-Arduino" style="color:var(--cyan);">NimBLE-Arduino</a> library &mdash; same API shape, dramatically more stable in dual-mode. <strong>Side benefit:</strong> ~14 kB less RAM, ~400 kB less flash on every board. <a href="#ibeacon" style="color:var(--cyan);">See iBeacon Scanner &sect;38</a>.</li>
-      <li><strong>Premium GUI: multi-beacon deploy.</strong> Up to 8 BLE fobs can now be wired to a single Logic Builder rule (one Beacon Detect block per fob, all OR'd into the same Actuator). Deploy sends one <code>BEACON,CLEAR</code> then N <code>BEACON,ADD</code> commands to the scanner node. Each fob keeps its own MAC, name, RSSI threshold, and optional close-RSSI.</li>
-      <li><strong>Premium GUI: deploy confirmation.</strong> Clicking Deploy now waits for the firmware's <code>OK,BEACON,ADD,&lt;slot&gt;,&lt;name&gt;</code> reply (round-trip via mesh for remote scanner nodes), shows a live elapsed timer, and only flips to <strong>DEPLOYED (node)</strong> when every beacon in the rule has been confirmed by the firmware. Bad pins / full slot tables / format errors now surface as <strong>FAILED: &lt;reason&gt;</strong> instead of falsely claiming success.</li>
-      <li><strong>Premium GUI: firmware-deployed rules don't double-fire in the GUI engine.</strong> Once a rule is firmware-deployed, the gateway's Python evaluator skips it so the on-node autonomous action isn't shadowed by a duplicate from the gateway side.</li>
-    </ul>
-  </div>
-
-  <div class="info-box cyan" style="margin:0;">
-    <p style="color:var(--white); font-weight:700; font-size:1.05em; margin-bottom:8px;">What's new in v4.2</p>
-    <ul style="color:var(--dim); padding-left:22px; margin:0;">
-      <li><strong>TiggyOpenMesh V1 board</strong> &mdash; custom ESP32-S3 + Wio-SX1262 + DRV8871 actuator + 3S LiPo battery monitor. <a href="#hardware" style="color:var(--cyan);">See Hardware &sect;2</a>.</li>
-      <li><strong>Actuator Open / Actuator Close</strong> Logic Builder blocks for the DRV8871 H-bridge. Pins come from <code>board_pins.json</code> &mdash; no firmware changes needed to add the feature to a new board. <a href="#logic-builder" style="color:var(--cyan);">See Logic Builder &sect;22</a>.</li>
-      <li><strong>Battery telemetry</strong> piggybacks on the regular heartbeat (<code>HB,&lt;id&gt;,&lt;board&gt;,&hellip;,B&lt;mv&gt;</code>) &mdash; every node card in the GUI now shows a live voltage chip. <a href="#battery-monitor" style="color:var(--cyan);">See Battery Monitoring &sect;49</a>.</li>
-      <li><strong>Graceful low-battery shutdown</strong> &mdash; Heltec V3, V4 and TM1 deep-sleep when the pack drops below cutoff and wake when it recovers. EEPROM-tunable in the field via <code>BATT_CFG</code>.</li>
-      <li><strong>Logic Builder ACK tracking</strong> &mdash; relay commands now show <span style="color:#FF9800;">retrying</span> &rarr; <span style="color:#00E676;">delivered</span> or <span style="color:#FF1744;">failed</span> based on the firmware's ACK/DELIVERED/FAILED serial replies. Three GUI-level retries layered on top of the firmware's 5&times;8 s retry window. <a href="#delivery-tracking" style="color:var(--cyan);">See Delivery Tracking &sect;25</a>.</li>
-      <li><strong>Visual block reference</strong> &mdash; every Logic Builder block now has an inline SVG diagram, plus a new "Typical Wiring Patterns" gallery showing how blocks connect. <a href="#logic-builder" style="color:var(--cyan);">See Logic Builder &sect;22</a>.</li>
-      <li><strong>Gateway-mode debug silencing</strong> &mdash; <code>debugPrint(&hellip;)</code> is a no-op when <code>gatewayMode</code> is on so the serial channel stays clean for the GUI's data plane.</li>
-      <li><strong>ACK_TIMEOUT bumped 3 s &rarr; 8 s</strong> and <strong>MAX_RETRIES 3 &rarr; 5</strong> to fix half-duplex collisions when the remote's ACK is still in flight.</li>
-    </ul>
-  </div>
-</div>
+<!-- Changelog moved to appendix at bottom of doc — see #changelog -->
 
 <!-- ═══════════════ NAV ═══════════════ -->
 <nav>
@@ -630,6 +593,7 @@
   <a href="#beacon-triangulation">Triangulation</a>
   <a href="#command-ref">Command Ref</a>
   <a href="#battery-monitor">Battery Monitor</a>
+  <a href="#changelog">Changelog</a>
 </nav>
 
 <div class="container">
@@ -4921,6 +4885,49 @@ OK: BATT_CFG cleared, using Pins.h defaults
 </table>
 
 <p>Chip thresholds above are for the default 3 S LiPo profile. For a different chemistry (12 V SLA, 7 S LiPo, 8 S LiFePO4) set thresholds via <code>BATT_CFG</code> and the chip colour will track them.</p>
+</section>
+
+<!-- ═══════════════ APPENDIX: CHANGELOG ═══════════════ -->
+<section id="changelog">
+<h2>Appendix &mdash; Release Changelog</h2>
+
+<p>Per-release summary of what changed since the previous version. Most recent at the top.</p>
+
+<div class="info-box green" style="margin:0 0 16px 0;">
+  <p style="color:var(--white); font-weight:700; font-size:1.05em; margin-bottom:8px;">v4.4</p>
+  <ul style="color:var(--dim); padding-left:22px; margin:0;">
+    <li><strong>Fix: Android app no longer shows empty pin/node lists.</strong> The bluedroid &rarr; NimBLE migration silently broke every BLE notify since v4.3. Cause: <code>bleRxChar-&gt;setValue(chunk.c_str())</code> &mdash; the <code>const char*</code> argument was getting caught by NimBLE-Arduino's template <code>setValue&lt;T&gt;(const T&amp;)</code> overload, which serialised the <em>pointer bytes</em> (4 bytes on ESP32-S3) instead of the string contents. Bluedroid's <code>setValue(const char*)</code> was a proper explicit overload that handled this correctly. Fix: use the explicit <code>(const uint8_t*, size_t)</code> overload &mdash; <code>setValue(msgBytes + i, chunkLen)</code> &mdash; pointing into the long-lived <code>msg</code> buffer (not a temporary <code>substring()</code> that could free before async notify reads it). Applied to both <code>repeater.cpp</code> and <code>gateway_wifi.cpp</code>.</li>
+    <li><strong>Fix: Android writes to firmware no longer silently dropped on Android 13+.</strong> The new <code>writeCharacteristic(char, value, writeType)</code> API (used on Tiramisu+) rejects overlapping writes with <code>ERROR_GATT_WRITE_REQUEST_BUSY</code> &mdash; an <code>int</code> return value the old code threw away. The on-connect burst (STATUS / CMD,LIST / NODES) won the race for STATUS only; CMD,LIST and NODES were silently rejected, so pins and the Nodes tab stayed empty. <code>BleManager.send()</code> now waits on <code>onCharacteristicWrite</code> before issuing the next write, with a 500 ms safety timeout.</li>
+    <li><strong>Fix: rapid notify lines no longer conflated away on the Android side.</strong> <code>_incomingData</code> was a <code>MutableStateFlow&lt;String&gt;</code>; if multiple lines arrived faster than the collector ran, only the latest survived. Replaced with <code>MutableSharedFlow</code> (replay=0, extraBufferCapacity=64, DROP_OLDEST) so every emitted line reaches <code>parseLine</code>.</li>
+    <li><strong>Firmware: bleSend pacing.</strong> A 30 ms tail delay restores the implicit per-packet pacing bluedroid gave us for free &mdash; NimBLE's <code>notify()</code> is asynchronous and overflows its ~9-packet TX queue on burst responses (NODES handler: <code>NODELIST</code> + N&times;<code>NODE</code> + <code>NODEEND</code>). Now bursts pace and the full reply reaches the phone.</li>
+    <li><strong>Firmware: STATUS reply now also emits PINS.</strong> The Android app fires <code>STATUS</code> 500 ms after BLE connect, so piggy-backing the <code>PINS,R:&hellip;|S:&hellip;</code> line on that reply lets the Control screen populate immediately on connect &mdash; no manual refresh tap needed.</li>
+    <li><strong>Firmware: <code>PULSE_MAX_MS</code> bumped 30 s &rarr; 60 s.</strong> Slow gate actuators (motorised DRV8871-driven mechanical gates) need pulses longer than 30 s for full open/close cycles. <code>BEACON,ADD</code> rules with <code>pulse_ms</code> in <code>(30000, 60000]</code> are now accepted instead of returning <code>BAD_PULSE</code>. Fits in the existing <code>uint16_t</code> storage with headroom.</li>
+  </ul>
+</div>
+
+<div class="info-box cyan" style="margin:0 0 16px 0;">
+  <p style="color:var(--white); font-weight:700; font-size:1.05em; margin-bottom:8px;">v4.3</p>
+  <ul style="color:var(--dim); padding-left:22px; margin:0;">
+    <li><strong>BLE stack migration: bluedroid &rarr; NimBLE.</strong> The Arduino-bundled bluedroid BLE library had a long-standing bug in dual-mode (GATT server + scanner running concurrently) where the radio would silently stop decoding adverts after a few minutes, producing 60+ second "tag dropouts" on beacon-deployed nodes even with the iBeacon physically touching the device. Replaced with the <a href="https://github.com/h2zero/NimBLE-Arduino" style="color:var(--cyan);">NimBLE-Arduino</a> library &mdash; same API shape, dramatically more stable in dual-mode. <strong>Side benefit:</strong> ~14 kB less RAM, ~400 kB less flash on every board. <a href="#ibeacon" style="color:var(--cyan);">See iBeacon Scanner &sect;38</a>.</li>
+    <li><strong>Premium GUI: multi-beacon deploy.</strong> Up to 8 BLE fobs can now be wired to a single Logic Builder rule (one Beacon Detect block per fob, all OR'd into the same Actuator). Deploy sends one <code>BEACON,CLEAR</code> then N <code>BEACON,ADD</code> commands to the scanner node. Each fob keeps its own MAC, name, RSSI threshold, and optional close-RSSI.</li>
+    <li><strong>Premium GUI: deploy confirmation.</strong> Clicking Deploy now waits for the firmware's <code>OK,BEACON,ADD,&lt;slot&gt;,&lt;name&gt;</code> reply (round-trip via mesh for remote scanner nodes), shows a live elapsed timer, and only flips to <strong>DEPLOYED (node)</strong> when every beacon in the rule has been confirmed by the firmware. Bad pins / full slot tables / format errors now surface as <strong>FAILED: &lt;reason&gt;</strong> instead of falsely claiming success.</li>
+    <li><strong>Premium GUI: firmware-deployed rules don't double-fire in the GUI engine.</strong> Once a rule is firmware-deployed, the gateway's Python evaluator skips it so the on-node autonomous action isn't shadowed by a duplicate from the gateway side.</li>
+  </ul>
+</div>
+
+<div class="info-box cyan" style="margin:0;">
+  <p style="color:var(--white); font-weight:700; font-size:1.05em; margin-bottom:8px;">v4.2</p>
+  <ul style="color:var(--dim); padding-left:22px; margin:0;">
+    <li><strong>TiggyOpenMesh V1 board</strong> &mdash; custom ESP32-S3 + Wio-SX1262 + DRV8871 actuator + 3S LiPo battery monitor. <a href="#hardware" style="color:var(--cyan);">See Hardware &sect;2</a>.</li>
+    <li><strong>Actuator Open / Actuator Close</strong> Logic Builder blocks for the DRV8871 H-bridge. Pins come from <code>board_pins.json</code> &mdash; no firmware changes needed to add the feature to a new board. <a href="#logic-builder" style="color:var(--cyan);">See Logic Builder &sect;22</a>.</li>
+    <li><strong>Battery telemetry</strong> piggybacks on the regular heartbeat (<code>HB,&lt;id&gt;,&lt;board&gt;,&hellip;,B&lt;mv&gt;</code>) &mdash; every node card in the GUI now shows a live voltage chip. <a href="#battery-monitor" style="color:var(--cyan);">See Battery Monitoring &sect;49</a>.</li>
+    <li><strong>Graceful low-battery shutdown</strong> &mdash; Heltec V3, V4 and TM1 deep-sleep when the pack drops below cutoff and wake when it recovers. EEPROM-tunable in the field via <code>BATT_CFG</code>.</li>
+    <li><strong>Logic Builder ACK tracking</strong> &mdash; relay commands now show <span style="color:#FF9800;">retrying</span> &rarr; <span style="color:#00E676;">delivered</span> or <span style="color:#FF1744;">failed</span> based on the firmware's ACK/DELIVERED/FAILED serial replies. Three GUI-level retries layered on top of the firmware's 5&times;8 s retry window. <a href="#delivery-tracking" style="color:var(--cyan);">See Delivery Tracking &sect;25</a>.</li>
+    <li><strong>Visual block reference</strong> &mdash; every Logic Builder block now has an inline SVG diagram, plus a new "Typical Wiring Patterns" gallery showing how blocks connect. <a href="#logic-builder" style="color:var(--cyan);">See Logic Builder &sect;22</a>.</li>
+    <li><strong>Gateway-mode debug silencing</strong> &mdash; <code>debugPrint(&hellip;)</code> is a no-op when <code>gatewayMode</code> is on so the serial channel stays clean for the GUI's data plane.</li>
+    <li><strong>ACK_TIMEOUT bumped 3 s &rarr; 8 s</strong> and <strong>MAX_RETRIES 3 &rarr; 5</strong> to fix half-duplex collisions when the remote's ACK is still in flight.</li>
+  </ul>
+</div>
 </section>
 
 </div>
