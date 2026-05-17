@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>TiggyOpenMesh v4.3 - Complete Documentation</title>
+<title>TiggyOpenMesh v4.4 - Complete Documentation</title>
 <style>
   :root {
     --bg: #0a0e14;
@@ -539,15 +539,27 @@
 <div class="hero">
   <h1>TiggyOpenMesh</h1>
   <div class="subtitle">T-Deck Plus &bull; LoRa32 &bull; Heltec V3 &bull; Heltec V4 &bull; XIAO ESP32S3 &bull; TiggyOpenMesh V1</div>
-  <span class="version">v4.3 &mdash; MeshCore Architecture</span>
+  <span class="version">v4.4 &mdash; MeshCore Architecture</span>
   <p style="color:var(--dim); margin-top:16px; font-size:0.95em;">
     Complete technical documentation &mdash; hardware, protocol, menus, code architecture &amp; API
   </p>
 </div>
 
-<!-- ═══════════════ CHANGELOG v4.3 ═══════════════ -->
+<!-- ═══════════════ CHANGELOG v4.4 ═══════════════ -->
 <div style="max-width:1100px; margin:24px auto 0; padding:0 40px;">
   <div class="info-box green" style="margin:0 0 16px 0;">
+    <p style="color:var(--white); font-weight:700; font-size:1.05em; margin-bottom:8px;">What's new in v4.4</p>
+    <ul style="color:var(--dim); padding-left:22px; margin:0;">
+      <li><strong>Fix: Android app no longer shows empty pin/node lists.</strong> The bluedroid &rarr; NimBLE migration silently broke every BLE notify since v4.3. Cause: <code>bleRxChar-&gt;setValue(chunk.c_str())</code> &mdash; the <code>const char*</code> argument was getting caught by NimBLE-Arduino's template <code>setValue&lt;T&gt;(const T&amp;)</code> overload, which serialised the <em>pointer bytes</em> (4 bytes on ESP32-S3) instead of the string contents. Bluedroid's <code>setValue(const char*)</code> was a proper explicit overload that handled this correctly. Fix: use the explicit <code>(const uint8_t*, size_t)</code> overload &mdash; <code>setValue(msgBytes + i, chunkLen)</code> &mdash; pointing into the long-lived <code>msg</code> buffer (not a temporary <code>substring()</code> that could free before async notify reads it). Applied to both <code>repeater.cpp</code> and <code>gateway_wifi.cpp</code>.</li>
+      <li><strong>Fix: Android writes to firmware no longer silently dropped on Android 13+.</strong> The new <code>writeCharacteristic(char, value, writeType)</code> API (used on Tiramisu+) rejects overlapping writes with <code>ERROR_GATT_WRITE_REQUEST_BUSY</code> &mdash; an <code>int</code> return value the old code threw away. The on-connect burst (STATUS / CMD,LIST / NODES) won the race for STATUS only; CMD,LIST and NODES were silently rejected, so pins and the Nodes tab stayed empty. <code>BleManager.send()</code> now waits on <code>onCharacteristicWrite</code> before issuing the next write, with a 500 ms safety timeout.</li>
+      <li><strong>Fix: rapid notify lines no longer conflated away on the Android side.</strong> <code>_incomingData</code> was a <code>MutableStateFlow&lt;String&gt;</code>; if multiple lines arrived faster than the collector ran, only the latest survived. Replaced with <code>MutableSharedFlow</code> (replay=0, extraBufferCapacity=64, DROP_OLDEST) so every emitted line reaches <code>parseLine</code>.</li>
+      <li><strong>Firmware: bleSend pacing.</strong> A 30 ms tail delay restores the implicit per-packet pacing bluedroid gave us for free &mdash; NimBLE's <code>notify()</code> is asynchronous and overflows its ~9-packet TX queue on burst responses (NODES handler: <code>NODELIST</code> + N&times;<code>NODE</code> + <code>NODEEND</code>). Now bursts pace and the full reply reaches the phone.</li>
+      <li><strong>Firmware: STATUS reply now also emits PINS.</strong> The Android app fires <code>STATUS</code> 500 ms after BLE connect, so piggy-backing the <code>PINS,R:&hellip;|S:&hellip;</code> line on that reply lets the Control screen populate immediately on connect &mdash; no manual refresh tap needed.</li>
+      <li><strong>Firmware: <code>PULSE_MAX_MS</code> bumped 30 s &rarr; 60 s.</strong> Slow gate actuators (motorised DRV8871-driven mechanical gates) need pulses longer than 30 s for full open/close cycles. <code>BEACON,ADD</code> rules with <code>pulse_ms</code> in <code>(30000, 60000]</code> are now accepted instead of returning <code>BAD_PULSE</code>. Fits in the existing <code>uint16_t</code> storage with headroom.</li>
+    </ul>
+  </div>
+
+  <div class="info-box cyan" style="margin:0 0 16px 0;">
     <p style="color:var(--white); font-weight:700; font-size:1.05em; margin-bottom:8px;">What's new in v4.3</p>
     <ul style="color:var(--dim); padding-left:22px; margin:0;">
       <li><strong>BLE stack migration: bluedroid &rarr; NimBLE.</strong> The Arduino-bundled bluedroid BLE library had a long-standing bug in dual-mode (GATT server + scanner running concurrently) where the radio would silently stop decoding adverts after a few minutes, producing 60+ second "tag dropouts" on beacon-deployed nodes even with the iBeacon physically touching the device. Replaced with the <a href="https://github.com/h2zero/NimBLE-Arduino" style="color:var(--cyan);">NimBLE-Arduino</a> library &mdash; same API shape, dramatically more stable in dual-mode. <strong>Side benefit:</strong> ~14 kB less RAM, ~400 kB less flash on every board. <a href="#ibeacon" style="color:var(--cyan);">See iBeacon Scanner &sect;38</a>.</li>
@@ -4915,7 +4927,7 @@ OK: BATT_CFG cleared, using Pins.h defaults
 
 <!-- Footer -->
 <div style="background:var(--panel); border-top:1px solid var(--faint); padding:30px 40px; text-align:center; color:var(--faint); font-size:0.85em;">
-  <p>TiggyOpenMesh v4.3 &mdash; MeshCore Architecture</p>
+  <p>TiggyOpenMesh v4.4 &mdash; MeshCore Architecture</p>
   <p>T-Deck Plus &bull; LoRa32 T3 V1.6.1 &bull; Heltec WiFi LoRa 32 V3 &bull; Heltec WiFi LoRa 32 V4 &bull; XIAO ESP32S3 &bull; TiggyOpenMesh V1</p>
   <p>49 sections &mdash; Hardware, Protocol, UI, BLE, Gateway, Logic Builder, Timers, Setpoints, Sensors, Pulse Counters, SOS, Map, Solar, Delivery, SF Change, Collision Detection, IO Expansion, GPS, Device Management, Signal Routing, iBeacon Scanner, Meshtastic Bridge, Telegram Bot (Gateway), Sensor Dashboard, HW Watchdog, Heltec V4 USB/FEM, Web Gauge, Licensing, Adding a New Board, Beacon Triangulation, Command Reference, Caveats, <strong>Battery Monitoring</strong></p>
   <p style="margin-top:8px;">Documentation updated May 2026</p>
