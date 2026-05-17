@@ -2488,6 +2488,17 @@ void bleSend(const String& line) {
         bleRxChar->notify();
         if (i + 20 < msg.length()) delay(10);
     }
+    // Pace successive bleSend() calls so NimBLE's LL TX queue drains between
+    // them. Bluedroid's notify() blocked until the radio acked each packet —
+    // NimBLE's notify() is async and just enqueues into a ~9-packet TX buffer,
+    // so rapid bursts (NODES handler emits NODELIST + many NODE lines +
+    // NODEEND; STATUS emits STATUS line + PINS line; CMD,LIST during
+    // background NODE bursts) overflow the queue and notify() silently
+    // drops packets — phone never sees NODEEND so Nodes list stays empty,
+    // PINS gets lost mid-burst, etc. A ~30ms tail (one BLE 4.x conn event)
+    // gives the queue time to drain. Restores the implicit pacing
+    // bluedroid gave us for free.
+    delay(30);
 }
 
 void processBleCommand(const String& line, bool fromSerial) {
