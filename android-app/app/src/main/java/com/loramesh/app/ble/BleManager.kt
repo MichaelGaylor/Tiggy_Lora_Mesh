@@ -6,7 +6,10 @@ import android.bluetooth.le.*
 import android.content.Context
 import android.os.Build
 import android.os.ParcelUuid
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.util.UUID
 
@@ -44,8 +47,16 @@ class BleManager(private val context: Context) {
     private val _discoveredDevices = MutableStateFlow<List<ScannedDevice>>(emptyList())
     val discoveredDevices: StateFlow<List<ScannedDevice>> = _discoveredDevices
 
-    private val _incomingData = MutableStateFlow("")
-    val incomingData: StateFlow<String> = _incomingData
+    // SharedFlow (not StateFlow) so rapid back-to-back lines don't get
+    // conflated. With StateFlow, _incomingData.value = X immediately followed
+    // by .value = Y meant the collector only ever saw Y — burst notifications
+    // (NODE bursts during mesh discovery, STATUS+PINS replies, etc.) were
+    // silently dropped. SharedFlow with a generous buffer delivers every line.
+    private val _incomingData = MutableSharedFlow<String>(
+        extraBufferCapacity = 64,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
+    val incomingData: SharedFlow<String> = _incomingData
 
     private val _connectedDeviceName = MutableStateFlow("")
     val connectedDeviceName: StateFlow<String> = _connectedDeviceName
@@ -230,7 +241,7 @@ class BleManager(private val context: Context) {
             val nlIdx = rxBuffer.indexOf("\n")
             val line = rxBuffer.substring(0, nlIdx).trim()
             rxBuffer.delete(0, nlIdx + 1)
-            if (line.isNotEmpty()) _incomingData.value = line
+            if (line.isNotEmpty()) _incomingData.tryEmit(line)
         }
     }
 
