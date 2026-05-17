@@ -195,6 +195,40 @@ static float getPulseRate(uint8_t pin) {
 int ioExpandRead(int vpin);  // forward declaration
 void ioExpandSetRelay(int pin, int val);  // forward declaration
 
+// ─── Storage virtual pins (state variables persisted to EEPROM) ─────
+// Pins in [STORAGE_VPIN_BASE, STORAGE_VPIN_BASE + STORAGE_VPIN_COUNT) don't
+// touch GPIO — they're a 32-byte in-firmware array that behaves exactly like
+// digital pins from the perspective of CMD,SET/CMD,GET and beacon-rule RELAY
+// actions. Lets the GUI build state-machines (flip-flop / variable patterns)
+// on the node: two BEACON,ADD rules updating the same storage pin form an
+// SR latch; the GUI then reads the pin via Digital Read like any other pin.
+// State survives reboot via EEPROM, so a gate that loses power mid-cycle
+// remembers its last commanded position. Address 1600 is past the beacon
+// rule storage (8 rules × 128 B starting at 512 = up to 1535).
+#define STORAGE_VPIN_BASE   200
+#define STORAGE_VPIN_COUNT  32
+#define EEPROM_STORAGE_VPIN_ADDR 1600
+uint8_t storageVpinValues[STORAGE_VPIN_COUNT] = {0};
+
+inline bool isStorageVpin(int pin) {
+    return pin >= STORAGE_VPIN_BASE && pin < STORAGE_VPIN_BASE + STORAGE_VPIN_COUNT;
+}
+
+void setStorageVpin(int pin, uint8_t val) {
+    int idx = pin - STORAGE_VPIN_BASE;
+    if (idx < 0 || idx >= STORAGE_VPIN_COUNT) return;
+    if (storageVpinValues[idx] == val) return;  // No write if unchanged (saves flash wear)
+    storageVpinValues[idx] = val;
+    EEPROM.write(EEPROM_STORAGE_VPIN_ADDR + idx, val);
+    EEPROM.commit();
+}
+
+uint8_t getStorageVpin(int pin) {
+    int idx = pin - STORAGE_VPIN_BASE;
+    if (idx < 0 || idx >= STORAGE_VPIN_COUNT) return 0;
+    return storageVpinValues[idx];
+}
+
 // Battery monitor — defined down in its own section, but sendHeartbeatWithFlags
 // (line ~460) needs to call this. Returns -1 if no monitoring on this board.
 int readBatteryMv();
@@ -212,6 +246,9 @@ void setupDigitalOutput(int pin);
 // Use setpoint Scale to convert to engineering units (e.g., m/s).
 // AUTO mode: ESP32-S3 has ADC on GPIOs 1-20; classic ESP32 has ADC1 on 32-39.
 static int readSensorPin(int pin) {
+    // Storage virtual pins 200-231: in-firmware state variables (persisted to EEPROM).
+    // Read returns the last value set via CMD,SET or BEACON,ADD RELAY action.
+    if (isStorageVpin(pin)) return (int)getStorageVpin(pin);
     // Virtual pins 100-115: IO expansion board
     if (pin >= IO_EXPAND_VPIN_BASE && pin < IO_EXPAND_VPIN_BASE + IO_EXPAND_MAX_PINS)
         return ioExpandRead(pin);
@@ -1404,30 +1441,34 @@ bool isVPin(int pin) {
 }
 
 // True for any pin the user may configure as a relay or sensor.
-// Accepts local physical pins (isPinSafe) AND virtual expansion pins.
-// Execution guards that need a raw hardware pin (e.g. GPS config) keep
-// calling isPinSafe() directly.
+// Accepts local physical pins (isPinSafe), IO-expansion vpins (isVPin) AND
+// storage vpins (isStorageVpin — in-firmware state variables persisted to
+// EEPROM). Execution guards that need a raw hardware pin (e.g. GPS config)
+// keep calling isPinSafe() directly.
 bool isPinConfigurable(int pin) {
-    return isPinSafe(pin) || isVPin(pin);
+    return isPinSafe(pin) || isVPin(pin) || isStorageVpin(pin);
 }
 
-// Drive an output — local GPIO via digitalWrite, or expansion pin via
-// UART !R command. Safe to call for any pin that passed isPinConfigurable.
-// On boards without an expansion wired (IO_EXPAND_TX < 0), the vpin branch
-// calls ioExpandSetRelay which is a no-op — no hardware effect, no crash.
+// Drive an output — local GPIO via digitalWrite, expansion pin via UART !R
+// command, or storage vpin via in-firmware array + EEPROM. Safe to call for
+// any pin that passed isPinConfigurable. On boards without an expansion
+// wired (IO_EXPAND_TX < 0), the vpin branch calls ioExpandSetRelay which
+// is a no-op — no hardware effect, no crash.
 void setDigital(int pin, int val) {
-    if (isVPin(pin)) {
+    if (isStorageVpin(pin)) {
+        setStorageVpin(pin, val ? 1 : 0);
+    } else if (isVPin(pin)) {
         ioExpandSetRelay(pin - IO_EXPAND_VPIN_BASE, val);
     } else {
         digitalWrite(pin, val ? HIGH : LOW);
     }
 }
 
-// Configure an output. Vpins skip pinMode — the expansion ESP32 already
-// runs pinMode(…, OUTPUT) in its own setup(). Calling pinMode with a
-// non-existent pin on the main MCU is undefined; this guard avoids it.
+// Configure an output. Vpins and storage-vpins skip pinMode — there is no
+// physical GPIO behind them. Calling pinMode with a non-existent pin on
+// the main MCU is undefined; this guard avoids it.
 void setupDigitalOutput(int pin) {
-    if (!isVPin(pin)) pinMode(pin, OUTPUT);
+    if (!isVPin(pin) && !isStorageVpin(pin)) pinMode(pin, OUTPUT);
 }
 
 void setupGPIO() {
@@ -3670,6 +3711,16 @@ void loadConfig() {
     // Load solar mode flag
     uint8_t solarByte = EEPROM.read(EEPROM_SOLAR_ADDR);
     solarMode = (solarByte == 1);
+
+    // Load storage virtual pins — persisted state-machine variables (see
+    // STORAGE_VPIN_BASE near top). EEPROM cells default to 0xFF after a
+    // fresh chip, so clamp any unwritten cell to 0 (0xFF is treated as
+    // "not set yet" for the boolean / digital interpretation these pins
+    // get from setDigital / readSensorPin).
+    for (int i = 0; i < STORAGE_VPIN_COUNT; i++) {
+        uint8_t v = EEPROM.read(EEPROM_STORAGE_VPIN_ADDR + i);
+        storageVpinValues[i] = (v == 0xFF) ? 0 : v;
+    }
 
     // Load persisted SF (valid range 7-12, else use compile-time default)
     uint8_t storedSF = EEPROM.read(EEPROM_SF_ADDR);
