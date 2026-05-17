@@ -292,7 +292,7 @@ void broadcastGPS();
 // (called every loop iteration) clears the pin when the deadline passes.
 // Up to MAX_PENDING_PULSES concurrent pulses on different pins.
 #define MAX_PENDING_PULSES 8
-#define PULSE_MAX_MS 30000  // Same cap as the old blocking CMD,PULSE
+#define PULSE_MAX_MS 60000  // 60s cap (fits in uint16_t with headroom). Slow gate actuators can need >30s.
 struct PendingPulse {
     bool active;
     uint8_t pin;
