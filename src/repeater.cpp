@@ -2564,14 +2564,6 @@ void processBleCommand(const String& line, bool fromSerial) {
         statusLine += ",EXPAND:" + String(ioExpandEnabled ? "ON" : "OFF");
 #endif
         bleSend(statusLine);
-        // Also emit PINS so the phone app populates the Control screen
-        // on connect (phone auto-sends STATUS 500ms after BLE connect).
-        // Without this, Local pins stay empty until user taps refresh.
-        String pinsLine = "PINS,R:";
-        for (int i = 0; i < relayCount; i++) { if (i) pinsLine += ","; pinsLine += String(relayPins[i]); }
-        pinsLine += "|S:";
-        for (int i = 0; i < sensorCount; i++) { if (i) pinsLine += ","; pinsLine += String(sensorPins[i]); }
-        bleSend(pinsLine);
     }
     else if (line == "SAVE") { saveConfig(); bleSend("OK,SAVED"); }
     else if (line == "PINMAP") {
