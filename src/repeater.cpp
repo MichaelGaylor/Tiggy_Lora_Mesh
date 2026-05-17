@@ -2479,12 +2479,6 @@ void bleSend(const String& line) {
         // silently dropped, leaving the user wondering why BEACON,LIST and
         // friends "returned nothing".
         Serial.println(line);
-    } else {
-        // TEMP DIAGNOSTIC: also echo to USB when bleConnected so we can see
-        // exactly what notify lines the firmware is emitting. Without this we
-        // are flying blind on the notify path. Revert this branch when the
-        // pin/mesh-map bug is closed out.
-        Serial.println("[NOTIFY] " + line);
     }
     if (!bleConnected || !bleRxChar) return;
     String msg = line + "\n";
