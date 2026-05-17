@@ -2475,29 +2475,37 @@ void bleSend(const String& line) {
     } else if (!bleConnected) {
         // Normal mode + no phone over BLE = the user is talking to the node
         // via USB serial directly (interactive debug, BEACON,DEBUG,ON output,
-        // command replies, etc.). Without this branch every bleSend reply was
+        // command replies). Without this branch every bleSend reply was
         // silently dropped, leaving the user wondering why BEACON,LIST and
         // friends "returned nothing".
         Serial.println(line);
     }
     if (!bleConnected || !bleRxChar) return;
     String msg = line + "\n";
-    for (unsigned int i = 0; i < msg.length(); i += 20) {
-        String chunk = msg.substring(i, min((unsigned int)msg.length(), i + 20));
-        bleRxChar->setValue(chunk.c_str());
+    const uint8_t* msgBytes = (const uint8_t*)msg.c_str();
+    size_t msgLen = msg.length();
+    for (size_t i = 0; i < msgLen; i += 20) {
+        size_t chunkLen = (msgLen - i > 20) ? 20 : (msgLen - i);
+        // CRITICAL: must use the explicit (uint8_t*, length) overload.
+        // setValue(chunk.c_str()) silently routes to the template
+        // setValue<T>(const T&) overload which serialises the POINTER BYTES
+        // (4 bytes on ESP32-S3) instead of the string contents. Every notify
+        // since the bluedroid->NimBLE migration was emitting pointer addresses,
+        // not data; the Android app never decoded a single readable byte.
+        // Also: pass a pointer into msg's own buffer (alive for this whole
+        // function), not into a temporary substring() that NimBLE's async
+        // notify could read after destruction.
+        bleRxChar->setValue(msgBytes + i, chunkLen);
         bleRxChar->notify();
-        if (i + 20 < msg.length()) delay(10);
+        if (i + 20 < msgLen) delay(10);
     }
     // Pace successive bleSend() calls so NimBLE's LL TX queue drains between
-    // them. Bluedroid's notify() blocked until the radio acked each packet —
-    // NimBLE's notify() is async and just enqueues into a ~9-packet TX buffer,
-    // so rapid bursts (NODES handler emits NODELIST + many NODE lines +
-    // NODEEND; STATUS emits STATUS line + PINS line; CMD,LIST during
-    // background NODE bursts) overflow the queue and notify() silently
-    // drops packets — phone never sees NODEEND so Nodes list stays empty,
-    // PINS gets lost mid-burst, etc. A ~30ms tail (one BLE 4.x conn event)
-    // gives the queue time to drain. Restores the implicit pacing
-    // bluedroid gave us for free.
+    // them. Bluedroid's notify() blocked until the radio acked each packet;
+    // NimBLE's notify() is async and queues into a ~9-packet TX buffer, so
+    // rapid bursts (NODES handler: NODELIST + many NODE + NODEEND; STATUS+
+    // PINS; CMD,LIST during background NODE bursts) overflow the queue and
+    // packets silently drop. A ~30ms tail (one BLE 4.x conn event window)
+    // restores the implicit pacing bluedroid gave us for free.
     delay(30);
 }
 

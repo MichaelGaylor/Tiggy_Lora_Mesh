@@ -528,12 +528,20 @@ class BleWriteCB : public NimBLECharacteristicCallbacks {
 void bleSend(const String& line) {
     if (!bleConnected || !bleNotifyChar) return;
     String msg = line + "\n";
-    for (unsigned int i = 0; i < msg.length(); i += 20) {
-        String chunk = msg.substring(i, min((unsigned int)msg.length(), i + 20));
-        bleNotifyChar->setValue(chunk.c_str());
+    const uint8_t* msgBytes = (const uint8_t*)msg.c_str();
+    size_t msgLen = msg.length();
+    for (size_t i = 0; i < msgLen; i += 20) {
+        size_t chunkLen = (msgLen - i > 20) ? 20 : (msgLen - i);
+        // Explicit (uint8_t*, length) overload — setValue(c_str()) silently
+        // hits NimBLE's setValue<T>(const T&) template and serialises pointer
+        // bytes (4 bytes on ESP32) instead of string contents. See
+        // repeater.cpp bleSend() for the full forensics.
+        bleNotifyChar->setValue(msgBytes + i, chunkLen);
         bleNotifyChar->notify();
-        if (i + 20 < msg.length()) delay(10);
+        if (i + 20 < msgLen) delay(10);
     }
+    // Pace bursts so NimBLE's TX queue drains between successive bleSends.
+    delay(30);
 }
 
 // Check if password is set and user hasn't authenticated yet
