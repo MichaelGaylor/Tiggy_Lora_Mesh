@@ -2153,26 +2153,35 @@ void handleCmd(const String& from, const String& cmdBody) {
         handleSetpointCmd(rest, from);
     }
     else if (action == "BEACON") {
-        // BEACON,LIST: server-push. Emit the count first, then each rule
-        // as its own BEACON,RULE,... message. Avoids a multi-round-trip
-        // GUI dance (which was unreliable when any GET reply got lost),
-        // and keeps each individual response under the LoRa packet size.
+        // BEACON,LIST: server-push. Emit count, each rule, then an END
+        // marker. The GUI uses the END marker to decide done — so if the
+        // count header gets lost on the mesh, the GUI still completes
+        // once END arrives. (BEACONS,NONE alone for the empty case.)
         if (rest == "LIST") {
             int count = 0;
             for (int i = 0; i < MAX_BEACON_RULES; i++)
                 if (beaconRules[i].active) count++;
-            String countMsg = (count == 0) ? "BEACONS,NONE"
-                                           : "BEACONS," + String(count);
-            bleSend(countMsg);
-            if (from != "LOCAL") notifyBeaconEvent(countMsg, true);
-            for (int i = 0; i < MAX_BEACON_RULES; i++) {
-                if (!beaconRules[i].active) continue;
-                String ruleMsg = "BEACON,RULE," + formatBeaconRule(i);
-                bleSend(ruleMsg);
+            if (count == 0) {
+                bleSend("BEACONS,NONE");
+                if (from != "LOCAL") notifyBeaconEvent("BEACONS,NONE", true);
+            } else {
+                String countMsg = "BEACONS," + String(count);
+                bleSend(countMsg);
                 if (from != "LOCAL") {
-                    notifyBeaconEvent(ruleMsg, true);
-                    delay(50);  // pace cross-mesh broadcasts
+                    notifyBeaconEvent(countMsg, true);
+                    delay(50);
                 }
+                for (int i = 0; i < MAX_BEACON_RULES; i++) {
+                    if (!beaconRules[i].active) continue;
+                    String ruleMsg = "BEACON,RULE," + formatBeaconRule(i);
+                    bleSend(ruleMsg);
+                    if (from != "LOCAL") {
+                        notifyBeaconEvent(ruleMsg, true);
+                        delay(50);
+                    }
+                }
+                bleSend("BEACONS,END");
+                if (from != "LOCAL") notifyBeaconEvent("BEACONS,END", true);
             }
         } else {
             // BEACON,GET,<n>, BEACON,CLEAR, BEACON,DELETE,<n>, BEACON,ADD,... etc.
@@ -2848,17 +2857,19 @@ void processBleCommand(const String& line, bool fromSerial) {
     else if (line.startsWith("BEACON,")) {
         String args = line.substring(7);
         if (args == "LIST") {
-            // Server-push: emit count, then each rule individually so the
-            // GUI doesn't have to do follow-up GET requests. Matches the
-            // mesh-side handleCmd BEACON,LIST path above.
+            // Server-push with end-marker. Matches the mesh-side path.
             int count = 0;
             for (int i = 0; i < MAX_BEACON_RULES; i++)
                 if (beaconRules[i].active) count++;
-            bleSend((count == 0) ? "BEACONS,NONE"
-                                 : "BEACONS," + String(count));
-            for (int i = 0; i < MAX_BEACON_RULES; i++) {
-                if (!beaconRules[i].active) continue;
-                bleSend("BEACON,RULE," + formatBeaconRule(i));
+            if (count == 0) {
+                bleSend("BEACONS,NONE");
+            } else {
+                bleSend("BEACONS," + String(count));
+                for (int i = 0; i < MAX_BEACON_RULES; i++) {
+                    if (!beaconRules[i].active) continue;
+                    bleSend("BEACON,RULE," + formatBeaconRule(i));
+                }
+                bleSend("BEACONS,END");
             }
         } else {
             String result = processBeaconCommand(args);
