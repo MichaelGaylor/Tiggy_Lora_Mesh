@@ -2111,20 +2111,37 @@ void handleCmd(const String& from, const String& cmdBody) {
         ESP.restart();
     }
     else if (action == "POLL") {
-        // Read all sensor pins and return bundled SDATA response
-        String sdata = "SDATA," + String(mesh.localID);
-        for (int i = 0; i < sensorCount; i++) {
-            int pin = sensorPins[i];
-            int value = readSensorPin(pin);
-            sdata += "," + String(pin) + ":" + String(value);
+        // Read all sensor pins. If the response would overflow the LoRa
+        // packet limit (~255 bytes after AES-GCM, hex, and mesh framing),
+        // split across multiple SDATA messages with a P<part>/<total> marker
+        // so the GUI can reassemble. Single-packet responses keep the
+        // pre-existing format (no marker) for backward compatibility.
+        //
+        // Budget: 8 pin entries per packet keeps plaintext under ~60 bytes
+        // (8 × ~7 chars max for analog), encrypted+hex+framed under ~180
+        // chars — safely below 255.
+        const int PINS_PER_PACKET = 8;
+        int parts = (sensorCount + PINS_PER_PACKET - 1) / PINS_PER_PACKET;
+        if (parts < 1) parts = 1;
+        for (int p = 0; p < parts; p++) {
+            String sdata = "SDATA," + String(mesh.localID);
+            if (parts > 1) sdata += ",P" + String(p + 1) + "/" + String(parts);
+            int start = p * PINS_PER_PACKET;
+            int end   = (start + PINS_PER_PACKET < sensorCount) ? start + PINS_PER_PACKET : sensorCount;
+            for (int i = start; i < end; i++) {
+                int pin = sensorPins[i];
+                int value = readSensorPin(pin);
+                sdata += "," + String(pin) + ":" + String(value);
+            }
+            mesh.cmdsExecuted++;
+            String mid = mesh.generateMsgID();
+            String hex = mesh.encryptMsg(sdata);
+            String payload = String(mesh.localID) + "," + from + "," + mid + "," +
+                             String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+            mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+            bleSend(sdata);
+            if (p + 1 < parts) delay(50);  // brief pause between packets
         }
-        mesh.cmdsExecuted++;
-        String mid = mesh.generateMsgID();
-        String hex = mesh.encryptMsg(sdata);
-        String payload = String(mesh.localID) + "," + from + "," + mid + "," +
-                         String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
-        mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
-        bleSend(sdata);
     }
     else if (action == "TIMER") {
         // TIMER,<pin>,ON,<seconds> | TIMER,<pin>,OFF,<seconds>
@@ -2841,14 +2858,25 @@ void processBleCommand(const String& line, bool fromSerial) {
         bleSend("NODEEND");
     }
     else if (line == "POLL") {
-        // Poll all local sensors — return bundled SDATA
-        String sdata = "SDATA," + String(mesh.localID);
-        for (int i = 0; i < sensorCount; i++) {
-            int pin = sensorPins[i];
-            int value = readSensorPin(pin);
-            sdata += "," + String(pin) + ":" + String(value);
+        // Local POLL — splits the same way as the mesh one above for
+        // consistency. Single-packet responses keep the pre-existing
+        // format (no P<part>/<total> marker).
+        const int PINS_PER_PACKET = 8;
+        int parts = (sensorCount + PINS_PER_PACKET - 1) / PINS_PER_PACKET;
+        if (parts < 1) parts = 1;
+        for (int p = 0; p < parts; p++) {
+            String sdata = "SDATA," + String(mesh.localID);
+            if (parts > 1) sdata += ",P" + String(p + 1) + "/" + String(parts);
+            int start = p * PINS_PER_PACKET;
+            int end   = (start + PINS_PER_PACKET < sensorCount) ? start + PINS_PER_PACKET : sensorCount;
+            for (int i = start; i < end; i++) {
+                int pin = sensorPins[i];
+                int value = readSensorPin(pin);
+                sdata += "," + String(pin) + ":" + String(value);
+            }
+            bleSend(sdata);
+            if (p + 1 < parts) delay(50);
         }
-        bleSend(sdata);
     }
     else if (line.startsWith("POLL,")) {
         // Poll remote node's sensors over mesh: POLL,<targetNodeId>
@@ -3430,37 +3458,49 @@ void loadBeaconRules() {
     }
 }
 
+// Helper — serialise a single beacon rule by index. Used by both BEACON,GET
+// and (for backward compat) the old all-in-one BEACON,LIST format. Format
+// matches what BEACON,LIST used to emit for one entry, just standalone.
+static String formatBeaconRule(int i) {
+    String resp = String(i) + ":" + String(beaconRules[i].name) + ":";
+    if (beaconRules[i].uuid[0]) resp += String(beaconRules[i].uuid);
+    else                        resp += String(beaconRules[i].mac);
+    resp += ":" + String(beaconRules[i].rssiThresh) + "dBm";
+    if (beaconRules[i].actionType == 0)
+        resp += ":RELAY" + String(beaconRules[i].relayPin);
+    else if (beaconRules[i].actionType == 2)
+        resp += ":PULSE" + String(beaconRules[i].relayPin) +
+                ":" + String(beaconRules[i].revertMs) + "ms";
+    else
+        resp += ":MSG";
+    if (beaconRules[i].actionType == 0 && beaconRules[i].revertMs > 0)
+        resp += ":REVERT" + String(beaconRules[i].revertMs) + "ms";
+    if (beaconRules[i].actionType == 2 && beaconRules[i].leavePin > 0)
+        resp += ":LEAVE" + String(beaconRules[i].leavePin) +
+                "@" + String(beaconRules[i].leaveRssi) + "dBm" +
+                ":" + String(beaconRules[i].leavePulseMs) + "ms";
+    return resp;
+}
+
 String processBeaconCommand(const String& args) {
     if (args == "LIST") {
-        String resp = "BEACONS";
+        // Paginated: return count only. Caller (GUI) iterates BEACON,GET,<n>
+        // to fetch each rule's details. Previous all-in-one format could
+        // overflow the LoRa packet size when many rules were deployed.
         int count = 0;
-        for (int i = 0; i < MAX_BEACON_RULES; i++) {
-            if (!beaconRules[i].active) continue;
-            count++;
-            resp += "," + String(i) + ":" + String(beaconRules[i].name) + ":";
-            if (beaconRules[i].uuid[0]) resp += String(beaconRules[i].uuid);
-            else resp += String(beaconRules[i].mac);
-            resp += ":" + String(beaconRules[i].rssiThresh) + "dBm";
-            if (beaconRules[i].actionType == 0)
-                resp += ":RELAY" + String(beaconRules[i].relayPin);
-            else if (beaconRules[i].actionType == 2)
-                resp += ":PULSE" + String(beaconRules[i].relayPin) +
-                        ":" + String(beaconRules[i].revertMs) + "ms";
-            else
-                resp += ":MSG";
-            // For actionType == 2 the revertMs is the pulse duration, already
-            // printed inline above — only emit the legacy REVERT suffix for
-            // actionType == 0 (relay with auto-revert on beacon loss).
-            if (beaconRules[i].actionType == 0 && beaconRules[i].revertMs > 0)
-                resp += ":REVERT" + String(beaconRules[i].revertMs) + "ms";
-            // Phase 3: print the leave clause if configured.
-            if (beaconRules[i].actionType == 2 && beaconRules[i].leavePin > 0)
-                resp += ":LEAVE" + String(beaconRules[i].leavePin) +
-                        "@" + String(beaconRules[i].leaveRssi) + "dBm" +
-                        ":" + String(beaconRules[i].leavePulseMs) + "ms";
-        }
-        if (count == 0) resp += ",NONE";
-        return resp;
+        for (int i = 0; i < MAX_BEACON_RULES; i++)
+            if (beaconRules[i].active) count++;
+        if (count == 0) return "BEACONS,NONE";
+        return "BEACONS," + String(count);
+    }
+    if (args.startsWith("GET,")) {
+        // Fetch a single rule's details. Args: BEACON,GET,<slot> where slot
+        // is the rule index (0..MAX_BEACON_RULES-1). Returns the same per-rule
+        // format the old LIST used inline, just one rule per response.
+        int n = args.substring(4).toInt();
+        if (n < 0 || n >= MAX_BEACON_RULES) return "ERR,BEACON,GET,BADINDEX";
+        if (!beaconRules[n].active)         return "ERR,BEACON,GET,EMPTY";
+        return "BEACON,RULE," + formatBeaconRule(n);
     }
 
     if (args == "CLEAR") {

@@ -814,13 +814,12 @@
 #ifndef STORAGE_VPIN_RESERVED
   #define STORAGE_VPIN_RESERVED 32    // Slots backed by EEPROM (RAM array size)
 #endif
-// Default to 4 vpins — keeps POLL/SDATA reply under the LoRa packet
-// size limit (~255 bytes) when the node has full analog sensors and
-// the response goes over mesh. Each pin entry in SDATA is ~7 bytes,
-// after AES-GCM (+28) and hex (×2) plus mesh framing. With 5 analog
-// sensors + 8 vpins we were just over the limit; 5 + 4 leaves headroom.
-// Bump to 8 per board via #define before this point if all sensors are
-// boolean (smaller values pack tighter).
+// Default to 8 vpins. POLL responses are now auto-split into multiple
+// SDATA packets when the total would overflow the LoRa packet size
+// limit, so the previous 4-vpin cap (chosen defensively when the
+// firmware emitted everything in one packet) no longer applies.
+// Bump per-board via #define before this point if you need more or
+// fewer for a specific board.
 #ifndef VIRTUAL_PINS
-  #define VIRTUAL_PINS          { 200, 201, 202, 203 }
+  #define VIRTUAL_PINS          { 200, 201, 202, 203, 204, 205, 206, 207 }
 #endif
