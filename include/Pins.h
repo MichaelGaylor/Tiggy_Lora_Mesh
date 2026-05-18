@@ -794,26 +794,26 @@
 // at runtime: ACTUATOR_IN1 >= 0 → drive LOW at boot, else skip.
 
 // ─── Storage Virtual Pins ───────────────────────────────────
-// In-firmware state variables (a 32-byte array persisted to EEPROM).
-// Behave exactly like digital pins from the perspective of CMD,SET /
-// CMD,GET / Beacon-rule RELAY action — but don't touch GPIO. Used to
-// build flip-flop / variable state machines on the node itself
-// (two BEACON,ADD rules updating the same storage vpin form an SR
-// latch; the GUI then reads the pin via Digital Read like any other
-// pin). State survives reboot via EEPROM.
+// In-firmware state variables — pins 200..(200+STORAGE_VPIN_RESERVED-1)
+// don't touch GPIO. They're a small array persisted to EEPROM that
+// behaves exactly like digital pins from the perspective of CMD,SET /
+// CMD,GET / Beacon-rule RELAY action / POLL / Digital Read in the GUI.
 //
-// The full 32-pin range (STORAGE_VPIN_BASE .. STORAGE_VPIN_BASE +
-// STORAGE_VPIN_RESERVED - 1) is allocated in firmware. The GUI only
-// surfaces the first STORAGE_VPIN_EXPOSED pins in its dropdowns to
-// keep them manageable; the rest are reachable by typing the pin
-// number directly. A board can override either by #define'ing it in
-// its own section above.
+// VIRTUAL_PINS lists which of those slots the firmware automatically
+// appends to BOTH relayPins[] and sensorPins[] on first boot (and on
+// PIN_CONFIG_VERSION bump). Default is 8 vpins (200-207); a board can
+// override by #define'ing VIRTUAL_PINS to a shorter or longer list
+// before this point. Set to { } to disable entirely on a board.
+//
+// State survives reboot via EEPROM, so a flip-flop pattern built from
+// two BEACON,ADD rules (one sets vpin 200, the other resets it) runs
+// autonomously on the node — works without the gateway online.
 #ifndef STORAGE_VPIN_BASE
   #define STORAGE_VPIN_BASE     200   // First storage vpin number
 #endif
 #ifndef STORAGE_VPIN_RESERVED
   #define STORAGE_VPIN_RESERVED 32    // Slots backed by EEPROM (RAM array size)
 #endif
-#ifndef STORAGE_VPIN_EXPOSED
-  #define STORAGE_VPIN_EXPOSED  8     // Slots advertised in PINS response → GUI dropdown
+#ifndef VIRTUAL_PINS
+  #define VIRTUAL_PINS          { 200, 201, 202, 203, 204, 205, 206, 207 }
 #endif

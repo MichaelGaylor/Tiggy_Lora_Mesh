@@ -49,10 +49,15 @@ Adafruit_SSD1306 oled(OLED_W, OLED_H, &Wire, OLED_RST);
 bool oledAvailable = false;
 
 // ─── Repeater-specific config ────────────────────────────────
-#define EEPROM_GPIO_ADDR 410
+// EEPROM_GPIO_ADDR relocated to 1700 (was 410) when MAX_*_CFG bumped 8/6 -> 16/16.
+// New layout: 1 + 16 + 1 + 16 = 34 bytes at 1700, ending at 1733. Sits in the
+// gap between storage-vpin values (1600-1631, see EEPROM_STORAGE_VPIN_ADDR)
+// and EEPROM_SIZE (2048). Old data at 410 is orphaned but harmless — the
+// bumped PIN_CONFIG_VERSION forces a reload from DEFAULT_*_PINS on next boot.
+#define EEPROM_GPIO_ADDR 1700
 #define EEPROM_SOLAR_ADDR 430
-#define MAX_RELAY_PINS_CFG 8
-#define MAX_SENSOR_PINS_CFG 6
+#define MAX_RELAY_PINS_CFG 16   // was 8 — fits physical relays + 8 storage vpins
+#define MAX_SENSOR_PINS_CFG 16  // was 6 — fits physical sensors + 8 storage vpins
 #define SOLAR_OLED_WAKE_MS 10000
 
 #ifndef DEBUG
@@ -223,6 +228,30 @@ uint8_t getStorageVpin(int pin) {
     int idx = pin - STORAGE_VPIN_BASE;
     if (idx < 0 || idx >= STORAGE_VPIN_RESERVED) return 0;
     return storageVpinValues[idx];
+}
+
+// Append VIRTUAL_PINS (defined per-board or globally in Pins.h, default
+// {200..207}) onto BOTH relayPins[] and sensorPins[], skipping duplicates
+// and respecting MAX_*_CFG. Called from loadConfig on first boot and after
+// a PIN_CONFIG_VERSION bump so storage vpins always show up in the gateway's
+// pin dropdowns and POLL responses, without each board having to remember
+// to list them in its DEFAULT_*_PINS. Boards that don't want vpins can
+// #define VIRTUAL_PINS to { } to opt out.
+void appendVirtualPinsToConfig() {
+    uint8_t v[] = VIRTUAL_PINS;
+    const size_t vcount = sizeof(v) / sizeof(v[0]);
+    for (size_t i = 0; i < vcount; i++) {
+        bool alreadyR = false;
+        for (uint8_t j = 0; j < relayCount; j++)
+            if (relayPins[j] == v[i]) { alreadyR = true; break; }
+        if (!alreadyR && relayCount < MAX_RELAY_PINS_CFG)
+            relayPins[relayCount++] = v[i];
+        bool alreadyS = false;
+        for (uint8_t j = 0; j < sensorCount; j++)
+            if (sensorPins[j] == v[i]) { alreadyS = true; break; }
+        if (!alreadyS && sensorCount < MAX_SENSOR_PINS_CFG)
+            sensorPins[sensorCount++] = v[i];
+    }
 }
 
 // Battery monitor — defined down in its own section, but sendHeartbeatWithFlags
@@ -1479,8 +1508,10 @@ void setupGPIO() {
     }
     for (int i = 0; i < sensorCount; i++) {
         if (isPinConfigurable(sensorPins[i])) {
-            if (!isVPin(sensorPins[i])) pinMode(sensorPins[i], INPUT);
-            // vpins skip pinMode — expansion firmware handles its own sensor pins
+            // Skip pinMode for both kinds of vpins — IO expansion pins are
+            // configured on the secondary MCU, storage vpins have no GPIO at all.
+            if (!isVPin(sensorPins[i]) && !isStorageVpin(sensorPins[i]))
+                pinMode(sensorPins[i], INPUT);
         }
     }
 }
@@ -2056,13 +2087,6 @@ void handleCmd(const String& from, const String& cmdBody) {
         for (int i = 0; i < relayCount; i++) { if (i) rsp += ","; rsp += String(relayPins[i]); }
         rsp += "|S:";
         for (int i = 0; i < sensorCount; i++) { if (i) rsp += ","; rsp += String(sensorPins[i]); }
-        // V: storage virtual pins available on this firmware. GUI parses
-        // this to populate its dropdowns — no hardcoded constants needed.
-        rsp += "|V:";
-        for (int i = 0; i < STORAGE_VPIN_EXPOSED; i++) {
-            if (i) rsp += ",";
-            rsp += String(STORAGE_VPIN_BASE + i);
-        }
         bleSend(rsp);
         // Also respond over mesh so remote nodes can query our pin config
         if (from != "LOCAL") {
@@ -2637,11 +2661,6 @@ void processBleCommand(const String& line, bool fromSerial) {
         for (int i = 0; i < relayCount; i++) { if (i) pinsLine += ","; pinsLine += String(relayPins[i]); }
         pinsLine += "|S:";
         for (int i = 0; i < sensorCount; i++) { if (i) pinsLine += ","; pinsLine += String(sensorPins[i]); }
-        pinsLine += "|V:";
-        for (int i = 0; i < STORAGE_VPIN_EXPOSED; i++) {
-            if (i) pinsLine += ",";
-            pinsLine += String(STORAGE_VPIN_BASE + i);
-        }
         bleSend(pinsLine);
     }
     else if (line == "SAVE") { saveConfig(); bleSend("OK,SAVED"); }
@@ -3000,11 +3019,6 @@ void handleSerialConfig() {
         for (int i = 0; i < relayCount; i++) { if (i) pins += ","; pins += String(relayPins[i]); }
         pins += "|S:";
         for (int i = 0; i < sensorCount; i++) { if (i) pins += ","; pins += String(sensorPins[i]); }
-        pins += "|V:";
-        for (int i = 0; i < STORAGE_VPIN_EXPOSED; i++) {
-            if (i) pins += ",";
-            pins += String(STORAGE_VPIN_BASE + i);
-        }
         Serial.println(pins);
     }
     else if (line == "SAVE") { saveConfig(); Serial.println("OK: Saved"); }
@@ -3686,6 +3700,7 @@ void loadConfig() {
         strncpy(mesh.localID, idBuf, NODE_ID_LEN + 1);
         uint8_t d[] = DEFAULT_RELAY_PINS; relayCount = sizeof(d)/sizeof(d[0]); memcpy(relayPins, d, relayCount);
         uint8_t s[] = DEFAULT_SENSOR_PINS; sensorCount = sizeof(s)/sizeof(s[0]); memcpy(sensorPins, s, sensorCount);
+        appendVirtualPinsToConfig();  // adds VIRTUAL_PINS to both lists
         // Don't saveConfig() yet — defer until after conflict scan in setup()
         return;
     }
@@ -3713,12 +3728,14 @@ void loadConfig() {
 
     // Pin config version check — if version doesn't match, reset to defaults
     // This catches old EEPROM with wrong pins (e.g., 19/20/33 on ESP32-S3)
-    #define PIN_CONFIG_VERSION 8  // v8: fix stale pins — saveConfig was missing after reset
+    #define PIN_CONFIG_VERSION 9  // v9: storage vpins 200-207 baked into DEFAULT_*_PINS,
+                                  //     MAX_*_CFG bumped 8/6 -> 16/16, EEPROM addr 410 -> 1700
     #define EEPROM_PIN_VER_ADDR 448  // After BLEPIN (443-446), safe gap
     uint8_t pinVer = EEPROM.read(EEPROM_PIN_VER_ADDR);
     if (pinVer != PIN_CONFIG_VERSION) {
         uint8_t d[] = DEFAULT_RELAY_PINS; relayCount = sizeof(d)/sizeof(d[0]); memcpy(relayPins, d, relayCount);
         uint8_t s[] = DEFAULT_SENSOR_PINS; sensorCount = sizeof(s)/sizeof(s[0]); memcpy(sensorPins, s, sensorCount);
+        appendVirtualPinsToConfig();  // adds VIRTUAL_PINS to both lists
         EEPROM.write(EEPROM_PIN_VER_ADDR, PIN_CONFIG_VERSION);
         saveConfig();  // Persist new pin defaults to EEPROM (was missing — caused stale pins)
         debugPrint("Pin config updated to v" + String(PIN_CONFIG_VERSION) + " — reset to board defaults");
