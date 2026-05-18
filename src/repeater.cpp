@@ -610,6 +610,12 @@ struct SetpointRule {
     char msgTrue[SETPOINT_MSG_LEN + 1];
     char msgFalse[SETPOINT_MSG_LEN + 1];
     bool triggered;
+    // Hold-expired latch: set true when a HOLD-mode setpoint timer-fires
+    // its falling-edge action. While latched, the rising-edge logic is
+    // suppressed — the condition must first go FALSE to clear the latch
+    // before the rule can fire again. Without this, a steady-state
+    // above-threshold sensor re-fires every (HOLD + COOLDOWN) ms forever.
+    bool holdLatched;
     unsigned long lastFired;
     unsigned long debounceStart;  // Runtime: when condition first became true
 };
@@ -2040,6 +2046,7 @@ void checkSetpoints() {
             (now - setpoints[i].lastFired) >= (unsigned long)setpoints[i].holdMs) {
             int rawValue = readSensorPin(setpoints[i].sensorPin);
             setpoints[i].triggered = false;
+            setpoints[i].holdLatched = true;  // Wait for condition to clear before re-arming
             setpoints[i].lastFired = now;
             setpoints[i].debounceStart = 0;
             bool didTx = fireSetpointAction(setpoints[i], rawValue, false);
@@ -2053,7 +2060,15 @@ void checkSetpoints() {
         float scaled;
         bool condition = evalSetpointCondition(setpoints[i], rawValue, scaled);
 
-        if (condition && !setpoints[i].triggered) {
+        // Clear the hold-latch as soon as the condition goes away. This
+        // is what arms the rule for its next FALSE→TRUE rising edge.
+        // Without this gate, a steady above-threshold sensor would re-fire
+        // the whole Open→Closed sequence every (HOLD + COOLDOWN) ms.
+        if (!condition && setpoints[i].holdLatched) {
+            setpoints[i].holdLatched = false;
+        }
+
+        if (condition && !setpoints[i].triggered && !setpoints[i].holdLatched) {
             // Debounce: condition must hold continuously for debounceMs
             if (setpoints[i].debounceMs > 0) {
                 if (setpoints[i].debounceStart == 0) {
