@@ -601,6 +601,12 @@ struct SetpointRule {
     // state (and threshold-cleared events are ignored while held).
     // Mirrors BeaconRule.revertMs in semantics. 0 = natural edge mode.
     uint16_t holdMs;
+    // Leave action for PULSE setpoints — analogous to BEACON,ADD Phase 3
+    // enter+leave: rising edge pulses relayPin for pulseMs, falling edge
+    // (or hold-expired) pulses leavePin for leavePulseMs. 0 = no leave.
+    // Only meaningful for actionType==2 (PULSE).
+    uint8_t leavePin;
+    uint16_t leavePulseMs;
     char msgTrue[SETPOINT_MSG_LEN + 1];
     char msgFalse[SETPOINT_MSG_LEN + 1];
     bool triggered;
@@ -1668,6 +1674,9 @@ String processSetpointCommand(const String& args) {
                 resp += "[" + String(setpoints[i].debounceMs) + "ms]";
             if (setpoints[i].holdMs > 0)
                 resp += "{hold:" + String(setpoints[i].holdMs) + "ms}";
+            if (setpoints[i].leavePin > 0 && setpoints[i].leavePulseMs > 0)
+                resp += "{leave:pin" + String(setpoints[i].leavePin) +
+                        "/" + String(setpoints[i].leavePulseMs) + "ms}";
         }
         if (count == 0) resp += ",NONE";
         return resp;
@@ -1698,18 +1707,26 @@ String processSetpointCommand(const String& args) {
     else if (opStr == "NE") op = 5;
     if (op > 5) return "ERR,SETPOINT,BADOP";
 
-    // Extract optional SCALE, DEBOUNCE and HOLD suffixes before parsing action.
-    // HOLD,<ms> is the monostable-equivalent: action fires on rising edge,
-    // auto-reverts after <ms> regardless of threshold (mirrors BEACON,ADD REVERT).
+    // Extract optional SCALE, DEBOUNCE, HOLD and LEAVE suffixes before parsing action.
+    //   HOLD,<ms>          monostable revert (action fires on rising edge,
+    //                      auto-reverts after <ms> regardless of threshold).
+    //   LEAVE,PULSE,<pin>,<ms>
+    //                      enter+leave PULSE pair (rising edge pulses
+    //                      relayPin for pulseMs, falling/hold-expired pulses
+    //                      leavePin for leavePulseMs). Mirrors BEACON,ADD
+    //                      Phase 3. Only valid when the rising action is PULSE.
     float scaleFactor = 1.0f, scaleOffset = 0.0f;
     uint16_t debounceMs = 0;
     uint16_t holdMs = 0;
+    uint8_t leavePin = 0;
+    uint16_t leavePulseMs = 0;
     int scalePos = rest.indexOf(",SCALE,");
     int debouncePos = rest.indexOf(",DEBOUNCE,");
     int holdPos = rest.indexOf(",HOLD,");
+    int leavePos = rest.indexOf(",LEAVE,");
     String actionPart = rest;  // Will be trimmed below
 
-    if (scalePos >= 0 || debouncePos >= 0 || holdPos >= 0) {
+    if (scalePos >= 0 || debouncePos >= 0 || holdPos >= 0 || leavePos >= 0) {
         // Find where suffixes start (whichever comes first). Sentinel is
         // the string length so the comparisons below always pick a real
         // position when at least one suffix is present.
@@ -1717,6 +1734,7 @@ String processSetpointCommand(const String& args) {
         if (scalePos    >= 0 && scalePos    < suffixStart) suffixStart = scalePos;
         if (debouncePos >= 0 && debouncePos < suffixStart) suffixStart = debouncePos;
         if (holdPos     >= 0 && holdPos     < suffixStart) suffixStart = holdPos;
+        if (leavePos    >= 0 && leavePos    < suffixStart) suffixStart = leavePos;
         actionPart = rest.substring(0, suffixStart);
         String suffixes = rest.substring(suffixStart);
 
@@ -1742,6 +1760,25 @@ String processSetpointCommand(const String& args) {
             holdMs = (hEnd > hIdx) ? suffixes.substring(hIdx, hEnd).toInt()
                                    : suffixes.substring(hIdx).toInt();
         }
+        if (leavePos >= 0) {
+            // Only LEAVE,PULSE,<pin>,<ms> is supported today.
+            int lIdx = suffixes.indexOf("LEAVE,PULSE,");
+            if (lIdx >= 0) {
+                lIdx += 12;  // past "LEAVE,PULSE,"
+                int pinComma = suffixes.indexOf(',', lIdx);
+                if (pinComma > lIdx) {
+                    int lpin = suffixes.substring(lIdx, pinComma).toInt();
+                    int msEnd = suffixes.indexOf(',', pinComma + 1);
+                    int lms  = (msEnd > pinComma)
+                                ? suffixes.substring(pinComma + 1, msEnd).toInt()
+                                : suffixes.substring(pinComma + 1).toInt();
+                    if (lpin > 0 && lms > 0 && lms <= PULSE_MAX_MS) {
+                        leavePin     = (uint8_t)lpin;
+                        leavePulseMs = (uint16_t)lms;
+                    }
+                }
+            }
+        }
     }
 
     int slot = -1;
@@ -1759,6 +1796,8 @@ String processSetpointCommand(const String& args) {
     setpoints[slot].scaleOffset = scaleOffset;
     setpoints[slot].debounceMs = debounceMs;
     setpoints[slot].holdMs = holdMs;
+    setpoints[slot].leavePin = leavePin;
+    setpoints[slot].leavePulseMs = leavePulseMs;
 
     const char* ops[] = {"GT", "LT", "EQ", "GE", "LE", "NE"};
     String resp = "OK,SETPOINT," + String(sensorPin) + "," + String(ops[op]) + "," + String(threshold, 2);
@@ -1823,6 +1862,8 @@ String processSetpointCommand(const String& args) {
         resp += ",DEBOUNCE," + String(debounceMs);
     if (holdMs > 0)
         resp += ",HOLD," + String(holdMs);
+    if (leavePin > 0 && leavePulseMs > 0)
+        resp += ",LEAVE,PULSE," + String(leavePin) + "," + String(leavePulseMs);
     return resp;
 }
 
@@ -1940,16 +1981,29 @@ bool fireSetpointAction(SetpointRule& sp, int value, bool triggered) {
         return true;  // Radio TX happened
     }
     else if (sp.actionType == 2) {
-        // Phase 4: PULSE action — local pin, non-blocking pulse via the
-        // Phase 1 timer ring buffer. Only fires on rising edge.
-        if (!triggered) return false;
-        if (sp.relayPin > 0 && sp.pulseMs > 0) {
-            setupDigitalOutput(sp.relayPin);
-            startPulse(sp.relayPin, sp.pulseMs);
-            debugPrint("SETPOINT PULSE: pin " + String(sp.sensorPin) + "=" + String(value) +
-                       " -> pulse pin " + String(sp.relayPin) + " " + String(sp.pulseMs) + "ms");
-            bleSend("SETPOINT,FIRED," + String(sp.sensorPin) + "," + String(value) +
-                    ",PULSE," + String(sp.relayPin) + "," + String(sp.pulseMs));
+        // PULSE action — local pin, non-blocking pulse via the Phase 1 timer
+        // ring buffer. Rising edge pulses relayPin for pulseMs. Falling edge
+        // (threshold-cleared OR hold-expired) pulses leavePin for leavePulseMs
+        // if configured — analogous to BEACON,ADD Phase 3 enter+leave.
+        if (triggered) {
+            if (sp.relayPin > 0 && sp.pulseMs > 0) {
+                setupDigitalOutput(sp.relayPin);
+                startPulse(sp.relayPin, sp.pulseMs);
+                debugPrint("SETPOINT PULSE enter: pin " + String(sp.sensorPin) + "=" + String(value) +
+                           " -> pulse pin " + String(sp.relayPin) + " " + String(sp.pulseMs) + "ms");
+                bleSend("SETPOINT,FIRED," + String(sp.sensorPin) + "," + String(value) +
+                        ",PULSE," + String(sp.relayPin) + "," + String(sp.pulseMs));
+            }
+        } else {
+            // Falling edge — only fire if a leave pulse is configured.
+            if (sp.leavePin > 0 && sp.leavePulseMs > 0) {
+                setupDigitalOutput(sp.leavePin);
+                startPulse(sp.leavePin, sp.leavePulseMs);
+                debugPrint("SETPOINT PULSE leave: pin " + String(sp.sensorPin) + "=" + String(value) +
+                           " -> pulse pin " + String(sp.leavePin) + " " + String(sp.leavePulseMs) + "ms");
+                bleSend("SETPOINT,FIRED," + String(sp.sensorPin) + "," + String(value) +
+                        ",PULSE_LEAVE," + String(sp.leavePin) + "," + String(sp.leavePulseMs));
+            }
         }
         return false;  // No radio TX (local pin only)
     }
@@ -2037,7 +2091,13 @@ void checkSetpoints() {
                 if (clearCondition) {
                     setpoints[i].triggered = false;
                     setpoints[i].lastFired = now;
-                    if (setpoints[i].actionType == 1) {
+                    // MSG and PULSE both have meaningful falling-edge actions:
+                    //   MSG  → broadcast msgFalse
+                    //   PULSE → pulse the leavePin (if configured)
+                    // RELAY auto-reverts via fireSetpointAction's own logic
+                    // but only if explicitly called — today we don't, to
+                    // preserve historical behaviour for relay setpoints.
+                    if (setpoints[i].actionType == 1 || setpoints[i].actionType == 2) {
                         if (fireSetpointAction(setpoints[i], rawValue, false))
                             return;
                     }
