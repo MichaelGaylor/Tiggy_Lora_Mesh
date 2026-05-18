@@ -596,6 +596,11 @@ struct SetpointRule {
     uint8_t relayPin;
     uint8_t action;          // RELAY: 0=LOW, 1=HIGH
     uint16_t pulseMs;        // PULSE: duration in ms (only for actionType==2). Phase 4.
+    // Monostable hold: if >0, rising edge starts a timer; falling-edge
+    // action fires automatically after holdMs regardless of threshold
+    // state (and threshold-cleared events are ignored while held).
+    // Mirrors BeaconRule.revertMs in semantics. 0 = natural edge mode.
+    uint16_t holdMs;
     char msgTrue[SETPOINT_MSG_LEN + 1];
     char msgFalse[SETPOINT_MSG_LEN + 1];
     bool triggered;
@@ -1661,6 +1666,8 @@ String processSetpointCommand(const String& args) {
                 resp += "(x" + String(setpoints[i].scaleFactor, 3) + "+" + String(setpoints[i].scaleOffset, 1) + ")";
             if (setpoints[i].debounceMs > 0)
                 resp += "[" + String(setpoints[i].debounceMs) + "ms]";
+            if (setpoints[i].holdMs > 0)
+                resp += "{hold:" + String(setpoints[i].holdMs) + "ms}";
         }
         if (count == 0) resp += ",NONE";
         return resp;
@@ -1691,17 +1698,25 @@ String processSetpointCommand(const String& args) {
     else if (opStr == "NE") op = 5;
     if (op > 5) return "ERR,SETPOINT,BADOP";
 
-    // Extract optional SCALE and DEBOUNCE suffixes before parsing action
+    // Extract optional SCALE, DEBOUNCE and HOLD suffixes before parsing action.
+    // HOLD,<ms> is the monostable-equivalent: action fires on rising edge,
+    // auto-reverts after <ms> regardless of threshold (mirrors BEACON,ADD REVERT).
     float scaleFactor = 1.0f, scaleOffset = 0.0f;
     uint16_t debounceMs = 0;
+    uint16_t holdMs = 0;
     int scalePos = rest.indexOf(",SCALE,");
     int debouncePos = rest.indexOf(",DEBOUNCE,");
+    int holdPos = rest.indexOf(",HOLD,");
     String actionPart = rest;  // Will be trimmed below
 
-    if (scalePos >= 0 || debouncePos >= 0) {
-        // Find where suffixes start (whichever comes first)
-        int suffixStart = (scalePos >= 0 && debouncePos >= 0) ? min(scalePos, debouncePos)
-                        : (scalePos >= 0) ? scalePos : debouncePos;
+    if (scalePos >= 0 || debouncePos >= 0 || holdPos >= 0) {
+        // Find where suffixes start (whichever comes first). Sentinel is
+        // the string length so the comparisons below always pick a real
+        // position when at least one suffix is present.
+        int suffixStart = (int)rest.length();
+        if (scalePos    >= 0 && scalePos    < suffixStart) suffixStart = scalePos;
+        if (debouncePos >= 0 && debouncePos < suffixStart) suffixStart = debouncePos;
+        if (holdPos     >= 0 && holdPos     < suffixStart) suffixStart = holdPos;
         actionPart = rest.substring(0, suffixStart);
         String suffixes = rest.substring(suffixStart);
 
@@ -1717,7 +1732,15 @@ String processSetpointCommand(const String& args) {
         }
         if (debouncePos >= 0) {
             int dIdx = suffixes.indexOf("DEBOUNCE,") + 9;
-            debounceMs = suffixes.substring(dIdx).toInt();
+            int dEnd = suffixes.indexOf(',', dIdx);
+            debounceMs = (dEnd > dIdx) ? suffixes.substring(dIdx, dEnd).toInt()
+                                       : suffixes.substring(dIdx).toInt();
+        }
+        if (holdPos >= 0) {
+            int hIdx = suffixes.indexOf("HOLD,") + 5;
+            int hEnd = suffixes.indexOf(',', hIdx);
+            holdMs = (hEnd > hIdx) ? suffixes.substring(hIdx, hEnd).toInt()
+                                   : suffixes.substring(hIdx).toInt();
         }
     }
 
@@ -1735,6 +1758,7 @@ String processSetpointCommand(const String& args) {
     setpoints[slot].scaleFactor = scaleFactor;
     setpoints[slot].scaleOffset = scaleOffset;
     setpoints[slot].debounceMs = debounceMs;
+    setpoints[slot].holdMs = holdMs;
 
     const char* ops[] = {"GT", "LT", "EQ", "GE", "LE", "NE"};
     String resp = "OK,SETPOINT," + String(sensorPin) + "," + String(ops[op]) + "," + String(threshold, 2);
@@ -1797,6 +1821,8 @@ String processSetpointCommand(const String& args) {
         resp += ",SCALE," + String(scaleFactor, 4) + "," + String(scaleOffset, 4);
     if (debounceMs > 0)
         resp += ",DEBOUNCE," + String(debounceMs);
+    if (holdMs > 0)
+        resp += ",HOLD," + String(holdMs);
     return resp;
 }
 
@@ -1864,20 +1890,26 @@ bool fireSetpointAction(SetpointRule& sp, int value, bool triggered) {
     bool isLocal = (target == String(mesh.localID));
 
     if (sp.actionType == 0) {
-        // RELAY action
-        if (!triggered) return false;  // Relay only fires on rising edge
+        // RELAY action.
+        // Rising edge → sp.action (HIGH/LOW as configured).
+        // Falling edge → opposite of sp.action — only reachable via hold-mode
+        // revert (checkSetpoints' threshold-cleared path does NOT call us for
+        // RELAY, so today the only falling-edge caller is the hold timer).
+        uint8_t desired = triggered ? (sp.action ? 1 : 0)
+                                    : (sp.action ? 0 : 1);
 
         if (isLocal) {
             // Local relay — no radio needed, just set the pin directly
             // (setDigital also dispatches to expansion board for vpin 100-115)
-            setDigital(sp.relayPin, sp.action ? 1 : 0);
+            setDigital(sp.relayPin, desired);
             debugPrint("SETPOINT LOCAL: pin " + String(sp.sensorPin) + "=" + String(value) +
-                       " -> pin " + String(sp.relayPin) + "=" + String(sp.action));
+                       " -> pin " + String(sp.relayPin) + "=" + String(desired) +
+                       (triggered ? "" : " (hold expired)"));
             bleSend("SETPOINT,FIRED," + String(sp.sensorPin) + "," + String(value) + ",LOCAL");
             return false;  // No radio TX
         } else {
             // Remote relay — send over mesh
-            String cmdText = "CMD,SET," + String(sp.relayPin) + "," + String(sp.action);
+            String cmdText = "CMD,SET," + String(sp.relayPin) + "," + String(desired);
             uint16_t dest = strtol(target.c_str(), nullptr, 16);
             String mid = mesh.generateMsgID();
             String hex = mesh.encryptMsg(cmdText);
@@ -1885,7 +1917,8 @@ bool fireSetpointAction(SetpointRule& sp, int value, bool triggered) {
                              String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
             mesh.transmitPacket(dest, payload);
             debugPrint("SETPOINT: pin " + String(sp.sensorPin) + "=" + String(value) +
-                       " -> " + target + " pin " + String(sp.relayPin) + "=" + String(sp.action));
+                       " -> " + target + " pin " + String(sp.relayPin) + "=" + String(desired) +
+                       (triggered ? "" : " (hold expired)"));
             bleSend("SETPOINT,FIRED," + String(sp.sensorPin) + "," + String(value) + "," + target);
             return true;  // Radio TX happened
         }
@@ -1944,6 +1977,22 @@ void checkSetpoints() {
     unsigned long now = millis();
     for (int i = 0; i < MAX_SETPOINTS; i++) {
         if (!setpoints[i].active) continue;
+
+        // Hold-mode revert: fires before the cooldown gate because the
+        // falling edge is timing-driven, not threshold-driven. Without
+        // this, a freshly-fired hold action would be stuck triggered
+        // until the cooldown elapsed AND the threshold cleared.
+        if (setpoints[i].triggered && setpoints[i].holdMs > 0 &&
+            (now - setpoints[i].lastFired) >= (unsigned long)setpoints[i].holdMs) {
+            int rawValue = readSensorPin(setpoints[i].sensorPin);
+            setpoints[i].triggered = false;
+            setpoints[i].lastFired = now;
+            setpoints[i].debounceStart = 0;
+            bool didTx = fireSetpointAction(setpoints[i], rawValue, false);
+            if (didTx) return;  // Yield to avoid back-to-back LoRa TX
+            continue;            // Skip normal eval this tick
+        }
+
         if (now - setpoints[i].lastFired < SETPOINT_COOLDOWN) continue;
 
         int rawValue = readSensorPin(setpoints[i].sensorPin);
@@ -1969,7 +2018,11 @@ void checkSetpoints() {
         }
         else if (!condition) {
             setpoints[i].debounceStart = 0;  // Reset debounce timer
-            if (setpoints[i].triggered) {
+            // Hold mode: the falling-edge is timer-driven (handled above),
+            // so threshold-cleared events MUST be ignored here. Otherwise
+            // a transient drop below threshold during the hold window would
+            // double-fire the revert.
+            if (setpoints[i].triggered && setpoints[i].holdMs == 0) {
                 // Falling edge — hysteresis check on scaled value
                 float margin = fabsf(setpoints[i].threshold) * 0.1f;
                 if (margin < 0.1f) margin = 0.1f;
