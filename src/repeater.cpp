@@ -2094,14 +2094,6 @@ void handleCmd(const String& from, const String& cmdBody) {
             int value = readSensorPin(pin);
             sdata += "," + String(pin) + ":" + String(value);
         }
-        // Also include exposed storage vpins so the GUI's Digital/Sensor Read
-        // blocks can monitor state-machine variables without forcing the user
-        // to add each vpin to sensorPins[] manually. Vpins are a firmware-wide
-        // feature so this is a universal addition, not per-board.
-        for (int i = 0; i < STORAGE_VPIN_EXPOSED; i++) {
-            int pin = STORAGE_VPIN_BASE + i;
-            sdata += "," + String(pin) + ":" + String(getStorageVpin(pin));
-        }
         mesh.cmdsExecuted++;
         String mid = mesh.generateMsgID();
         String hex = mesh.encryptMsg(sdata);
@@ -2836,12 +2828,6 @@ void processBleCommand(const String& line, bool fromSerial) {
             int pin = sensorPins[i];
             int value = readSensorPin(pin);
             sdata += "," + String(pin) + ":" + String(value);
-        }
-        // Include exposed storage vpins (state variables) so GUI Digital/Sensor
-        // Read blocks can monitor them without manually adding to sensorPins[].
-        for (int i = 0; i < STORAGE_VPIN_EXPOSED; i++) {
-            int pin = STORAGE_VPIN_BASE + i;
-            sdata += "," + String(pin) + ":" + String(getStorageVpin(pin));
         }
         bleSend(sdata);
     }
