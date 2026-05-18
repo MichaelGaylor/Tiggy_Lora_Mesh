@@ -196,27 +196,23 @@ int ioExpandRead(int vpin);  // forward declaration
 void ioExpandSetRelay(int pin, int val);  // forward declaration
 
 // ─── Storage virtual pins (state variables persisted to EEPROM) ─────
-// Pins in [STORAGE_VPIN_BASE, STORAGE_VPIN_BASE + STORAGE_VPIN_COUNT) don't
-// touch GPIO — they're a 32-byte in-firmware array that behaves exactly like
-// digital pins from the perspective of CMD,SET/CMD,GET and beacon-rule RELAY
-// actions. Lets the GUI build state-machines (flip-flop / variable patterns)
-// on the node: two BEACON,ADD rules updating the same storage pin form an
-// SR latch; the GUI then reads the pin via Digital Read like any other pin.
-// State survives reboot via EEPROM, so a gate that loses power mid-cycle
-// remembers its last commanded position. Address 1600 is past the beacon
-// rule storage (8 rules × 128 B starting at 512 = up to 1535).
-#define STORAGE_VPIN_BASE   200
-#define STORAGE_VPIN_COUNT  32
+// Pins in [STORAGE_VPIN_BASE, STORAGE_VPIN_BASE + STORAGE_VPIN_RESERVED) don't
+// touch GPIO — they're a STORAGE_VPIN_RESERVED-byte in-firmware array that
+// behaves exactly like digital pins from the perspective of CMD,SET/CMD,GET
+// and beacon-rule RELAY actions. Defaults defined in Pins.h (BASE=200,
+// RESERVED=32, EXPOSED=8) — a board can override by #define'ing them.
+// Address 1600 is past the beacon rule storage (8 rules × 128 B starting
+// at 512 = up to 1535).
 #define EEPROM_STORAGE_VPIN_ADDR 1600
-uint8_t storageVpinValues[STORAGE_VPIN_COUNT] = {0};
+uint8_t storageVpinValues[STORAGE_VPIN_RESERVED] = {0};
 
 inline bool isStorageVpin(int pin) {
-    return pin >= STORAGE_VPIN_BASE && pin < STORAGE_VPIN_BASE + STORAGE_VPIN_COUNT;
+    return pin >= STORAGE_VPIN_BASE && pin < STORAGE_VPIN_BASE + STORAGE_VPIN_RESERVED;
 }
 
 void setStorageVpin(int pin, uint8_t val) {
     int idx = pin - STORAGE_VPIN_BASE;
-    if (idx < 0 || idx >= STORAGE_VPIN_COUNT) return;
+    if (idx < 0 || idx >= STORAGE_VPIN_RESERVED) return;
     if (storageVpinValues[idx] == val) return;  // No write if unchanged (saves flash wear)
     storageVpinValues[idx] = val;
     EEPROM.write(EEPROM_STORAGE_VPIN_ADDR + idx, val);
@@ -225,7 +221,7 @@ void setStorageVpin(int pin, uint8_t val) {
 
 uint8_t getStorageVpin(int pin) {
     int idx = pin - STORAGE_VPIN_BASE;
-    if (idx < 0 || idx >= STORAGE_VPIN_COUNT) return 0;
+    if (idx < 0 || idx >= STORAGE_VPIN_RESERVED) return 0;
     return storageVpinValues[idx];
 }
 
@@ -1475,7 +1471,10 @@ void setupGPIO() {
     for (int i = 0; i < relayCount; i++) {
         if (isPinConfigurable(relayPins[i])) {
             setupDigitalOutput(relayPins[i]);
-            setDigital(relayPins[i], 0);
+            // Don't clobber storage vpins at boot — they're persistent state
+            // variables, the whole point is they survive reboot. Physical
+            // relays still get the boot-low to put outputs in a known state.
+            if (!isStorageVpin(relayPins[i])) setDigital(relayPins[i], 0);
         }
     }
     for (int i = 0; i < sensorCount; i++) {
@@ -2057,6 +2056,13 @@ void handleCmd(const String& from, const String& cmdBody) {
         for (int i = 0; i < relayCount; i++) { if (i) rsp += ","; rsp += String(relayPins[i]); }
         rsp += "|S:";
         for (int i = 0; i < sensorCount; i++) { if (i) rsp += ","; rsp += String(sensorPins[i]); }
+        // V: storage virtual pins available on this firmware. GUI parses
+        // this to populate its dropdowns — no hardcoded constants needed.
+        rsp += "|V:";
+        for (int i = 0; i < STORAGE_VPIN_EXPOSED; i++) {
+            if (i) rsp += ",";
+            rsp += String(STORAGE_VPIN_BASE + i);
+        }
         bleSend(rsp);
         // Also respond over mesh so remote nodes can query our pin config
         if (from != "LOCAL") {
@@ -2631,6 +2637,11 @@ void processBleCommand(const String& line, bool fromSerial) {
         for (int i = 0; i < relayCount; i++) { if (i) pinsLine += ","; pinsLine += String(relayPins[i]); }
         pinsLine += "|S:";
         for (int i = 0; i < sensorCount; i++) { if (i) pinsLine += ","; pinsLine += String(sensorPins[i]); }
+        pinsLine += "|V:";
+        for (int i = 0; i < STORAGE_VPIN_EXPOSED; i++) {
+            if (i) pinsLine += ",";
+            pinsLine += String(STORAGE_VPIN_BASE + i);
+        }
         bleSend(pinsLine);
     }
     else if (line == "SAVE") { saveConfig(); bleSend("OK,SAVED"); }
@@ -2989,6 +3000,11 @@ void handleSerialConfig() {
         for (int i = 0; i < relayCount; i++) { if (i) pins += ","; pins += String(relayPins[i]); }
         pins += "|S:";
         for (int i = 0; i < sensorCount; i++) { if (i) pins += ","; pins += String(sensorPins[i]); }
+        pins += "|V:";
+        for (int i = 0; i < STORAGE_VPIN_EXPOSED; i++) {
+            if (i) pins += ",";
+            pins += String(STORAGE_VPIN_BASE + i);
+        }
         Serial.println(pins);
     }
     else if (line == "SAVE") { saveConfig(); Serial.println("OK: Saved"); }
@@ -3713,11 +3729,11 @@ void loadConfig() {
     solarMode = (solarByte == 1);
 
     // Load storage virtual pins — persisted state-machine variables (see
-    // STORAGE_VPIN_BASE near top). EEPROM cells default to 0xFF after a
+    // STORAGE_VPIN_BASE in Pins.h). EEPROM cells default to 0xFF after a
     // fresh chip, so clamp any unwritten cell to 0 (0xFF is treated as
     // "not set yet" for the boolean / digital interpretation these pins
     // get from setDigital / readSensorPin).
-    for (int i = 0; i < STORAGE_VPIN_COUNT; i++) {
+    for (int i = 0; i < STORAGE_VPIN_RESERVED; i++) {
         uint8_t v = EEPROM.read(EEPROM_STORAGE_VPIN_ADDR + i);
         storageVpinValues[i] = (v == 0xFF) ? 0 : v;
     }
