@@ -1315,7 +1315,7 @@ int readBatteryMv() {
 }
 
 void enterLowBatteryShutdown(int mv) {
-    Serial.printf("\n!!! BATTERY LOW (%dmV < %dmV) — entering deep sleep for %ds\n",
+    Serial.printf("\n!!! BATTERY LOW (%dmV < %dmV) -- entering deep sleep for %ds\n",
                   mv, (int)battLowMv, (int)BATT_SLEEP_INTERVAL_S);
     Serial.flush();
     delay(500);                        // Make sure UART drains before sleep
@@ -3587,8 +3587,8 @@ void handleSerialConfig() {
         // Query binary-SDATA mode. Prints current state + brief usage.
         Serial.printf("SBIN,%d (%s)\n", binarySDATA ? 1 : 0,
                       binarySDATA ? "binary" : "ascii");
-        Serial.println("Set:   SBIN 0   (ASCII SDATA — legacy)");
-        Serial.println("       SBIN 1   (binary SDATA — ~30% less airtime)");
+        Serial.println("Set:   SBIN 0   (ASCII SDATA -- legacy)");
+        Serial.println("       SBIN 1   (binary SDATA -- ~30% less airtime)");
     }
     else if (line.startsWith("SBIN ")) {
         // Toggle binary-SDATA mode and persist to EEPROM. The gateway GUI
@@ -3693,11 +3693,11 @@ void handleSerialConfig() {
         beaconScanEnabled = false;
         if (pNimBLEScan) { pNimBLEScan->stop(); pNimBLEScan = nullptr; }
         NimBLEDevice::deinit(false);
-        Serial.println("OK: Gateway mode ON — BLE disabled, packets forwarded over serial");
+        Serial.println("OK: Gateway mode ON -- BLE disabled, packets forwarded over serial");
     }
     else if (line == "GATEWAY OFF") {
         gatewayMode = false;
-        Serial.println("OK: Gateway mode OFF — beacon scan resumed");
+        Serial.println("OK: Gateway mode OFF -- beacon scan resumed");
     }
     else if (line.startsWith("NDLOC,") || line.startsWith("NDLOC ")) {
         String args = line.substring(6); args.trim();
@@ -3743,7 +3743,7 @@ void handleSerialConfig() {
     else if (line == "SOLAR ON") {
         solarMode = true;
         saveConfig();
-        Serial.println("OK: Solar mode ON — OLED off, BLE off, CPU light-sleep between packets");
+        Serial.println("OK: Solar mode ON -- OLED off, BLE off, CPU light-sleep between packets");
         Serial.println("Send SOLAR OFF via serial or press PRG to exit");
         Serial.flush();
         startSolarMode();
@@ -3751,7 +3751,7 @@ void handleSerialConfig() {
     else if (line == "SOLAR OFF") {
         stopSolarMode();
         saveConfig();
-        Serial.println("OK: Solar mode OFF — normal operation restored");
+        Serial.println("OK: Solar mode OFF -- normal operation restored");
     }
 #endif
     else if (line.startsWith("PINMODE ")) {
