@@ -325,6 +325,16 @@ unsigned long nextAutoPollTime = 0;
 // Layout: magic(2) + divider(4 float) + lowMv(2) + recoverMv(2) = 10 bytes.
 #define EEPROM_BATTCFG_ADDR  457
 #define EEPROM_BATTCFG_MAGIC 0xBAEEu
+
+// Binary SDATA mode — per-node opt-in flag. When set, the SDATA payload
+// is encoded as "SB,<nodeid>,<base64>" where the base64 decodes to a
+// compact binary representation (version byte + N×{pin, val_hi, val_lo}).
+// Saves ~25-35% airtime per packet vs the ASCII "SDATA,...,5:171,..." form
+// and removes the multi-packet split for <=8 pins. Default OFF (ASCII)
+// for backward compat. Set via 'SBIN 0|1' serial command.
+#define EEPROM_BINSDATA_ADDR 470   // 1 byte: 0=ASCII (default), 1=binary
+bool binarySDATA = false;
+
 float nodeLat = 0.0f;
 float nodeLon = 0.0f;
 
@@ -2122,6 +2132,63 @@ void checkSetpoints() {
     }
 }
 
+// ─── Binary SDATA encoding ──────────────────────────────────
+// Base64 encoder (std alphabet, no line wrap). ~30 lines, no dependency.
+static const char B64CHARS[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+String b64encode(const uint8_t* data, size_t len) {
+    String out;
+    out.reserve(((len + 2) / 3) * 4);
+    for (size_t i = 0; i < len; i += 3) {
+        uint32_t triple = (uint32_t)data[i] << 16;
+        if (i + 1 < len) triple |= (uint32_t)data[i + 1] << 8;
+        if (i + 2 < len) triple |= (uint32_t)data[i + 2];
+        out += B64CHARS[(triple >> 18) & 0x3F];
+        out += B64CHARS[(triple >> 12) & 0x3F];
+        out += (i + 1 < len) ? B64CHARS[(triple >> 6) & 0x3F] : '=';
+        out += (i + 2 < len) ? B64CHARS[triple & 0x3F]        : '=';
+    }
+    return out;
+}
+
+// Build the binary SDATA payload for sensorPins[start..end).
+// Layout (pre-base64):
+//   byte 0       : format version (currently 0x01)
+//   byte 1..3N   : N × { pin_byte, value_hi, value_lo } (big-endian int16)
+// Wire form: "SB,<nodeid>,<base64>"
+// No multi-packet for v1 — sized to fit one LoRa frame easily.
+String buildBinarySDATA(int start, int end) {
+    int n = end - start;
+    if (n < 0) n = 0;
+    // Cap at 32 pins to keep base64 output well under 200 chars (fits the
+    // ~255-byte LoRa frame after AES-GCM + hex framing).
+    if (n > 32) n = 32;
+    uint8_t buf[1 + 32 * 3];
+    buf[0] = 0x01;  // format version
+    for (int i = 0; i < n; i++) {
+        int pin = sensorPins[start + i];
+        int value = readSensorPin(pin);
+        buf[1 + i * 3 + 0] = (uint8_t)(pin & 0xFF);
+        buf[1 + i * 3 + 1] = (uint8_t)((value >> 8) & 0xFF);
+        buf[1 + i * 3 + 2] = (uint8_t)(value & 0xFF);
+    }
+    return "SB," + String(mesh.localID) + "," + b64encode(buf, 1 + n * 3);
+}
+
+// Build the ASCII SDATA payload for sensorPins[start..end) — legacy format.
+// `part` and `totalParts` produce the optional P<n>/<m> multi-packet marker.
+String buildAsciiSDATA(int start, int end, int part, int totalParts) {
+    String s = "SDATA," + String(mesh.localID);
+    if (totalParts > 1) s += ",P" + String(part) + "/" + String(totalParts);
+    for (int i = start; i < end; i++) {
+        int pin = sensorPins[i];
+        int value = readSensorPin(pin);
+        s += "," + String(pin) + ":" + String(value);
+    }
+    return s;
+}
+
 // Execute auto-poll — read all sensors and send SDATA to target
 void executeAutoPoll() {
     if (!autoPollEnabled || sensorCount == 0) return;
@@ -2131,12 +2198,11 @@ void executeAutoPoll() {
     // Schedule next poll with ±2s jitter to avoid synchronized collisions
     nextAutoPollTime = now + (unsigned long)autoPollInterval * 1000UL + random(-2000, 2000);
 
-    String sdata = "SDATA," + String(mesh.localID);
-    for (int i = 0; i < sensorCount; i++) {
-        int pin = sensorPins[i];
-        int value = readSensorPin(pin);
-        sdata += "," + String(pin) + ":" + String(value);
-    }
+    // Binary mode fits all pins in one packet; ASCII mode keeps the old
+    // single-packet form (no part marker) for backward compat.
+    String sdata = binarySDATA
+        ? buildBinarySDATA(0, sensorCount)
+        : buildAsciiSDATA(0, sensorCount, 1, 1);
 
     // Send to target node over mesh
     uint16_t dest = strtol(autoPollTarget, nullptr, 16);
@@ -2249,19 +2315,10 @@ void handleCmd(const String& from, const String& cmdBody) {
         // Budget: 8 pin entries per packet keeps plaintext under ~60 bytes
         // (8 × ~7 chars max for analog), encrypted+hex+framed under ~180
         // chars — safely below 255.
-        const int PINS_PER_PACKET = 8;
-        int parts = (sensorCount + PINS_PER_PACKET - 1) / PINS_PER_PACKET;
-        if (parts < 1) parts = 1;
-        for (int p = 0; p < parts; p++) {
-            String sdata = "SDATA," + String(mesh.localID);
-            if (parts > 1) sdata += ",P" + String(p + 1) + "/" + String(parts);
-            int start = p * PINS_PER_PACKET;
-            int end   = (start + PINS_PER_PACKET < sensorCount) ? start + PINS_PER_PACKET : sensorCount;
-            for (int i = start; i < end; i++) {
-                int pin = sensorPins[i];
-                int value = readSensorPin(pin);
-                sdata += "," + String(pin) + ":" + String(value);
-            }
+        // Binary mode: send the whole sensor list in one packet (no split).
+        // ASCII mode: split into 8-pin chunks with the P<part>/<total> marker.
+        if (binarySDATA) {
+            String sdata = buildBinarySDATA(0, sensorCount);
             mesh.cmdsExecuted++;
             String mid = mesh.generateMsgID();
             String hex = mesh.encryptMsg(sdata);
@@ -2269,7 +2326,23 @@ void handleCmd(const String& from, const String& cmdBody) {
                              String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
             mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
             bleSend(sdata);
-            if (p + 1 < parts) delay(50);  // brief pause between packets
+        } else {
+            const int PINS_PER_PACKET = 8;
+            int parts = (sensorCount + PINS_PER_PACKET - 1) / PINS_PER_PACKET;
+            if (parts < 1) parts = 1;
+            for (int p = 0; p < parts; p++) {
+                int start = p * PINS_PER_PACKET;
+                int end   = (start + PINS_PER_PACKET < sensorCount) ? start + PINS_PER_PACKET : sensorCount;
+                String sdata = buildAsciiSDATA(start, end, p + 1, parts);
+                mesh.cmdsExecuted++;
+                String mid = mesh.generateMsgID();
+                String hex = mesh.encryptMsg(sdata);
+                String payload = String(mesh.localID) + "," + from + "," + mid + "," +
+                                 String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+                mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+                bleSend(sdata);
+                if (p + 1 < parts) delay(50);  // brief pause between packets
+            }
         }
     }
     else if (action == "TIMER") {
@@ -3030,24 +3103,20 @@ void processBleCommand(const String& line, bool fromSerial) {
         bleSend("NODEEND");
     }
     else if (line == "POLL") {
-        // Local POLL — splits the same way as the mesh one above for
-        // consistency. Single-packet responses keep the pre-existing
-        // format (no P<part>/<total> marker).
-        const int PINS_PER_PACKET = 8;
-        int parts = (sensorCount + PINS_PER_PACKET - 1) / PINS_PER_PACKET;
-        if (parts < 1) parts = 1;
-        for (int p = 0; p < parts; p++) {
-            String sdata = "SDATA," + String(mesh.localID);
-            if (parts > 1) sdata += ",P" + String(p + 1) + "/" + String(parts);
-            int start = p * PINS_PER_PACKET;
-            int end   = (start + PINS_PER_PACKET < sensorCount) ? start + PINS_PER_PACKET : sensorCount;
-            for (int i = start; i < end; i++) {
-                int pin = sensorPins[i];
-                int value = readSensorPin(pin);
-                sdata += "," + String(pin) + ":" + String(value);
+        // Local POLL — fits one packet in binary mode; splits the same way
+        // as the mesh POLL response in ASCII mode.
+        if (binarySDATA) {
+            bleSend(buildBinarySDATA(0, sensorCount));
+        } else {
+            const int PINS_PER_PACKET = 8;
+            int parts = (sensorCount + PINS_PER_PACKET - 1) / PINS_PER_PACKET;
+            if (parts < 1) parts = 1;
+            for (int p = 0; p < parts; p++) {
+                int start = p * PINS_PER_PACKET;
+                int end   = (start + PINS_PER_PACKET < sensorCount) ? start + PINS_PER_PACKET : sensorCount;
+                bleSend(buildAsciiSDATA(start, end, p + 1, parts));
+                if (p + 1 < parts) delay(50);
             }
-            bleSend(sdata);
-            if (p + 1 < parts) delay(50);
         }
     }
     else if (line.startsWith("POLL,")) {
@@ -3279,6 +3348,27 @@ void handleSerialConfig() {
 #else
         Serial.println("ERR: no battery monitoring on this board");
 #endif
+    }
+    else if (line == "SBIN") {
+        // Query binary-SDATA mode. Prints current state + brief usage.
+        Serial.printf("SBIN,%d (%s)\n", binarySDATA ? 1 : 0,
+                      binarySDATA ? "binary" : "ascii");
+        Serial.println("Set:   SBIN 0   (ASCII SDATA — legacy)");
+        Serial.println("       SBIN 1   (binary SDATA — ~30% less airtime)");
+    }
+    else if (line.startsWith("SBIN ")) {
+        // Toggle binary-SDATA mode and persist to EEPROM. The gateway GUI
+        // decodes both 'SDATA,' (ASCII) and 'SB,' (binary) prefixes so
+        // changing this on one node doesn't require any GUI change.
+        int v = -1;
+        if (sscanf(line.c_str(), "SBIN %d", &v) != 1 || (v != 0 && v != 1)) {
+            Serial.println("ERR: usage: SBIN 0  (ascii)  |  SBIN 1  (binary)");
+        } else {
+            binarySDATA = (v == 1);
+            EEPROM.write(EEPROM_BINSDATA_ADDR, binarySDATA ? 1 : 0);
+            EEPROM.commit();
+            Serial.printf("OK: SBIN saved (%s)\n", binarySDATA ? "binary" : "ascii");
+        }
     }
     else if (line == "BATT_DEBUG") {
 #if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
@@ -4135,6 +4225,12 @@ void setup() {
     // EEPROM up early so the battery check honours any runtime override.
     EEPROM.begin(EEPROM_SIZE);
     loadBattCfg();
+    // Binary SDATA flag — 1 byte at EEPROM_BINSDATA_ADDR. 0xFF on a fresh
+    // chip / first boot, which we treat as 'disabled' (default ASCII).
+    {
+        uint8_t v = EEPROM.read(EEPROM_BINSDATA_ADDR);
+        binarySDATA = (v == 1);
+    }
 
     // ─── Early low-battery recovery check ──────────────────────
     // Only runs if we just woke from a low-battery deep sleep (RTC flag
