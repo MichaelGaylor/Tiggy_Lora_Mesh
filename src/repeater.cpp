@@ -320,10 +320,18 @@ uint16_t autoPollInterval = 300;  // default 5 min
 unsigned long nextAutoPollTime = 0;
 
 // ─── Node location (static, for nodes without GPS) ──────────
-#define EEPROM_NDLOC_ADDR 449   // 8 bytes: lat(float) + lon(float)
+// ⚠️ Both addresses below were moved out of the 450..466 range that overlaps
+// the AES key (EEPROM_KEY_ADDR=450 in MeshCore.h, 17 bytes including null).
+// Old layout (449 and 457) silently corrupted the AES key whenever BATT_CFG
+// or a node-location write happened; the damage was latent in EEPROM but
+// surfaced on next reboot when loadConfig saw an invalid key and rolled a
+// fresh random one — locking the node out of the existing encrypted mesh.
+// Existing saved values at the old addresses get one-time-lost (re-enter
+// lat/lon and BATT_CFG after upgrade); the key is preserved.
+#define EEPROM_NDLOC_ADDR    480   // 8 bytes: lat(float) + lon(float)
 // Battery config override (runtime-tunable via BATT_CFG serial command).
 // Layout: magic(2) + divider(4 float) + lowMv(2) + recoverMv(2) = 10 bytes.
-#define EEPROM_BATTCFG_ADDR  457
+#define EEPROM_BATTCFG_ADDR  490
 #define EEPROM_BATTCFG_MAGIC 0xBAEEu
 
 // Binary SDATA mode — per-node opt-in flag. When set, the SDATA payload
