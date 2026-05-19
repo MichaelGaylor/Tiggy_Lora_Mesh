@@ -334,14 +334,13 @@ unsigned long nextAutoPollTime = 0;
 #define EEPROM_BATTCFG_ADDR  490
 #define EEPROM_BATTCFG_MAGIC 0xBAEEu
 
-// Binary SDATA mode — per-node opt-in flag. When set, the SDATA payload
-// is encoded as "SB,<nodeid>,<base64>" where the base64 decodes to a
-// compact binary representation (version byte + N×{pin, val_hi, val_lo}).
-// Saves ~25-35% airtime per packet vs the ASCII "SDATA,...,5:171,..." form
-// and removes the multi-packet split for <=8 pins. Default OFF (ASCII)
-// for backward compat. Set via 'SBIN 0|1' serial command.
-#define EEPROM_BINSDATA_ADDR 470   // 1 byte: 0=ASCII (default), 1=binary
-bool binarySDATA = false;
+// Binary SDATA mode was an opt-in toggle but caused field issues
+// (gateway losing nodes after extended runtime). Disabled pending
+// root-cause. The buildAsciiSDATA helper below is kept as a clean
+// factoring of the inline SDATA build that used to live in three
+// places — no behaviour change vs the pre-SBIN code. EEPROM byte at
+// 470 is left untouched so any old SBIN 1 value is ignored.
+constexpr bool binarySDATA = false;
 
 float nodeLat = 0.0f;
 float nodeLon = 0.0f;
@@ -3591,26 +3590,11 @@ void handleSerialConfig() {
         Serial.println("ERR: no battery monitoring on this board");
 #endif
     }
-    else if (line == "SBIN") {
-        // Query binary-SDATA mode. Prints current state + brief usage.
-        Serial.printf("SBIN,%d (%s)\n", binarySDATA ? 1 : 0,
-                      binarySDATA ? "binary" : "ascii");
-        Serial.println("Set:   SBIN 0   (ASCII SDATA -- legacy)");
-        Serial.println("       SBIN 1   (binary SDATA -- ~30% less airtime)");
-    }
-    else if (line.startsWith("SBIN ")) {
-        // Toggle binary-SDATA mode and persist to EEPROM. The gateway GUI
-        // decodes both 'SDATA,' (ASCII) and 'SB,' (binary) prefixes so
-        // changing this on one node doesn't require any GUI change.
-        int v = -1;
-        if (sscanf(line.c_str(), "SBIN %d", &v) != 1 || (v != 0 && v != 1)) {
-            Serial.println("ERR: usage: SBIN 0  (ascii)  |  SBIN 1  (binary)");
-        } else {
-            binarySDATA = (v == 1);
-            EEPROM.write(EEPROM_BINSDATA_ADDR, binarySDATA ? 1 : 0);
-            EEPROM.commit();
-            Serial.printf("OK: SBIN saved (%s)\n", binarySDATA ? "binary" : "ascii");
-        }
+    else if (line == "SBIN" || line.startsWith("SBIN ")) {
+        // Binary SDATA mode disabled in firmware (caused gateway losing
+        // nodes after extended runtime). Command kept as a no-op so any
+        // old scripts that send it don't error out.
+        Serial.println("OK: SBIN disabled in this firmware (ASCII-only)");
     }
     else if (line == "BATT_DEBUG") {
 #if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
@@ -4468,12 +4452,7 @@ void setup() {
     // EEPROM up early so the battery check honours any runtime override.
     EEPROM.begin(EEPROM_SIZE);
     loadBattCfg();
-    // Binary SDATA flag — 1 byte at EEPROM_BINSDATA_ADDR. 0xFF on a fresh
-    // chip / first boot, which we treat as 'disabled' (default ASCII).
-    {
-        uint8_t v = EEPROM.read(EEPROM_BINSDATA_ADDR);
-        binarySDATA = (v == 1);
-    }
+    // Binary SDATA mode disabled — binarySDATA is now constexpr false.
 
     // ─── Early low-battery recovery check ──────────────────────
     // Only runs if we just woke from a low-battery deep sleep (RTC flag
