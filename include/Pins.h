@@ -792,3 +792,34 @@
 // etc — explicit per-board so adding a new board can't accidentally
 // leave the actuator init pointing at random pins. The firmware checks
 // at runtime: ACTUATOR_IN1 >= 0 → drive LOW at boot, else skip.
+
+// ─── Storage Virtual Pins ───────────────────────────────────
+// In-firmware state variables — pins 200..(200+STORAGE_VPIN_RESERVED-1)
+// don't touch GPIO. They're a small array persisted to EEPROM that
+// behaves exactly like digital pins from the perspective of CMD,SET /
+// CMD,GET / Beacon-rule RELAY action / POLL / Digital Read in the GUI.
+//
+// VIRTUAL_PINS lists which of those slots the firmware automatically
+// appends to BOTH relayPins[] and sensorPins[] on first boot (and on
+// PIN_CONFIG_VERSION bump). Default is 8 vpins (200-207); a board can
+// override by #define'ing VIRTUAL_PINS to a shorter or longer list
+// before this point. Set to { } to disable entirely on a board.
+//
+// State survives reboot via EEPROM, so a flip-flop pattern built from
+// two BEACON,ADD rules (one sets vpin 200, the other resets it) runs
+// autonomously on the node — works without the gateway online.
+#ifndef STORAGE_VPIN_BASE
+  #define STORAGE_VPIN_BASE     200   // First storage vpin number
+#endif
+#ifndef STORAGE_VPIN_RESERVED
+  #define STORAGE_VPIN_RESERVED 32    // Slots backed by EEPROM (RAM array size)
+#endif
+// Default to 8 vpins. POLL responses are now auto-split into multiple
+// SDATA packets when the total would overflow the LoRa packet size
+// limit, so the previous 4-vpin cap (chosen defensively when the
+// firmware emitted everything in one packet) no longer applies.
+// Bump per-board via #define before this point if you need more or
+// fewer for a specific board.
+#ifndef VIRTUAL_PINS
+  #define VIRTUAL_PINS          { 200, 201, 202, 203, 204, 205, 206, 207 }
+#endif

@@ -49,10 +49,15 @@ Adafruit_SSD1306 oled(OLED_W, OLED_H, &Wire, OLED_RST);
 bool oledAvailable = false;
 
 // ─── Repeater-specific config ────────────────────────────────
-#define EEPROM_GPIO_ADDR 410
+// EEPROM_GPIO_ADDR relocated to 1700 (was 410) when MAX_*_CFG bumped 8/6 -> 16/16.
+// New layout: 1 + 16 + 1 + 16 = 34 bytes at 1700, ending at 1733. Sits in the
+// gap between storage-vpin values (1600-1631, see EEPROM_STORAGE_VPIN_ADDR)
+// and EEPROM_SIZE (2048). Old data at 410 is orphaned but harmless — the
+// bumped PIN_CONFIG_VERSION forces a reload from DEFAULT_*_PINS on next boot.
+#define EEPROM_GPIO_ADDR 1700
 #define EEPROM_SOLAR_ADDR 430
-#define MAX_RELAY_PINS_CFG 8
-#define MAX_SENSOR_PINS_CFG 6
+#define MAX_RELAY_PINS_CFG 16   // was 8 — fits physical relays + 8 storage vpins
+#define MAX_SENSOR_PINS_CFG 16  // was 6 — fits physical sensors + 8 storage vpins
 #define SOLAR_OLED_WAKE_MS 10000
 
 #ifndef DEBUG
@@ -195,6 +200,60 @@ static float getPulseRate(uint8_t pin) {
 int ioExpandRead(int vpin);  // forward declaration
 void ioExpandSetRelay(int pin, int val);  // forward declaration
 
+// ─── Storage virtual pins (state variables persisted to EEPROM) ─────
+// Pins in [STORAGE_VPIN_BASE, STORAGE_VPIN_BASE + STORAGE_VPIN_RESERVED) don't
+// touch GPIO — they're a STORAGE_VPIN_RESERVED-byte in-firmware array that
+// behaves exactly like digital pins from the perspective of CMD,SET/CMD,GET
+// and beacon-rule RELAY actions. Defaults defined in Pins.h (BASE=200,
+// RESERVED=32, EXPOSED=8) — a board can override by #define'ing them.
+// Address 1600 is past the beacon rule storage (8 rules × 128 B starting
+// at 512 = up to 1535).
+#define EEPROM_STORAGE_VPIN_ADDR 1600
+uint8_t storageVpinValues[STORAGE_VPIN_RESERVED] = {0};
+
+inline bool isStorageVpin(int pin) {
+    return pin >= STORAGE_VPIN_BASE && pin < STORAGE_VPIN_BASE + STORAGE_VPIN_RESERVED;
+}
+
+void setStorageVpin(int pin, uint8_t val) {
+    int idx = pin - STORAGE_VPIN_BASE;
+    if (idx < 0 || idx >= STORAGE_VPIN_RESERVED) return;
+    if (storageVpinValues[idx] == val) return;  // No write if unchanged (saves flash wear)
+    storageVpinValues[idx] = val;
+    EEPROM.write(EEPROM_STORAGE_VPIN_ADDR + idx, val);
+    EEPROM.commit();
+}
+
+uint8_t getStorageVpin(int pin) {
+    int idx = pin - STORAGE_VPIN_BASE;
+    if (idx < 0 || idx >= STORAGE_VPIN_RESERVED) return 0;
+    return storageVpinValues[idx];
+}
+
+// Append VIRTUAL_PINS (defined per-board or globally in Pins.h, default
+// {200..207}) onto BOTH relayPins[] and sensorPins[], skipping duplicates
+// and respecting MAX_*_CFG. Called from loadConfig on first boot and after
+// a PIN_CONFIG_VERSION bump so storage vpins always show up in the gateway's
+// pin dropdowns and POLL responses, without each board having to remember
+// to list them in its DEFAULT_*_PINS. Boards that don't want vpins can
+// #define VIRTUAL_PINS to { } to opt out.
+void appendVirtualPinsToConfig() {
+    uint8_t v[] = VIRTUAL_PINS;
+    const size_t vcount = sizeof(v) / sizeof(v[0]);
+    for (size_t i = 0; i < vcount; i++) {
+        bool alreadyR = false;
+        for (uint8_t j = 0; j < relayCount; j++)
+            if (relayPins[j] == v[i]) { alreadyR = true; break; }
+        if (!alreadyR && relayCount < MAX_RELAY_PINS_CFG)
+            relayPins[relayCount++] = v[i];
+        bool alreadyS = false;
+        for (uint8_t j = 0; j < sensorCount; j++)
+            if (sensorPins[j] == v[i]) { alreadyS = true; break; }
+        if (!alreadyS && sensorCount < MAX_SENSOR_PINS_CFG)
+            sensorPins[sensorCount++] = v[i];
+    }
+}
+
 // Battery monitor — defined down in its own section, but sendHeartbeatWithFlags
 // (line ~460) needs to call this. Returns -1 if no monitoring on this board.
 int readBatteryMv();
@@ -212,6 +271,9 @@ void setupDigitalOutput(int pin);
 // Use setpoint Scale to convert to engineering units (e.g., m/s).
 // AUTO mode: ESP32-S3 has ADC on GPIOs 1-20; classic ESP32 has ADC1 on 32-39.
 static int readSensorPin(int pin) {
+    // Storage virtual pins 200-231: in-firmware state variables (persisted to EEPROM).
+    // Read returns the last value set via CMD,SET or BEACON,ADD RELAY action.
+    if (isStorageVpin(pin)) return (int)getStorageVpin(pin);
     // Virtual pins 100-115: IO expansion board
     if (pin >= IO_EXPAND_VPIN_BASE && pin < IO_EXPAND_VPIN_BASE + IO_EXPAND_MAX_PINS)
         return ioExpandRead(pin);
@@ -534,9 +596,26 @@ struct SetpointRule {
     uint8_t relayPin;
     uint8_t action;          // RELAY: 0=LOW, 1=HIGH
     uint16_t pulseMs;        // PULSE: duration in ms (only for actionType==2). Phase 4.
+    // Monostable hold: if >0, rising edge starts a timer; falling-edge
+    // action fires automatically after holdMs regardless of threshold
+    // state (and threshold-cleared events are ignored while held).
+    // Mirrors BeaconRule.revertMs in semantics. 0 = natural edge mode.
+    uint16_t holdMs;
+    // Leave action for PULSE setpoints — analogous to BEACON,ADD Phase 3
+    // enter+leave: rising edge pulses relayPin for pulseMs, falling edge
+    // (or hold-expired) pulses leavePin for leavePulseMs. 0 = no leave.
+    // Only meaningful for actionType==2 (PULSE).
+    uint8_t leavePin;
+    uint16_t leavePulseMs;
     char msgTrue[SETPOINT_MSG_LEN + 1];
     char msgFalse[SETPOINT_MSG_LEN + 1];
     bool triggered;
+    // Hold-expired latch: set true when a HOLD-mode setpoint timer-fires
+    // its falling-edge action. While latched, the rising-edge logic is
+    // suppressed — the condition must first go FALSE to clear the latch
+    // before the rule can fire again. Without this, a steady-state
+    // above-threshold sensor re-fires every (HOLD + COOLDOWN) ms forever.
+    bool holdLatched;
     unsigned long lastFired;
     unsigned long debounceStart;  // Runtime: when condition first became true
 };
@@ -918,6 +997,7 @@ void checkBeacons() {
 }
 
 String processBeaconCommand(const String& args);  // Forward declaration
+static String formatBeaconRule(int i);            // Forward declaration (defined down with processBeaconCommand)
 
 // ═══════════════════════════════════════════════════════════════
 // SECTION: Radio bridge — connects MeshCore to physical radio
@@ -1404,43 +1484,52 @@ bool isVPin(int pin) {
 }
 
 // True for any pin the user may configure as a relay or sensor.
-// Accepts local physical pins (isPinSafe) AND virtual expansion pins.
-// Execution guards that need a raw hardware pin (e.g. GPS config) keep
-// calling isPinSafe() directly.
+// Accepts local physical pins (isPinSafe), IO-expansion vpins (isVPin) AND
+// storage vpins (isStorageVpin — in-firmware state variables persisted to
+// EEPROM). Execution guards that need a raw hardware pin (e.g. GPS config)
+// keep calling isPinSafe() directly.
 bool isPinConfigurable(int pin) {
-    return isPinSafe(pin) || isVPin(pin);
+    return isPinSafe(pin) || isVPin(pin) || isStorageVpin(pin);
 }
 
-// Drive an output — local GPIO via digitalWrite, or expansion pin via
-// UART !R command. Safe to call for any pin that passed isPinConfigurable.
-// On boards without an expansion wired (IO_EXPAND_TX < 0), the vpin branch
-// calls ioExpandSetRelay which is a no-op — no hardware effect, no crash.
+// Drive an output — local GPIO via digitalWrite, expansion pin via UART !R
+// command, or storage vpin via in-firmware array + EEPROM. Safe to call for
+// any pin that passed isPinConfigurable. On boards without an expansion
+// wired (IO_EXPAND_TX < 0), the vpin branch calls ioExpandSetRelay which
+// is a no-op — no hardware effect, no crash.
 void setDigital(int pin, int val) {
-    if (isVPin(pin)) {
+    if (isStorageVpin(pin)) {
+        setStorageVpin(pin, val ? 1 : 0);
+    } else if (isVPin(pin)) {
         ioExpandSetRelay(pin - IO_EXPAND_VPIN_BASE, val);
     } else {
         digitalWrite(pin, val ? HIGH : LOW);
     }
 }
 
-// Configure an output. Vpins skip pinMode — the expansion ESP32 already
-// runs pinMode(…, OUTPUT) in its own setup(). Calling pinMode with a
-// non-existent pin on the main MCU is undefined; this guard avoids it.
+// Configure an output. Vpins and storage-vpins skip pinMode — there is no
+// physical GPIO behind them. Calling pinMode with a non-existent pin on
+// the main MCU is undefined; this guard avoids it.
 void setupDigitalOutput(int pin) {
-    if (!isVPin(pin)) pinMode(pin, OUTPUT);
+    if (!isVPin(pin) && !isStorageVpin(pin)) pinMode(pin, OUTPUT);
 }
 
 void setupGPIO() {
     for (int i = 0; i < relayCount; i++) {
         if (isPinConfigurable(relayPins[i])) {
             setupDigitalOutput(relayPins[i]);
-            setDigital(relayPins[i], 0);
+            // Don't clobber storage vpins at boot — they're persistent state
+            // variables, the whole point is they survive reboot. Physical
+            // relays still get the boot-low to put outputs in a known state.
+            if (!isStorageVpin(relayPins[i])) setDigital(relayPins[i], 0);
         }
     }
     for (int i = 0; i < sensorCount; i++) {
         if (isPinConfigurable(sensorPins[i])) {
-            if (!isVPin(sensorPins[i])) pinMode(sensorPins[i], INPUT);
-            // vpins skip pinMode — expansion firmware handles its own sensor pins
+            // Skip pinMode for both kinds of vpins — IO expansion pins are
+            // configured on the secondary MCU, storage vpins have no GPIO at all.
+            if (!isVPin(sensorPins[i]) && !isStorageVpin(sensorPins[i]))
+                pinMode(sensorPins[i], INPUT);
         }
     }
 }
@@ -1589,6 +1678,11 @@ String processSetpointCommand(const String& args) {
                 resp += "(x" + String(setpoints[i].scaleFactor, 3) + "+" + String(setpoints[i].scaleOffset, 1) + ")";
             if (setpoints[i].debounceMs > 0)
                 resp += "[" + String(setpoints[i].debounceMs) + "ms]";
+            if (setpoints[i].holdMs > 0)
+                resp += "{hold:" + String(setpoints[i].holdMs) + "ms}";
+            if (setpoints[i].leavePin > 0 && setpoints[i].leavePulseMs > 0)
+                resp += "{leave:pin" + String(setpoints[i].leavePin) +
+                        "/" + String(setpoints[i].leavePulseMs) + "ms}";
         }
         if (count == 0) resp += ",NONE";
         return resp;
@@ -1619,17 +1713,34 @@ String processSetpointCommand(const String& args) {
     else if (opStr == "NE") op = 5;
     if (op > 5) return "ERR,SETPOINT,BADOP";
 
-    // Extract optional SCALE and DEBOUNCE suffixes before parsing action
+    // Extract optional SCALE, DEBOUNCE, HOLD and LEAVE suffixes before parsing action.
+    //   HOLD,<ms>          monostable revert (action fires on rising edge,
+    //                      auto-reverts after <ms> regardless of threshold).
+    //   LEAVE,PULSE,<pin>,<ms>
+    //                      enter+leave PULSE pair (rising edge pulses
+    //                      relayPin for pulseMs, falling/hold-expired pulses
+    //                      leavePin for leavePulseMs). Mirrors BEACON,ADD
+    //                      Phase 3. Only valid when the rising action is PULSE.
     float scaleFactor = 1.0f, scaleOffset = 0.0f;
     uint16_t debounceMs = 0;
+    uint16_t holdMs = 0;
+    uint8_t leavePin = 0;
+    uint16_t leavePulseMs = 0;
     int scalePos = rest.indexOf(",SCALE,");
     int debouncePos = rest.indexOf(",DEBOUNCE,");
+    int holdPos = rest.indexOf(",HOLD,");
+    int leavePos = rest.indexOf(",LEAVE,");
     String actionPart = rest;  // Will be trimmed below
 
-    if (scalePos >= 0 || debouncePos >= 0) {
-        // Find where suffixes start (whichever comes first)
-        int suffixStart = (scalePos >= 0 && debouncePos >= 0) ? min(scalePos, debouncePos)
-                        : (scalePos >= 0) ? scalePos : debouncePos;
+    if (scalePos >= 0 || debouncePos >= 0 || holdPos >= 0 || leavePos >= 0) {
+        // Find where suffixes start (whichever comes first). Sentinel is
+        // the string length so the comparisons below always pick a real
+        // position when at least one suffix is present.
+        int suffixStart = (int)rest.length();
+        if (scalePos    >= 0 && scalePos    < suffixStart) suffixStart = scalePos;
+        if (debouncePos >= 0 && debouncePos < suffixStart) suffixStart = debouncePos;
+        if (holdPos     >= 0 && holdPos     < suffixStart) suffixStart = holdPos;
+        if (leavePos    >= 0 && leavePos    < suffixStart) suffixStart = leavePos;
         actionPart = rest.substring(0, suffixStart);
         String suffixes = rest.substring(suffixStart);
 
@@ -1645,7 +1756,34 @@ String processSetpointCommand(const String& args) {
         }
         if (debouncePos >= 0) {
             int dIdx = suffixes.indexOf("DEBOUNCE,") + 9;
-            debounceMs = suffixes.substring(dIdx).toInt();
+            int dEnd = suffixes.indexOf(',', dIdx);
+            debounceMs = (dEnd > dIdx) ? suffixes.substring(dIdx, dEnd).toInt()
+                                       : suffixes.substring(dIdx).toInt();
+        }
+        if (holdPos >= 0) {
+            int hIdx = suffixes.indexOf("HOLD,") + 5;
+            int hEnd = suffixes.indexOf(',', hIdx);
+            holdMs = (hEnd > hIdx) ? suffixes.substring(hIdx, hEnd).toInt()
+                                   : suffixes.substring(hIdx).toInt();
+        }
+        if (leavePos >= 0) {
+            // Only LEAVE,PULSE,<pin>,<ms> is supported today.
+            int lIdx = suffixes.indexOf("LEAVE,PULSE,");
+            if (lIdx >= 0) {
+                lIdx += 12;  // past "LEAVE,PULSE,"
+                int pinComma = suffixes.indexOf(',', lIdx);
+                if (pinComma > lIdx) {
+                    int lpin = suffixes.substring(lIdx, pinComma).toInt();
+                    int msEnd = suffixes.indexOf(',', pinComma + 1);
+                    int lms  = (msEnd > pinComma)
+                                ? suffixes.substring(pinComma + 1, msEnd).toInt()
+                                : suffixes.substring(pinComma + 1).toInt();
+                    if (lpin > 0 && lms > 0 && lms <= PULSE_MAX_MS) {
+                        leavePin     = (uint8_t)lpin;
+                        leavePulseMs = (uint16_t)lms;
+                    }
+                }
+            }
         }
     }
 
@@ -1663,6 +1801,9 @@ String processSetpointCommand(const String& args) {
     setpoints[slot].scaleFactor = scaleFactor;
     setpoints[slot].scaleOffset = scaleOffset;
     setpoints[slot].debounceMs = debounceMs;
+    setpoints[slot].holdMs = holdMs;
+    setpoints[slot].leavePin = leavePin;
+    setpoints[slot].leavePulseMs = leavePulseMs;
 
     const char* ops[] = {"GT", "LT", "EQ", "GE", "LE", "NE"};
     String resp = "OK,SETPOINT," + String(sensorPin) + "," + String(ops[op]) + "," + String(threshold, 2);
@@ -1725,6 +1866,10 @@ String processSetpointCommand(const String& args) {
         resp += ",SCALE," + String(scaleFactor, 4) + "," + String(scaleOffset, 4);
     if (debounceMs > 0)
         resp += ",DEBOUNCE," + String(debounceMs);
+    if (holdMs > 0)
+        resp += ",HOLD," + String(holdMs);
+    if (leavePin > 0 && leavePulseMs > 0)
+        resp += ",LEAVE,PULSE," + String(leavePin) + "," + String(leavePulseMs);
     return resp;
 }
 
@@ -1792,20 +1937,26 @@ bool fireSetpointAction(SetpointRule& sp, int value, bool triggered) {
     bool isLocal = (target == String(mesh.localID));
 
     if (sp.actionType == 0) {
-        // RELAY action
-        if (!triggered) return false;  // Relay only fires on rising edge
+        // RELAY action.
+        // Rising edge → sp.action (HIGH/LOW as configured).
+        // Falling edge → opposite of sp.action — only reachable via hold-mode
+        // revert (checkSetpoints' threshold-cleared path does NOT call us for
+        // RELAY, so today the only falling-edge caller is the hold timer).
+        uint8_t desired = triggered ? (sp.action ? 1 : 0)
+                                    : (sp.action ? 0 : 1);
 
         if (isLocal) {
             // Local relay — no radio needed, just set the pin directly
             // (setDigital also dispatches to expansion board for vpin 100-115)
-            setDigital(sp.relayPin, sp.action ? 1 : 0);
+            setDigital(sp.relayPin, desired);
             debugPrint("SETPOINT LOCAL: pin " + String(sp.sensorPin) + "=" + String(value) +
-                       " -> pin " + String(sp.relayPin) + "=" + String(sp.action));
+                       " -> pin " + String(sp.relayPin) + "=" + String(desired) +
+                       (triggered ? "" : " (hold expired)"));
             bleSend("SETPOINT,FIRED," + String(sp.sensorPin) + "," + String(value) + ",LOCAL");
             return false;  // No radio TX
         } else {
             // Remote relay — send over mesh
-            String cmdText = "CMD,SET," + String(sp.relayPin) + "," + String(sp.action);
+            String cmdText = "CMD,SET," + String(sp.relayPin) + "," + String(desired);
             uint16_t dest = strtol(target.c_str(), nullptr, 16);
             String mid = mesh.generateMsgID();
             String hex = mesh.encryptMsg(cmdText);
@@ -1813,7 +1964,8 @@ bool fireSetpointAction(SetpointRule& sp, int value, bool triggered) {
                              String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
             mesh.transmitPacket(dest, payload);
             debugPrint("SETPOINT: pin " + String(sp.sensorPin) + "=" + String(value) +
-                       " -> " + target + " pin " + String(sp.relayPin) + "=" + String(sp.action));
+                       " -> " + target + " pin " + String(sp.relayPin) + "=" + String(desired) +
+                       (triggered ? "" : " (hold expired)"));
             bleSend("SETPOINT,FIRED," + String(sp.sensorPin) + "," + String(value) + "," + target);
             return true;  // Radio TX happened
         }
@@ -1835,16 +1987,29 @@ bool fireSetpointAction(SetpointRule& sp, int value, bool triggered) {
         return true;  // Radio TX happened
     }
     else if (sp.actionType == 2) {
-        // Phase 4: PULSE action — local pin, non-blocking pulse via the
-        // Phase 1 timer ring buffer. Only fires on rising edge.
-        if (!triggered) return false;
-        if (sp.relayPin > 0 && sp.pulseMs > 0) {
-            setupDigitalOutput(sp.relayPin);
-            startPulse(sp.relayPin, sp.pulseMs);
-            debugPrint("SETPOINT PULSE: pin " + String(sp.sensorPin) + "=" + String(value) +
-                       " -> pulse pin " + String(sp.relayPin) + " " + String(sp.pulseMs) + "ms");
-            bleSend("SETPOINT,FIRED," + String(sp.sensorPin) + "," + String(value) +
-                    ",PULSE," + String(sp.relayPin) + "," + String(sp.pulseMs));
+        // PULSE action — local pin, non-blocking pulse via the Phase 1 timer
+        // ring buffer. Rising edge pulses relayPin for pulseMs. Falling edge
+        // (threshold-cleared OR hold-expired) pulses leavePin for leavePulseMs
+        // if configured — analogous to BEACON,ADD Phase 3 enter+leave.
+        if (triggered) {
+            if (sp.relayPin > 0 && sp.pulseMs > 0) {
+                setupDigitalOutput(sp.relayPin);
+                startPulse(sp.relayPin, sp.pulseMs);
+                debugPrint("SETPOINT PULSE enter: pin " + String(sp.sensorPin) + "=" + String(value) +
+                           " -> pulse pin " + String(sp.relayPin) + " " + String(sp.pulseMs) + "ms");
+                bleSend("SETPOINT,FIRED," + String(sp.sensorPin) + "," + String(value) +
+                        ",PULSE," + String(sp.relayPin) + "," + String(sp.pulseMs));
+            }
+        } else {
+            // Falling edge — only fire if a leave pulse is configured.
+            if (sp.leavePin > 0 && sp.leavePulseMs > 0) {
+                setupDigitalOutput(sp.leavePin);
+                startPulse(sp.leavePin, sp.leavePulseMs);
+                debugPrint("SETPOINT PULSE leave: pin " + String(sp.sensorPin) + "=" + String(value) +
+                           " -> pulse pin " + String(sp.leavePin) + " " + String(sp.leavePulseMs) + "ms");
+                bleSend("SETPOINT,FIRED," + String(sp.sensorPin) + "," + String(value) +
+                        ",PULSE_LEAVE," + String(sp.leavePin) + "," + String(sp.leavePulseMs));
+            }
         }
         return false;  // No radio TX (local pin only)
     }
@@ -1872,13 +2037,38 @@ void checkSetpoints() {
     unsigned long now = millis();
     for (int i = 0; i < MAX_SETPOINTS; i++) {
         if (!setpoints[i].active) continue;
+
+        // Hold-mode revert: fires before the cooldown gate because the
+        // falling edge is timing-driven, not threshold-driven. Without
+        // this, a freshly-fired hold action would be stuck triggered
+        // until the cooldown elapsed AND the threshold cleared.
+        if (setpoints[i].triggered && setpoints[i].holdMs > 0 &&
+            (now - setpoints[i].lastFired) >= (unsigned long)setpoints[i].holdMs) {
+            int rawValue = readSensorPin(setpoints[i].sensorPin);
+            setpoints[i].triggered = false;
+            setpoints[i].holdLatched = true;  // Wait for condition to clear before re-arming
+            setpoints[i].lastFired = now;
+            setpoints[i].debounceStart = 0;
+            bool didTx = fireSetpointAction(setpoints[i], rawValue, false);
+            if (didTx) return;  // Yield to avoid back-to-back LoRa TX
+            continue;            // Skip normal eval this tick
+        }
+
         if (now - setpoints[i].lastFired < SETPOINT_COOLDOWN) continue;
 
         int rawValue = readSensorPin(setpoints[i].sensorPin);
         float scaled;
         bool condition = evalSetpointCondition(setpoints[i], rawValue, scaled);
 
-        if (condition && !setpoints[i].triggered) {
+        // Clear the hold-latch as soon as the condition goes away. This
+        // is what arms the rule for its next FALSE→TRUE rising edge.
+        // Without this gate, a steady above-threshold sensor would re-fire
+        // the whole Open→Closed sequence every (HOLD + COOLDOWN) ms.
+        if (!condition && setpoints[i].holdLatched) {
+            setpoints[i].holdLatched = false;
+        }
+
+        if (condition && !setpoints[i].triggered && !setpoints[i].holdLatched) {
             // Debounce: condition must hold continuously for debounceMs
             if (setpoints[i].debounceMs > 0) {
                 if (setpoints[i].debounceStart == 0) {
@@ -1897,7 +2087,11 @@ void checkSetpoints() {
         }
         else if (!condition) {
             setpoints[i].debounceStart = 0;  // Reset debounce timer
-            if (setpoints[i].triggered) {
+            // Hold mode: the falling-edge is timer-driven (handled above),
+            // so threshold-cleared events MUST be ignored here. Otherwise
+            // a transient drop below threshold during the hold window would
+            // double-fire the revert.
+            if (setpoints[i].triggered && setpoints[i].holdMs == 0) {
                 // Falling edge — hysteresis check on scaled value
                 float margin = fabsf(setpoints[i].threshold) * 0.1f;
                 if (margin < 0.1f) margin = 0.1f;
@@ -1912,7 +2106,13 @@ void checkSetpoints() {
                 if (clearCondition) {
                     setpoints[i].triggered = false;
                     setpoints[i].lastFired = now;
-                    if (setpoints[i].actionType == 1) {
+                    // MSG and PULSE both have meaningful falling-edge actions:
+                    //   MSG  → broadcast msgFalse
+                    //   PULSE → pulse the leavePin (if configured)
+                    // RELAY auto-reverts via fireSetpointAction's own logic
+                    // but only if explicitly called — today we don't, to
+                    // preserve historical behaviour for relay setpoints.
+                    if (setpoints[i].actionType == 1 || setpoints[i].actionType == 2) {
                         if (fireSetpointAction(setpoints[i], rawValue, false))
                             return;
                     }
@@ -2040,20 +2240,37 @@ void handleCmd(const String& from, const String& cmdBody) {
         ESP.restart();
     }
     else if (action == "POLL") {
-        // Read all sensor pins and return bundled SDATA response
-        String sdata = "SDATA," + String(mesh.localID);
-        for (int i = 0; i < sensorCount; i++) {
-            int pin = sensorPins[i];
-            int value = readSensorPin(pin);
-            sdata += "," + String(pin) + ":" + String(value);
+        // Read all sensor pins. If the response would overflow the LoRa
+        // packet limit (~255 bytes after AES-GCM, hex, and mesh framing),
+        // split across multiple SDATA messages with a P<part>/<total> marker
+        // so the GUI can reassemble. Single-packet responses keep the
+        // pre-existing format (no marker) for backward compatibility.
+        //
+        // Budget: 8 pin entries per packet keeps plaintext under ~60 bytes
+        // (8 × ~7 chars max for analog), encrypted+hex+framed under ~180
+        // chars — safely below 255.
+        const int PINS_PER_PACKET = 8;
+        int parts = (sensorCount + PINS_PER_PACKET - 1) / PINS_PER_PACKET;
+        if (parts < 1) parts = 1;
+        for (int p = 0; p < parts; p++) {
+            String sdata = "SDATA," + String(mesh.localID);
+            if (parts > 1) sdata += ",P" + String(p + 1) + "/" + String(parts);
+            int start = p * PINS_PER_PACKET;
+            int end   = (start + PINS_PER_PACKET < sensorCount) ? start + PINS_PER_PACKET : sensorCount;
+            for (int i = start; i < end; i++) {
+                int pin = sensorPins[i];
+                int value = readSensorPin(pin);
+                sdata += "," + String(pin) + ":" + String(value);
+            }
+            mesh.cmdsExecuted++;
+            String mid = mesh.generateMsgID();
+            String hex = mesh.encryptMsg(sdata);
+            String payload = String(mesh.localID) + "," + from + "," + mid + "," +
+                             String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+            mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+            bleSend(sdata);
+            if (p + 1 < parts) delay(50);  // brief pause between packets
         }
-        mesh.cmdsExecuted++;
-        String mid = mesh.generateMsgID();
-        String hex = mesh.encryptMsg(sdata);
-        String payload = String(mesh.localID) + "," + from + "," + mid + "," +
-                         String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
-        mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
-        bleSend(sdata);
     }
     else if (action == "TIMER") {
         // TIMER,<pin>,ON,<seconds> | TIMER,<pin>,OFF,<seconds>
@@ -2064,18 +2281,43 @@ void handleCmd(const String& from, const String& cmdBody) {
         handleSetpointCmd(rest, from);
     }
     else if (action == "BEACON") {
-        String result = processBeaconCommand(rest);
-        bleSend(result);
-        // Cross-mesh response routing: when CMD,BEACON arrived over the
-        // air (from != "LOCAL"), the requesting gateway also needs to see
-        // the OK,BEACON,ADD,<slot>,<name> reply so its deploy-confirmation
-        // logic can flip rule.deploy_status to "confirmed". Wrap in the
-        // existing BEACONEVT pattern — gateway's BEACONEVT handler does
-        // bleSend(rest) which emits the OK reply onto its USB serial,
-        // where the Premium GUI's serial dispatcher picks it up via the
-        // note_beacon_add_ok() / note_beacon_add_err() path.
-        if (from != "LOCAL") {
-            notifyBeaconEvent(result, true);
+        // BEACON,LIST: server-push. Emit count, each rule, then an END
+        // marker. The GUI uses the END marker to decide done — so if the
+        // count header gets lost on the mesh, the GUI still completes
+        // once END arrives. (BEACONS,NONE alone for the empty case.)
+        if (rest == "LIST") {
+            int count = 0;
+            for (int i = 0; i < MAX_BEACON_RULES; i++)
+                if (beaconRules[i].active) count++;
+            if (count == 0) {
+                bleSend("BEACONS,NONE");
+                if (from != "LOCAL") notifyBeaconEvent("BEACONS,NONE", true);
+            } else {
+                String countMsg = "BEACONS," + String(count);
+                bleSend(countMsg);
+                if (from != "LOCAL") {
+                    notifyBeaconEvent(countMsg, true);
+                    delay(50);
+                }
+                for (int i = 0; i < MAX_BEACON_RULES; i++) {
+                    if (!beaconRules[i].active) continue;
+                    String ruleMsg = "BEACON,RULE," + formatBeaconRule(i);
+                    bleSend(ruleMsg);
+                    if (from != "LOCAL") {
+                        notifyBeaconEvent(ruleMsg, true);
+                        delay(50);
+                    }
+                }
+                bleSend("BEACONS,END");
+                if (from != "LOCAL") notifyBeaconEvent("BEACONS,END", true);
+            }
+        } else {
+            // BEACON,GET,<n>, BEACON,CLEAR, BEACON,DELETE,<n>, BEACON,ADD,... etc.
+            String result = processBeaconCommand(rest);
+            bleSend(result);
+            if (from != "LOCAL") {
+                notifyBeaconEvent(result, true);
+            }
         }
     }
     else if (action == "SENSOR") {
@@ -2741,8 +2983,26 @@ void processBleCommand(const String& line, bool fromSerial) {
         }
     }
     else if (line.startsWith("BEACON,")) {
-        String result = processBeaconCommand(line.substring(7));
-        bleSend(result);
+        String args = line.substring(7);
+        if (args == "LIST") {
+            // Server-push with end-marker. Matches the mesh-side path.
+            int count = 0;
+            for (int i = 0; i < MAX_BEACON_RULES; i++)
+                if (beaconRules[i].active) count++;
+            if (count == 0) {
+                bleSend("BEACONS,NONE");
+            } else {
+                bleSend("BEACONS," + String(count));
+                for (int i = 0; i < MAX_BEACON_RULES; i++) {
+                    if (!beaconRules[i].active) continue;
+                    bleSend("BEACON,RULE," + formatBeaconRule(i));
+                }
+                bleSend("BEACONS,END");
+            }
+        } else {
+            String result = processBeaconCommand(args);
+            bleSend(result);
+        }
     }
     else if (line == "NODES") {
         // Send full list of known nodes with routing info
@@ -2770,14 +3030,25 @@ void processBleCommand(const String& line, bool fromSerial) {
         bleSend("NODEEND");
     }
     else if (line == "POLL") {
-        // Poll all local sensors — return bundled SDATA
-        String sdata = "SDATA," + String(mesh.localID);
-        for (int i = 0; i < sensorCount; i++) {
-            int pin = sensorPins[i];
-            int value = readSensorPin(pin);
-            sdata += "," + String(pin) + ":" + String(value);
+        // Local POLL — splits the same way as the mesh one above for
+        // consistency. Single-packet responses keep the pre-existing
+        // format (no P<part>/<total> marker).
+        const int PINS_PER_PACKET = 8;
+        int parts = (sensorCount + PINS_PER_PACKET - 1) / PINS_PER_PACKET;
+        if (parts < 1) parts = 1;
+        for (int p = 0; p < parts; p++) {
+            String sdata = "SDATA," + String(mesh.localID);
+            if (parts > 1) sdata += ",P" + String(p + 1) + "/" + String(parts);
+            int start = p * PINS_PER_PACKET;
+            int end   = (start + PINS_PER_PACKET < sensorCount) ? start + PINS_PER_PACKET : sensorCount;
+            for (int i = start; i < end; i++) {
+                int pin = sensorPins[i];
+                int value = readSensorPin(pin);
+                sdata += "," + String(pin) + ":" + String(value);
+            }
+            bleSend(sdata);
+            if (p + 1 < parts) delay(50);
         }
-        bleSend(sdata);
     }
     else if (line.startsWith("POLL,")) {
         // Poll remote node's sensors over mesh: POLL,<targetNodeId>
@@ -3359,37 +3630,49 @@ void loadBeaconRules() {
     }
 }
 
+// Helper — serialise a single beacon rule by index. Used by both BEACON,GET
+// and (for backward compat) the old all-in-one BEACON,LIST format. Format
+// matches what BEACON,LIST used to emit for one entry, just standalone.
+static String formatBeaconRule(int i) {
+    String resp = String(i) + ":" + String(beaconRules[i].name) + ":";
+    if (beaconRules[i].uuid[0]) resp += String(beaconRules[i].uuid);
+    else                        resp += String(beaconRules[i].mac);
+    resp += ":" + String(beaconRules[i].rssiThresh) + "dBm";
+    if (beaconRules[i].actionType == 0)
+        resp += ":RELAY" + String(beaconRules[i].relayPin);
+    else if (beaconRules[i].actionType == 2)
+        resp += ":PULSE" + String(beaconRules[i].relayPin) +
+                ":" + String(beaconRules[i].revertMs) + "ms";
+    else
+        resp += ":MSG";
+    if (beaconRules[i].actionType == 0 && beaconRules[i].revertMs > 0)
+        resp += ":REVERT" + String(beaconRules[i].revertMs) + "ms";
+    if (beaconRules[i].actionType == 2 && beaconRules[i].leavePin > 0)
+        resp += ":LEAVE" + String(beaconRules[i].leavePin) +
+                "@" + String(beaconRules[i].leaveRssi) + "dBm" +
+                ":" + String(beaconRules[i].leavePulseMs) + "ms";
+    return resp;
+}
+
 String processBeaconCommand(const String& args) {
     if (args == "LIST") {
-        String resp = "BEACONS";
+        // Paginated: return count only. Caller (GUI) iterates BEACON,GET,<n>
+        // to fetch each rule's details. Previous all-in-one format could
+        // overflow the LoRa packet size when many rules were deployed.
         int count = 0;
-        for (int i = 0; i < MAX_BEACON_RULES; i++) {
-            if (!beaconRules[i].active) continue;
-            count++;
-            resp += "," + String(i) + ":" + String(beaconRules[i].name) + ":";
-            if (beaconRules[i].uuid[0]) resp += String(beaconRules[i].uuid);
-            else resp += String(beaconRules[i].mac);
-            resp += ":" + String(beaconRules[i].rssiThresh) + "dBm";
-            if (beaconRules[i].actionType == 0)
-                resp += ":RELAY" + String(beaconRules[i].relayPin);
-            else if (beaconRules[i].actionType == 2)
-                resp += ":PULSE" + String(beaconRules[i].relayPin) +
-                        ":" + String(beaconRules[i].revertMs) + "ms";
-            else
-                resp += ":MSG";
-            // For actionType == 2 the revertMs is the pulse duration, already
-            // printed inline above — only emit the legacy REVERT suffix for
-            // actionType == 0 (relay with auto-revert on beacon loss).
-            if (beaconRules[i].actionType == 0 && beaconRules[i].revertMs > 0)
-                resp += ":REVERT" + String(beaconRules[i].revertMs) + "ms";
-            // Phase 3: print the leave clause if configured.
-            if (beaconRules[i].actionType == 2 && beaconRules[i].leavePin > 0)
-                resp += ":LEAVE" + String(beaconRules[i].leavePin) +
-                        "@" + String(beaconRules[i].leaveRssi) + "dBm" +
-                        ":" + String(beaconRules[i].leavePulseMs) + "ms";
-        }
-        if (count == 0) resp += ",NONE";
-        return resp;
+        for (int i = 0; i < MAX_BEACON_RULES; i++)
+            if (beaconRules[i].active) count++;
+        if (count == 0) return "BEACONS,NONE";
+        return "BEACONS," + String(count);
+    }
+    if (args.startsWith("GET,")) {
+        // Fetch a single rule's details. Args: BEACON,GET,<slot> where slot
+        // is the rule index (0..MAX_BEACON_RULES-1). Returns the same per-rule
+        // format the old LIST used inline, just one rule per response.
+        int n = args.substring(4).toInt();
+        if (n < 0 || n >= MAX_BEACON_RULES) return "ERR,BEACON,GET,BADINDEX";
+        if (!beaconRules[n].active)         return "ERR,BEACON,GET,EMPTY";
+        return "BEACON,RULE," + formatBeaconRule(n);
     }
 
     if (args == "CLEAR") {
@@ -3629,6 +3912,7 @@ void loadConfig() {
         strncpy(mesh.localID, idBuf, NODE_ID_LEN + 1);
         uint8_t d[] = DEFAULT_RELAY_PINS; relayCount = sizeof(d)/sizeof(d[0]); memcpy(relayPins, d, relayCount);
         uint8_t s[] = DEFAULT_SENSOR_PINS; sensorCount = sizeof(s)/sizeof(s[0]); memcpy(sensorPins, s, sensorCount);
+        appendVirtualPinsToConfig();  // adds VIRTUAL_PINS to both lists
         // Don't saveConfig() yet — defer until after conflict scan in setup()
         return;
     }
@@ -3656,12 +3940,14 @@ void loadConfig() {
 
     // Pin config version check — if version doesn't match, reset to defaults
     // This catches old EEPROM with wrong pins (e.g., 19/20/33 on ESP32-S3)
-    #define PIN_CONFIG_VERSION 8  // v8: fix stale pins — saveConfig was missing after reset
+    #define PIN_CONFIG_VERSION 9  // v9: storage vpins 200-207 baked into DEFAULT_*_PINS,
+                                  //     MAX_*_CFG bumped 8/6 -> 16/16, EEPROM addr 410 -> 1700
     #define EEPROM_PIN_VER_ADDR 448  // After BLEPIN (443-446), safe gap
     uint8_t pinVer = EEPROM.read(EEPROM_PIN_VER_ADDR);
     if (pinVer != PIN_CONFIG_VERSION) {
         uint8_t d[] = DEFAULT_RELAY_PINS; relayCount = sizeof(d)/sizeof(d[0]); memcpy(relayPins, d, relayCount);
         uint8_t s[] = DEFAULT_SENSOR_PINS; sensorCount = sizeof(s)/sizeof(s[0]); memcpy(sensorPins, s, sensorCount);
+        appendVirtualPinsToConfig();  // adds VIRTUAL_PINS to both lists
         EEPROM.write(EEPROM_PIN_VER_ADDR, PIN_CONFIG_VERSION);
         saveConfig();  // Persist new pin defaults to EEPROM (was missing — caused stale pins)
         debugPrint("Pin config updated to v" + String(PIN_CONFIG_VERSION) + " — reset to board defaults");
@@ -3670,6 +3956,16 @@ void loadConfig() {
     // Load solar mode flag
     uint8_t solarByte = EEPROM.read(EEPROM_SOLAR_ADDR);
     solarMode = (solarByte == 1);
+
+    // Load storage virtual pins — persisted state-machine variables (see
+    // STORAGE_VPIN_BASE in Pins.h). EEPROM cells default to 0xFF after a
+    // fresh chip, so clamp any unwritten cell to 0 (0xFF is treated as
+    // "not set yet" for the boolean / digital interpretation these pins
+    // get from setDigital / readSensorPin).
+    for (int i = 0; i < STORAGE_VPIN_RESERVED; i++) {
+        uint8_t v = EEPROM.read(EEPROM_STORAGE_VPIN_ADDR + i);
+        storageVpinValues[i] = (v == 0xFF) ? 0 : v;
+    }
 
     // Load persisted SF (valid range 7-12, else use compile-time default)
     uint8_t storedSF = EEPROM.read(EEPROM_SF_ADDR);
