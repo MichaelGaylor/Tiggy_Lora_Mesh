@@ -631,6 +631,43 @@ struct SetpointRule {
 };
 SetpointRule setpoints[MAX_SETPOINTS];
 
+// ─── Counter primitive (PLC-style) ──────────────────────────
+// Modifies a target storage virtual pin on rising-edge events at up to
+// four trigger inputs (up, down, preset, reset). Persistence is FREE
+// because storage vpins (200..231) are already EEPROM-backed.
+//
+// Counts are bounded 0..255 because the storage-vpin backing store is
+// uint8_t. If wider counters are ever needed, that's an independent
+// widening (extend storageVpinValues to uint16_t — affects POLL output
+// format too) rather than a Counter design change.
+//
+// at_preset / at_zero semantics are NOT carried in this struct — they're
+// composed at the GUI level by feeding the target vpin into a downstream
+// SETPOINT (e.g. SETPOINT,200,GE,100,...). That keeps the firmware
+// primitive minimal and reuses existing setpoint hysteresis as the
+// "latched until reset" latch.
+#define MAX_COUNTERS 8
+#define COUNTER_MAX_VALUE 255   // uint8_t storage-vpin ceiling
+struct CounterRule {
+    bool active = false;
+    uint8_t targetVpin;     // 200..231 (STORAGE_VPIN_BASE + offset)
+    uint8_t mode;           // 0=UP, 1=DOWN, 2=UPDOWN
+    uint8_t upPin;          // 0 = unused
+    uint8_t downPin;        // 0 = unused
+    uint8_t presetPin;      // 0 = unused — rising edge loads presetValue
+    uint8_t resetPin;       // 0 = unused — rising edge zeros count
+    uint8_t presetValue;    // 0..255 (clamped to vpin storage width)
+    // Edge-detect state. Each is the last-seen logical value of the
+    // corresponding pin (0 or non-zero). Rising edge = was 0, now non-zero.
+    // Stored as int rather than bool to accommodate analog-read sources
+    // without truncating.
+    int lastUp;
+    int lastDown;
+    int lastPreset;
+    int lastReset;
+};
+CounterRule counters[MAX_COUNTERS];
+
 // ─── Solar Mode ─────────────────────────────────────────────
 // Deep low-power mode: OLED off, BLE deinited, ESP32 light-sleeps
 // between radio DIO1 interrupts. Radio stays in continuous RX.
@@ -2132,6 +2169,197 @@ void checkSetpoints() {
     }
 }
 
+// ─── Counter eval / management ──────────────────────────────
+// Helper: rising-edge detect against a stored last value. Reads the pin
+// (physical, sensor, or storage vpin — readSensorPin handles all three).
+// `pin == 0` means "no input wired" and never fires.
+static inline bool counterEdgeRose(uint8_t pin, int& lastVal) {
+    if (pin == 0) { lastVal = 0; return false; }
+    int v = readSensorPin(pin);
+    // Logical edge: was zero / unknown, now non-zero.
+    bool rose = (lastVal == 0 && v != 0);
+    lastVal = v;
+    return rose;
+}
+
+// Apply a clamped delta to the target storage vpin (0..COUNTER_MAX_VALUE).
+// Uses the existing storage-vpin path so the value is persisted to EEPROM
+// as a side-effect — same code paths the Logic Builder reads from for
+// "current value" display.
+static inline void counterApplyDelta(uint8_t vpin, int delta) {
+    int cur = (int)getStorageVpin(vpin);
+    int next = cur + delta;
+    if (next < 0) next = 0;
+    if (next > COUNTER_MAX_VALUE) next = COUNTER_MAX_VALUE;
+    setStorageVpin(vpin, (uint8_t)next);
+}
+static inline void counterSetValue(uint8_t vpin, int value) {
+    if (value < 0) value = 0;
+    if (value > COUNTER_MAX_VALUE) value = COUNTER_MAX_VALUE;
+    setStorageVpin(vpin, (uint8_t)value);
+}
+
+void checkCounters() {
+    for (int i = 0; i < MAX_COUNTERS; i++) {
+        CounterRule& c = counters[i];
+        if (!c.active) continue;
+
+        // Up / down deltas — mode gates whether the input is honoured.
+        // UP   (mode 0): only upPin matters.
+        // DOWN (mode 1): only downPin matters.
+        // UPDOWN (mode 2): both.
+        bool upRose    = counterEdgeRose(c.upPin,    c.lastUp);
+        bool downRose  = counterEdgeRose(c.downPin,  c.lastDown);
+        bool presetRose = counterEdgeRose(c.presetPin, c.lastPreset);
+        bool resetRose  = counterEdgeRose(c.resetPin,  c.lastReset);
+
+        if (presetRose) {
+            counterSetValue(c.targetVpin, c.presetValue);
+            bleSend("COUNTER,SET," + String(c.targetVpin) + "," + String(c.presetValue));
+            continue;  // Don't apply +/- in the same tick as a load.
+        }
+        if (resetRose) {
+            counterSetValue(c.targetVpin, 0);
+            bleSend("COUNTER,RESET," + String(c.targetVpin));
+            continue;
+        }
+        if (upRose && (c.mode == 0 || c.mode == 2)) {
+            counterApplyDelta(c.targetVpin, +1);
+            bleSend("COUNTER,UP," + String(c.targetVpin) + "," + String(getStorageVpin(c.targetVpin)));
+        }
+        if (downRose && (c.mode == 1 || c.mode == 2)) {
+            counterApplyDelta(c.targetVpin, -1);
+            bleSend("COUNTER,DOWN," + String(c.targetVpin) + "," + String(getStorageVpin(c.targetVpin)));
+        }
+    }
+}
+
+// COUNTER serial command dispatcher. Supports:
+//   COUNTER,ADD,<vpin>,<mode>,<up>,<down>,<preset>,<reset>,<preset_value>
+//     where mode = UP | DOWN | UPDOWN, pin args 0 = unused.
+//   COUNTER,LIST
+//   COUNTER,DELETE,<vpin>
+//   COUNTER,CLEAR
+String processCounterCommand(const String& args) {
+    String act = args;
+    int comma = act.indexOf(',');
+    String first = (comma >= 0) ? act.substring(0, comma) : act;
+    String rest  = (comma >= 0) ? act.substring(comma + 1) : "";
+    first.toUpperCase();
+
+    if (first == "CLEAR") {
+        for (int i = 0; i < MAX_COUNTERS; i++) counters[i].active = false;
+        return "OK,COUNTER,CLEAR";
+    }
+
+    if (first == "LIST") {
+        String resp = "COUNTERS";
+        int count = 0;
+        const char* modeStr[] = {"UP", "DOWN", "UPDOWN"};
+        for (int i = 0; i < MAX_COUNTERS; i++) {
+            if (!counters[i].active) continue;
+            count++;
+            resp += "," + String(counters[i].targetVpin) + ":" +
+                    String(counters[i].mode < 3 ? modeStr[counters[i].mode] : "?") + ":" +
+                    "up" + String(counters[i].upPin) + ":" +
+                    "dn" + String(counters[i].downPin) + ":" +
+                    "ps" + String(counters[i].presetPin) + ":" +
+                    "rs" + String(counters[i].resetPin) + ":" +
+                    "pv" + String(counters[i].presetValue) + ":" +
+                    "=" + String(getStorageVpin(counters[i].targetVpin));
+        }
+        if (count == 0) resp += ",NONE";
+        return resp;
+    }
+
+    if (first == "DELETE") {
+        int vpin = rest.toInt();
+        for (int i = 0; i < MAX_COUNTERS; i++) {
+            if (counters[i].active && counters[i].targetVpin == vpin) {
+                counters[i].active = false;
+                return "OK,COUNTER,DELETE," + String(vpin);
+            }
+        }
+        return "ERR,COUNTER,NOTFOUND";
+    }
+
+    if (first == "ADD") {
+        // <vpin>,<mode>,<up>,<down>,<preset>,<reset>,<preset_value>
+        int parts[8] = {0};
+        String tmp = rest;
+        // Mode is a string — peel off vpin first, then mode, then the rest as ints.
+        int c1 = tmp.indexOf(','); if (c1 < 0) return "ERR,COUNTER,FORMAT";
+        int vpin = tmp.substring(0, c1).toInt();
+        tmp = tmp.substring(c1 + 1);
+        int c2 = tmp.indexOf(','); if (c2 < 0) return "ERR,COUNTER,FORMAT";
+        String modeStr = tmp.substring(0, c2); modeStr.toUpperCase();
+        tmp = tmp.substring(c2 + 1);
+        uint8_t mode = 255;
+        if      (modeStr == "UP")     mode = 0;
+        else if (modeStr == "DOWN")   mode = 1;
+        else if (modeStr == "UPDOWN") mode = 2;
+        if (mode > 2) return "ERR,COUNTER,BADMODE";
+
+        // Parse remaining 5 ints: up, down, preset, reset, preset_value
+        int vals[5] = {0,0,0,0,0};
+        for (int k = 0; k < 5; k++) {
+            int ck = tmp.indexOf(',');
+            String tok = (ck >= 0) ? tmp.substring(0, ck) : tmp;
+            vals[k] = tok.toInt();
+            if (ck < 0) { if (k < 4) return "ERR,COUNTER,FORMAT"; break; }
+            tmp = tmp.substring(ck + 1);
+        }
+        int upPin = vals[0], dnPin = vals[1], psPin = vals[2], rsPin = vals[3];
+        int preset = vals[4];
+
+        if (!isStorageVpin(vpin)) return "ERR,COUNTER,BADVPIN";
+        if (preset < 0 || preset > COUNTER_MAX_VALUE) return "ERR,COUNTER,BADPRESET";
+
+        // Replace any existing counter on this vpin (one-counter-per-vpin rule);
+        // otherwise find a free slot.
+        int slot = -1;
+        for (int i = 0; i < MAX_COUNTERS; i++) {
+            if (counters[i].active && counters[i].targetVpin == vpin) { slot = i; break; }
+        }
+        if (slot < 0) {
+            for (int i = 0; i < MAX_COUNTERS; i++) {
+                if (!counters[i].active) { slot = i; break; }
+            }
+        }
+        if (slot < 0) return "ERR,COUNTER,FULL";
+
+        memset(&counters[slot], 0, sizeof(CounterRule));
+        counters[slot].active      = true;
+        counters[slot].targetVpin  = (uint8_t)vpin;
+        counters[slot].mode        = mode;
+        counters[slot].upPin       = (uint8_t)upPin;
+        counters[slot].downPin     = (uint8_t)dnPin;
+        counters[slot].presetPin   = (uint8_t)psPin;
+        counters[slot].resetPin    = (uint8_t)rsPin;
+        counters[slot].presetValue = (uint16_t)preset;
+        return "OK,COUNTER,ADD," + String(vpin) + "," + modeStr +
+               "," + String(upPin) + "," + String(dnPin) + "," +
+               String(psPin) + "," + String(rsPin) + "," + String(preset);
+    }
+
+    return "ERR,COUNTER,UNKNOWN";
+}
+
+void handleCounterBle(const String& args) {
+    String resp = processCounterCommand(args);
+    bleSend(resp);
+}
+void handleCounterCmd(const String& args, const String& from) {
+    String resp = processCounterCommand(args);
+    mesh.cmdsExecuted++;
+    String mid = mesh.generateMsgID();
+    String hex = mesh.encryptMsg(resp);
+    String payload = String(mesh.localID) + "," + from + "," + mid + "," +
+                     String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+    mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+    bleSend(resp);
+}
+
 // ─── Binary SDATA encoding ──────────────────────────────────
 // Base64 encoder (std alphabet, no line wrap). ~30 lines, no dependency.
 static const char B64CHARS[] =
@@ -2352,6 +2580,9 @@ void handleCmd(const String& from, const String& cmdBody) {
     }
     else if (action == "SETPOINT") {
         handleSetpointCmd(rest, from);
+    }
+    else if (action == "COUNTER") {
+        handleCounterCmd(rest, from);
     }
     else if (action == "BEACON") {
         // BEACON,LIST: server-push. Emit count, each rule, then an END
@@ -3164,6 +3395,9 @@ void processBleCommand(const String& line, bool fromSerial) {
     else if (line.startsWith("SETPOINT,")) {
         handleSetpointBle(line.substring(9));
     }
+    else if (line.startsWith("COUNTER,")) {
+        handleCounterBle(line.substring(8));
+    }
     else if (line.startsWith("PINMODE,")) {
         // PINMODE,<pin>,PULSE|ANALOG|AUTO — set sensor pin mode
         String args = line.substring(8); args.trim();
@@ -3618,7 +3852,8 @@ void handleSerialConfig() {
     else if (line.startsWith("POLL") || line.startsWith("TIMER,") ||
              line.startsWith("CMD,") || line.startsWith("MSG,") ||
              line.startsWith("SETPOINT,") || line.startsWith("AUTOPOLL,") ||
-             line.startsWith("BEACON,") || line.startsWith("BLEPIN,")) {
+             line.startsWith("BEACON,") || line.startsWith("BLEPIN,") ||
+             line.startsWith("COUNTER,")) {
         processBleCommand(line, true);  // fromSerial=true: skip BLE PIN check
     }
     else Serial.println("Commands: ID xxxx | KEY xxx... | Example RELAY 2,4,12 | SENSOR 34,36 | GPS <tx>,<rx> | GPS OFF | STATUS | SAVE | RESET | GATEWAY ON/OFF | AUTOPOLL <id> <sec> | PINMODE <pin> PULSE|AUTO"
@@ -4465,6 +4700,7 @@ void loop() {
         ioExpandPoll();
         updatePulseRates();
         checkSetpoints();
+        checkCounters();
         readGPS();
         broadcastGPS();
         executeAutoPoll();
@@ -4595,10 +4831,11 @@ void loop() {
     processTimers();
     checkPulseTimers();   // Phase 1: clear pins whose pulse deadline has passed
 
-    // 8. IO expansion, pulse rates, setpoint rules
+    // 8. IO expansion, pulse rates, setpoint rules, counters
     ioExpandPoll();
     updatePulseRates();
     checkSetpoints();
+    checkCounters();
 
     // 9. GPS read + broadcast
     readGPS();
