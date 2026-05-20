@@ -243,6 +243,103 @@ uint16_t getStorageVpin(int pin) {
     return storageVpinValues[idx];
 }
 
+// Wipe all storage vpins back to 0. Used by PLC,CLEAR so an oscillator
+// (TIMER PULSE on a storage vpin) doesn't stay latched at its last value
+// after the rule that owned it has been removed — otherwise SETPOINT,GE,1
+// would still see a stale 1 in the vpin and re-fire downstream actions.
+// setStorageVpin() skips the EEPROM write when value is already 0, so this
+// is safe to call on every deploy without burning flash on idle vpins.
+void clearAllStorageVpins() {
+    for (int i = 0; i < STORAGE_VPIN_RESERVED; i++) {
+        setStorageVpin(STORAGE_VPIN_BASE + i, 0);
+    }
+}
+
+// ─── Scratch virtual pins (compiler-allocated, RAM only) ────────────
+// Range [SCRATCH_VPIN_BASE, SCRATCH_VPIN_BASE + SCRATCH_VPIN_RESERVED).
+// These are the *anonymous wires* between PLC blocks — the compiler picks
+// them automatically when a block needs an output cell but the user hasn't
+// asked for it to be persistent. RAM only: no EEPROM read/write, no
+// flash wear, lost on reboot (the next scan recomputes them from scratch).
+//
+// The storage range (V200-V231) stays reserved for explicit user data —
+// the only way to write there is via a Storage Vpin block placed on the
+// GUI canvas, naming the exact vpin number. Counter / Latch / Compare /
+// Logic / Scale / Timer outputs go to scratch unless the user wires a
+// Storage Vpin block downstream of them.
+#ifndef SCRATCH_VPIN_BASE
+#define SCRATCH_VPIN_BASE 232
+#endif
+#ifndef SCRATCH_VPIN_RESERVED
+#define SCRATCH_VPIN_RESERVED 24
+#endif
+uint16_t scratchVpinValues[SCRATCH_VPIN_RESERVED] = {0};
+
+inline bool isScratchVpin(int pin) {
+    return pin >= SCRATCH_VPIN_BASE &&
+           pin <  SCRATCH_VPIN_BASE + SCRATCH_VPIN_RESERVED;
+}
+
+void setScratchVpin(int pin, uint16_t val) {
+    int idx = pin - SCRATCH_VPIN_BASE;
+    if (idx < 0 || idx >= SCRATCH_VPIN_RESERVED) return;
+    scratchVpinValues[idx] = val;
+}
+
+uint16_t getScratchVpin(int pin) {
+    int idx = pin - SCRATCH_VPIN_BASE;
+    if (idx < 0 || idx >= SCRATCH_VPIN_RESERVED) return 0;
+    return scratchVpinValues[idx];
+}
+
+void clearAllScratchVpins() {
+    for (int i = 0; i < SCRATCH_VPIN_RESERVED; i++) scratchVpinValues[i] = 0;
+}
+
+// Unified vpin set/get. Callers don't need to know which range they're
+// hitting; this dispatches based on pin number. Anything outside both
+// ranges is a no-op for set, returns 0 for get — that's safe because the
+// firmware's pin validators reject those pins upstream.
+inline void setVpinValue(int pin, uint16_t val) {
+    if (isScratchVpin(pin))       setScratchVpin(pin, val);
+    else if (isStorageVpin(pin))  setStorageVpin(pin, val);
+}
+
+inline uint16_t getVpinValue(int pin) {
+    if (isScratchVpin(pin))       return getScratchVpin(pin);
+    if (isStorageVpin(pin))       return getStorageVpin(pin);
+    return 0;
+}
+
+// True if pin can be the input or output of a PLC primitive — covers
+// configurable hardware pins, storage vpins (200-231) AND scratch vpins
+// (232-255). Used by LOGIC/LATCH/SCALE/SETPOINT validators.
+inline bool isPlcPinValid(int pin) {
+    return isScratchVpin(pin) || isStorageVpin(pin);
+    // Note: callers also accept hardware pins separately via isPinConfigurable.
+}
+
+// ─── PLC activity stats — proof of life for the GUI ────────────────
+// Incremented as the firmware's primitive scans run. The GUI polls
+// STATUS,PLC every few seconds; if the counters are advancing, the rule
+// is actually executing (not just sitting installed). Reset on boot and
+// on PLC,CLEAR.
+struct PlcStats {
+    uint32_t scanTicks   = 0;  // Total times the primitive scans ran
+    uint32_t logicFires  = 0;  // LOGIC outputs that changed value
+    uint32_t latchFires  = 0;
+    uint32_t scaleFires  = 0;
+    uint32_t counterFires= 0;
+    uint32_t timerFires  = 0;  // Timer rising/falling edges
+    uint32_t setpointFires = 0; // Setpoint actions actually dispatched
+    uint32_t lastFireMs  = 0;  // millis() of the last setpoint fire
+};
+PlcStats plcStats;
+
+inline void plcResetStats() {
+    plcStats = PlcStats();
+}
+
 // Append VIRTUAL_PINS (defined per-board or globally in Pins.h, default
 // {200..207}) onto BOTH relayPins[] and sensorPins[], skipping duplicates
 // and respecting MAX_*_CFG. Called from loadConfig on first boot and after
@@ -287,6 +384,9 @@ static int readSensorPin(int pin) {
     // Storage virtual pins 200-231: in-firmware state variables (persisted to EEPROM).
     // Read returns the last value set via CMD,SET or BEACON,ADD RELAY action.
     if (isStorageVpin(pin)) return (int)getStorageVpin(pin);
+    // Scratch virtual pins 232-255: RAM-only, compiler-allocated "wires"
+    // between PLC blocks. Reads the last value written by a primitive.
+    if (isScratchVpin(pin)) return (int)getScratchVpin(pin);
     // Virtual pins 100-115: IO expansion board
     if (pin >= IO_EXPAND_VPIN_BASE && pin < IO_EXPAND_VPIN_BASE + IO_EXPAND_MAX_PINS)
         return ioExpandRead(pin);
@@ -1559,17 +1659,18 @@ bool isVPin(int pin) {
 // EEPROM). Execution guards that need a raw hardware pin (e.g. GPS config)
 // keep calling isPinSafe() directly.
 bool isPinConfigurable(int pin) {
-    return isPinSafe(pin) || isVPin(pin) || isStorageVpin(pin);
+    return isPinSafe(pin) || isVPin(pin) || isStorageVpin(pin) || isScratchVpin(pin);
 }
 
 // Drive an output — local GPIO via digitalWrite, expansion pin via UART !R
-// command, or storage vpin via in-firmware array + EEPROM. Safe to call for
-// any pin that passed isPinConfigurable. On boards without an expansion
-// wired (IO_EXPAND_TX < 0), the vpin branch calls ioExpandSetRelay which
+// command, storage vpin via in-firmware array + EEPROM, or scratch vpin
+// via in-firmware RAM. Safe to call for any pin that passed
+// isPinConfigurable. On boards without an expansion wired
+// (IO_EXPAND_TX < 0), the vpin branch calls ioExpandSetRelay which
 // is a no-op — no hardware effect, no crash.
 void setDigital(int pin, int val) {
-    if (isStorageVpin(pin)) {
-        setStorageVpin(pin, val ? 1 : 0);
+    if (isStorageVpin(pin) || isScratchVpin(pin)) {
+        setVpinValue(pin, val ? 1 : 0);
     } else if (isVPin(pin)) {
         ioExpandSetRelay(pin - IO_EXPAND_VPIN_BASE, val);
     } else {
@@ -1577,11 +1678,11 @@ void setDigital(int pin, int val) {
     }
 }
 
-// Configure an output. Vpins and storage-vpins skip pinMode — there is no
-// physical GPIO behind them. Calling pinMode with a non-existent pin on
-// the main MCU is undefined; this guard avoids it.
+// Configure an output. Vpins, storage-vpins, and scratch-vpins skip
+// pinMode — there is no physical GPIO behind them.
 void setupDigitalOutput(int pin) {
-    if (!isVPin(pin) && !isStorageVpin(pin)) pinMode(pin, OUTPUT);
+    if (!isVPin(pin) && !isStorageVpin(pin) && !isScratchVpin(pin))
+        pinMode(pin, OUTPUT);
 }
 
 void setupGPIO() {
@@ -1857,9 +1958,25 @@ String processSetpointCommand(const String& args) {
         }
     }
 
+    // Replace any existing setpoint on the same (sensorPin, op) tuple before
+    // falling back to the first free slot. Without this, sending the same
+    // SETPOINT twice (e.g. user re-deploys the rule after editing the
+    // threshold) silently consumes a second slot and eventually returns
+    // ERR,SETPOINT,FULL — matching the replace semantics that COUNTER /
+    // LOGIC / LATCH / SCALE / TIMER already implement on their key vpin.
     int slot = -1;
     for (int i = 0; i < MAX_SETPOINTS; i++) {
-        if (!setpoints[i].active) { slot = i; break; }
+        if (setpoints[i].active &&
+            setpoints[i].sensorPin == sensorPin &&
+            setpoints[i].op        == op) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        for (int i = 0; i < MAX_SETPOINTS; i++) {
+            if (!setpoints[i].active) { slot = i; break; }
+        }
     }
     if (slot < 0) return "ERR,SETPOINT,FULL";
 
@@ -1972,6 +2089,8 @@ void processTimers() {
             setDigital(timers[i].pin, timers[i].onAction ? 1 : 0);
             debugPrint("TIMER: pin " + String(timers[i].pin) + " -> " + String(timers[i].onAction ? "ON" : "OFF"));
             bleSend("TIMER,FIRED," + String(timers[i].pin) + "," + String(timers[i].onAction ? "ON" : "OFF"));
+            plcStats.timerFires++;
+            plcStats.lastFireMs = millis();
             timers[i].active = false;
         } else {
             // Pulse timer — alternate ON/OFF phases
@@ -1995,6 +2114,8 @@ void processTimers() {
                 setDigital(timers[i].pin, 1);
                 timers[i].phase = 1;
                 timers[i].nextAt = now + (unsigned long)timers[i].onSec * 1000UL;
+                plcStats.timerFires++;
+                plcStats.lastFireMs = millis();
             }
         }
     }
@@ -2005,6 +2126,8 @@ void processTimers() {
 bool fireSetpointAction(SetpointRule& sp, int value, bool triggered) {
     String target = String(sp.targetNode);
     bool isLocal = (target == String(mesh.localID));
+    plcStats.setpointFires++;
+    plcStats.lastFireMs = millis();
 
     if (sp.actionType == 0) {
         // RELAY action.
@@ -2205,21 +2328,23 @@ static inline bool counterEdgeRose(uint8_t pin, int& lastVal) {
     return rose;
 }
 
-// Apply a clamped delta to the target storage vpin (0..COUNTER_MAX_VALUE).
-// Uses the existing storage-vpin path so the value is persisted to EEPROM
-// as a side-effect — same code paths the Logic Builder reads from for
-// "current value" display.
+// Apply a clamped delta to the target vpin (0..COUNTER_MAX_VALUE).
+// Uses the unified vpin dispatcher so the value lands in either storage
+// (EEPROM-backed, queryable, persists across reboot) or scratch (RAM,
+// reset on reboot) depending on which range the compiler assigned.
 static inline void counterApplyDelta(uint8_t vpin, int delta) {
-    int cur = (int)getStorageVpin(vpin);
+    int cur = (int)getVpinValue(vpin);
     int next = cur + delta;
     if (next < 0) next = 0;
     if (next > COUNTER_MAX_VALUE) next = COUNTER_MAX_VALUE;
-    setStorageVpin(vpin, (uint16_t)next);
+    setVpinValue(vpin, (uint16_t)next);
+    plcStats.counterFires++;
 }
 static inline void counterSetValue(uint8_t vpin, int value) {
     if (value < 0) value = 0;
     if (value > COUNTER_MAX_VALUE) value = COUNTER_MAX_VALUE;
-    setStorageVpin(vpin, (uint16_t)value);
+    setVpinValue(vpin, (uint16_t)value);
+    plcStats.counterFires++;
 }
 
 void checkCounters() {
@@ -2335,7 +2460,7 @@ String processCounterCommand(const String& args) {
         int upPin = vals[0], dnPin = vals[1], psPin = vals[2], rsPin = vals[3];
         int preset = vals[4];
 
-        if (!isStorageVpin(vpin)) return "ERR,COUNTER,BADVPIN";
+        if (!(isStorageVpin(vpin) || isScratchVpin(vpin))) return "ERR,COUNTER,BADVPIN";
         if (preset < 0 || preset > COUNTER_MAX_VALUE) return "ERR,COUNTER,BADPRESET";
 
         // Replace any existing counter on this vpin (one-counter-per-vpin rule);
@@ -2438,7 +2563,12 @@ void checkLogic() {
             case 8: out = v1 == (int)r.input1Thresh; break;  // EQ
             case 9: out = v1 != (int)r.input1Thresh; break;  // NE
         }
-        setStorageVpin(r.outputVpin, out ? 1 : 0);
+        uint16_t prev = getVpinValue(r.outputVpin);
+        uint16_t next = out ? 1 : 0;
+        if (prev != next) {
+            setVpinValue(r.outputVpin, next);
+            plcStats.logicFires++;
+        }
     }
 }
 
@@ -2500,15 +2630,35 @@ String processLogicCommand(const String& args) {
         else if (opStr == "NE")  op = 9;
         if (op > 9) return "ERR,LOGIC,BADOP";
 
+        // Compact form: NOT and single-input compare ops (GE/LE/GT/LT/EQ/NE)
+        // don't use in2/thr2, so the encoder may omit them. We must accept
+        // both 2-value (in1, thr1) and 4-value (in1, thr1, in2, thr2)
+        // forms and zero-fill the missing tail so the rule struct stays
+        // valid. AND/OR/XOR always require 4 values (need both inputs).
         int vals[4] = {0,0,0,0};
-        for (int k = 0; k < 4; k++) {
+        int parsed = 0;
+        for (int k = 0; k < 4 && tmp.length() > 0; k++) {
             int ck = tmp.indexOf(',');
             String tok = (ck >= 0) ? tmp.substring(0, ck) : tmp;
             vals[k] = tok.toInt();
-            if (ck < 0) { if (k < 3) return "ERR,LOGIC,FORMAT"; break; }
+            parsed++;
+            if (ck < 0) break;
             tmp = tmp.substring(ck + 1);
         }
-        if (!isStorageVpin(vpin)) return "ERR,LOGIC,BADVPIN";
+        if (parsed < 2) return "ERR,LOGIC,FORMAT";
+        bool needsIn2 = (op == 0 || op == 1 || op == 3);  // AND/OR/XOR
+        if (needsIn2 && parsed < 4) return "ERR,LOGIC,FORMAT";
+
+        if (!(isStorageVpin(vpin) || isScratchVpin(vpin))) return "ERR,LOGIC,BADVPIN";
+        // Input pins: 0 is a sentinel ("unwired — treat as 0"); anything else
+        // must be a real configurable pin or a storage vpin we can read.
+        // Without this check, the PLC compiler could ship a bad pin number
+        // (typo, stale board_pins.json) and the rule would silently treat
+        // every read as 0 — producing a permanently-FALSE LOGIC,AND or a
+        // permanently-TRUE LOGIC,NOT with no diagnostic.
+        if (vals[0] != 0 && !isPinConfigurable(vals[0])) return "ERR,LOGIC,BADIN1";
+        // NOT only uses input1; input2 is unused for op == NOT (2).
+        if (op != 2 && vals[2] != 0 && !isPinConfigurable(vals[2])) return "ERR,LOGIC,BADIN2";
 
         int slot = -1;
         for (int i = 0; i < MAX_LOGIC_RULES; i++) {
@@ -2572,8 +2722,8 @@ void checkLatches() {
         bool sRose = (r.lastSet   <  (int)r.setThresh)   && (sNow >= (int)r.setThresh);
         bool rRose = (r.lastReset <  (int)r.resetThresh) && (rNow >= (int)r.resetThresh);
         // Reset has priority (PLC convention for SR latch with reset dominant).
-        if (rRose)      setStorageVpin(r.outputVpin, 0);
-        else if (sRose) setStorageVpin(r.outputVpin, 1);
+        if (rRose)      { setVpinValue(r.outputVpin, 0); plcStats.latchFires++; }
+        else if (sRose) { setVpinValue(r.outputVpin, 1); plcStats.latchFires++; }
         r.lastSet   = sNow;
         r.lastReset = rNow;
     }
@@ -2626,7 +2776,12 @@ String processLatchCommand(const String& args) {
             tmp = tmp.substring(ck + 1);
         }
         int vpin = vals[0];
-        if (!isStorageVpin(vpin)) return "ERR,LATCH,BADVPIN";
+        if (!(isStorageVpin(vpin) || isScratchVpin(vpin))) return "ERR,LATCH,BADVPIN";
+        // Set/Reset pin sentinels: 0 means "unwired". Anything non-zero must
+        // be a real configurable pin or a storage vpin so the rule does
+        // something measurable. See LOGIC,BADIN1 rationale.
+        if (vals[1] != 0 && !isPinConfigurable(vals[1])) return "ERR,LATCH,BADSET";
+        if (vals[3] != 0 && !isPinConfigurable(vals[3])) return "ERR,LATCH,BADRESET";
 
         int slot = -1;
         for (int i = 0; i < MAX_LATCH_RULES; i++) {
@@ -2683,7 +2838,11 @@ void checkScales() {
         long out = (long)((float)raw * r.factor) + r.offset;
         if (out < 0)     out = 0;
         if (out > 65535) out = 65535;
-        setStorageVpin(r.outputVpin, (uint16_t)out);
+        uint16_t prev = getVpinValue(r.outputVpin);
+        if (prev != (uint16_t)out) {
+            setVpinValue(r.outputVpin, (uint16_t)out);
+            plcStats.scaleFires++;
+        }
     }
 }
 
@@ -2735,8 +2894,13 @@ String processScaleCommand(const String& args) {
         float factor = tmp.substring(0, c3).toFloat();
         int offset = tmp.substring(c3 + 1).toInt();
 
-        if (!isStorageVpin(vpin)) return "ERR,SCALE,BADVPIN";
+        if (!(isStorageVpin(vpin) || isScratchVpin(vpin))) return "ERR,SCALE,BADVPIN";
         if (offset < -32768 || offset > 32767) return "ERR,SCALE,BADOFFSET";
+        // 0 is the sentinel for "unwired input — read as 0 every tick".
+        // Any non-zero input pin must be measurable. Without this check,
+        // a typo'd sensor pin produces a permanently-zero output vpin with
+        // no diagnostic.
+        if (inPin != 0 && !isPinConfigurable(inPin)) return "ERR,SCALE,BADIN";
 
         int slot = -1;
         for (int i = 0; i < MAX_SCALE_RULES; i++) {
@@ -2814,6 +2978,22 @@ String processPlcCommand(const String& args) {
     verb.trim();
     verb.toUpperCase();
 
+    // STATUS — proof-of-life query. Returns counters the GUI watches to
+    // confirm a deployed rule is actually executing, not just sitting
+    // installed. Lightweight (no flash reads, no LoRa TX). The GUI polls
+    // this every few seconds for a node it's "running" a rule on; if any
+    // counter advances between polls, the rule is alive.
+    if (verb == "STATUS") {
+        return String("OK,PLC,STATUS,scans=")    + String(plcStats.scanTicks)
+             + ",logic="                          + String(plcStats.logicFires)
+             + ",latch="                          + String(plcStats.latchFires)
+             + ",scale="                          + String(plcStats.scaleFires)
+             + ",counter="                        + String(plcStats.counterFires)
+             + ",timer="                          + String(plcStats.timerFires)
+             + ",setpoint="                       + String(plcStats.setpointFires)
+             + ",lastFireMs="                     + String(plcStats.lastFireMs);
+    }
+
     // CLEAR — wipes all 6 PLC tables in one shot. Each individual CLEAR is
     // idempotent so order doesn't matter and partial failure shouldn't happen.
     if (verb == "CLEAR") {
@@ -2823,6 +3003,9 @@ String processPlcCommand(const String& args) {
         processLatchCommand("CLEAR");
         processScaleCommand("CLEAR");
         processTimerCommand("CLEAR");
+        clearAllStorageVpins();
+        clearAllScratchVpins();
+        plcResetStats();
         return "OK,PLC,CLEAR";
     }
 
@@ -2852,6 +3035,9 @@ String processPlcCommand(const String& args) {
         processLatchCommand("CLEAR");
         processScaleCommand("CLEAR");
         processTimerCommand("CLEAR");
+        clearAllStorageVpins();
+        clearAllScratchVpins();
+        plcResetStats();
     }
 
     int count = 0;
@@ -2864,17 +3050,69 @@ String processPlcCommand(const String& args) {
         if (tok.length() < 2 || tok.charAt(1) != ',') {
             return "ERR,PLC,DEPLOY," + String(count) + ",BADTOK";
         }
-        char tag = toupper(tok.charAt(0));
+        // Tags are CASE-SENSITIVE here. Uppercase legacy tags are the
+        // original verbose forms (S/C/L/K/X/T → SETPOINT/COUNTER/...).
+        // Lowercase tags are compact-encoding shortcuts that pre-expand
+        // into the verbose form before dispatch — they always boil down
+        // to the same processXxxCommand handlers so backwards
+        // compatibility is preserved.
+        //   p,<vpin>,<pin>,<ms>             → S,<vpin>,GE,1,PULSE,<pin>,<ms>
+        //   m,<vpin>,<msg>[,<msgFalse>]     → S,<vpin>,GE,1,MSG,<msg>[,<msgFalse>]
+        //   r,<vpin>,<target>,<pin>,<act>   → S,<vpin>,GE,1,<target>,<pin>,<act>
+        //   q,<vpin>,<pin>,<ms>             → S,<vpin>,LT,1,PULSE,<pin>,<ms> (inverse)
+        //   w,<vpin>,<msg>[,<msgFalse>]     → S,<vpin>,LT,1,MSG,<msg>[,<msgFalse>]
+        // The compact forms shave 5-10 bytes per setpoint, getting most
+        // rules into one LoRa packet on a busy mesh.
+        char rawTag = tok.charAt(0);
+        char tag = (rawTag >= 'a' && rawTag <= 'z') ? rawTag : toupper(rawTag);
         String tail = tok.substring(2);  // past 'X,'
 
         String resp;
         switch (tag) {
+            // ── Verbose (legacy) tags ──
             case 'S': resp = processSetpointCommand(tail); break;
             case 'C': resp = processCounterCommand("ADD," + tail); break;
             case 'L': resp = processLogicCommand("ADD," + tail); break;
             case 'K': resp = processLatchCommand("ADD," + tail); break;
             case 'X': resp = processScaleCommand("ADD," + tail); break;
             case 'T': resp = processTimerCommand(tail); break;
+
+            // ── Compact setpoint shortcuts ──
+            // 'p' / 'q': pulse-action setpoint on high/low. tail is
+            // <vpin>,<pin>,<ms>. Expand to a SETPOINT line.
+            case 'p':
+            case 'q': {
+                int c1 = tail.indexOf(',');
+                if (c1 <= 0) { resp = "ERR,SETPOINT,FORMAT"; break; }
+                String vpin = tail.substring(0, c1);
+                String rest2 = tail.substring(c1 + 1);
+                String spOp = (tag == 'p') ? "GE" : "LT";
+                resp = processSetpointCommand(vpin + "," + spOp + ",1,PULSE," + rest2);
+                break;
+            }
+            // 'm' / 'w': msg-action setpoint on high/low. tail is
+            // <vpin>,<msgTrue>[,<msgFalse>]
+            case 'm':
+            case 'w': {
+                int c1 = tail.indexOf(',');
+                if (c1 <= 0) { resp = "ERR,SETPOINT,FORMAT"; break; }
+                String vpin = tail.substring(0, c1);
+                String rest2 = tail.substring(c1 + 1);
+                String spOp = (tag == 'm') ? "GE" : "LT";
+                resp = processSetpointCommand(vpin + "," + spOp + ",1,MSG," + rest2);
+                break;
+            }
+            // 'r': relay-action setpoint on high. tail is
+            // <vpin>,<target>,<pin>,<action>
+            case 'r': {
+                int c1 = tail.indexOf(',');
+                if (c1 <= 0) { resp = "ERR,SETPOINT,FORMAT"; break; }
+                String vpin = tail.substring(0, c1);
+                String rest2 = tail.substring(c1 + 1);
+                resp = processSetpointCommand(vpin + ",GE,1," + rest2);
+                break;
+            }
+
             default:
                 return "ERR,PLC,DEPLOY," + String(count) + ",BADTAG";
         }
@@ -5254,6 +5492,7 @@ void loop() {
         checkLogic();
         checkLatches();
         checkScales();
+        plcStats.scanTicks++;
         readGPS();
         broadcastGPS();
         executeAutoPoll();
