@@ -2414,21 +2414,26 @@ void checkLogic() {
     for (int i = 0; i < MAX_LOGIC_RULES; i++) {
         LogicRule& r = logicRules[i];
         if (!r.active) continue;
-        bool in1 = false, in2 = false;
-        if (r.input1Pin > 0) {
-            int v = readSensorPin(r.input1Pin);
-            in1 = (v >= (int)r.input1Thresh);
-        }
-        if (r.input2Pin > 0) {
-            int v = readSensorPin(r.input2Pin);
-            in2 = (v >= (int)r.input2Thresh);
-        }
+        // Read raw values once — comparison ops need them, boolean ops
+        // need the boolean form.
+        int v1 = (r.input1Pin > 0) ? readSensorPin(r.input1Pin) : 0;
+        int v2 = (r.input2Pin > 0) ? readSensorPin(r.input2Pin) : 0;
+        bool in1 = (v1 >= (int)r.input1Thresh);
+        bool in2 = (v2 >= (int)r.input2Thresh);
         bool out = false;
         switch (r.op) {
-            case 0: out = in1 && in2; break;
-            case 1: out = in1 || in2; break;
-            case 2: out = !in1;       break;
-            case 3: out = in1 != in2; break;
+            case 0: out = in1 && in2; break;            // AND
+            case 1: out = in1 || in2; break;            // OR
+            case 2: out = !in1;       break;            // NOT (in2 ignored)
+            case 3: out = in1 != in2; break;            // XOR
+            // Single-input comparison ops — deploy target for the GUI's
+            // Compare block. in1Thresh is the comparison value; in2 ignored.
+            case 4: out = v1 >= (int)r.input1Thresh; break;  // GE
+            case 5: out = v1 <= (int)r.input1Thresh; break;  // LE
+            case 6: out = v1 >  (int)r.input1Thresh; break;  // GT
+            case 7: out = v1 <  (int)r.input1Thresh; break;  // LT
+            case 8: out = v1 == (int)r.input1Thresh; break;  // EQ
+            case 9: out = v1 != (int)r.input1Thresh; break;  // NE
         }
         setStorageVpin(r.outputVpin, out ? 1 : 0);
     }
@@ -2446,14 +2451,14 @@ String processLogicCommand(const String& args) {
         return "OK,LOGIC,CLEAR";
     }
     if (first == "LIST") {
-        const char* opStr[] = {"AND", "OR", "NOT", "XOR"};
+        const char* opStr[] = {"AND","OR","NOT","XOR","GE","LE","GT","LT","EQ","NE"};
         String resp = "LOGIC";
         int count = 0;
         for (int i = 0; i < MAX_LOGIC_RULES; i++) {
             if (!logicRules[i].active) continue;
             count++;
             resp += "," + String(logicRules[i].outputVpin) + ":" +
-                    String(logicRules[i].op < 4 ? opStr[logicRules[i].op] : "?") + ":" +
+                    String(logicRules[i].op < 10 ? opStr[logicRules[i].op] : "?") + ":" +
                     "i1=" + String(logicRules[i].input1Pin) + ">=" + String(logicRules[i].input1Thresh) + ":" +
                     "i2=" + String(logicRules[i].input2Pin) + ">=" + String(logicRules[i].input2Thresh) + ":" +
                     "=" + String(getStorageVpin(logicRules[i].outputVpin));
@@ -2484,7 +2489,13 @@ String processLogicCommand(const String& args) {
         else if (opStr == "OR")  op = 1;
         else if (opStr == "NOT") op = 2;
         else if (opStr == "XOR") op = 3;
-        if (op > 3) return "ERR,LOGIC,BADOP";
+        else if (opStr == "GE")  op = 4;
+        else if (opStr == "LE")  op = 5;
+        else if (opStr == "GT")  op = 6;
+        else if (opStr == "LT")  op = 7;
+        else if (opStr == "EQ")  op = 8;
+        else if (opStr == "NE")  op = 9;
+        if (op > 9) return "ERR,LOGIC,BADOP";
 
         int vals[4] = {0,0,0,0};
         for (int k = 0; k < 4; k++) {
