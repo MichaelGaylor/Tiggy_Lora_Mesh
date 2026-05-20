@@ -667,7 +667,10 @@ SetpointRule setpoints[MAX_SETPOINTS];
 // primitive minimal and reuses existing setpoint hysteresis as the
 // "latched until reset" latch.
 #define MAX_COUNTERS 8
-#define COUNTER_MAX_VALUE 255   // uint8_t storage-vpin ceiling
+// Counter ceiling. Storage vpins are now uint16 so this can go to 65535,
+// matching the SCALE/SETPOINT input range. The user-visible field is also
+// uint16 in the GUI so they round-trip cleanly.
+#define COUNTER_MAX_VALUE 65535
 struct CounterRule {
     bool active = false;
     uint8_t targetVpin;     // 200..231 (STORAGE_VPIN_BASE + offset)
@@ -676,7 +679,7 @@ struct CounterRule {
     uint8_t downPin;        // 0 = unused
     uint8_t presetPin;      // 0 = unused — rising edge loads presetValue
     uint8_t resetPin;       // 0 = unused — rising edge zeros count
-    uint8_t presetValue;    // 0..255 (clamped to vpin storage width)
+    uint16_t presetValue;   // 0..65535 (matches widened vpin storage)
     // Edge-detect state. Each is the last-seen logical value of the
     // corresponding pin (0 or non-zero). Rising edge = was 0, now non-zero.
     // Stored as int rather than bool to accommodate analog-read sources
@@ -2211,12 +2214,12 @@ static inline void counterApplyDelta(uint8_t vpin, int delta) {
     int next = cur + delta;
     if (next < 0) next = 0;
     if (next > COUNTER_MAX_VALUE) next = COUNTER_MAX_VALUE;
-    setStorageVpin(vpin, (uint8_t)next);
+    setStorageVpin(vpin, (uint16_t)next);
 }
 static inline void counterSetValue(uint8_t vpin, int value) {
     if (value < 0) value = 0;
     if (value > COUNTER_MAX_VALUE) value = COUNTER_MAX_VALUE;
-    setStorageVpin(vpin, (uint8_t)value);
+    setStorageVpin(vpin, (uint16_t)value);
 }
 
 void checkCounters() {
@@ -2834,7 +2837,13 @@ String processPlcCommand(const String& args) {
     String rest  = (flagsEnd >= 0) ? afterVerb.substring(flagsEnd + 1) : "";
     flags.trim();
     flags.toUpperCase();
-    bool replace = (flags.indexOf('A') < 0);  // default = replace
+    // Strict flag check — accept only "R" (replace) or "A" (append),
+    // and empty (defaults to R). Permissive parsing was too easy to
+    // mis-key ('RA' silently appended) so we now reject unknowns.
+    bool replace;
+    if      (flags.length() == 0 || flags == "R") replace = true;
+    else if (flags == "A")                         replace = false;
+    else return "ERR,PLC,BADFLAGS";
 
     if (replace) {
         processSetpointCommand("CLEAR");
@@ -5375,11 +5384,14 @@ void loop() {
     processTimers();
     checkPulseTimers();   // Phase 1: clear pins whose pulse deadline has passed
 
-    // 8. IO expansion, pulse rates, setpoint rules, counters
+    // 8. IO expansion, pulse rates, all PLC primitives
     ioExpandPoll();
     updatePulseRates();
     checkSetpoints();
     checkCounters();
+    checkLogic();
+    checkLatches();
+    checkScales();
 
     // 9. GPS read + broadcast
     readGPS();
