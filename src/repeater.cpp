@@ -2797,15 +2797,23 @@ void handleScaleCmd(const String& args, const String& from) {
 // stops (any already-added primitives stay — caller can re-issue with
 // R flag to wipe and retry). On success: 'OK,PLC,DEPLOY,<count>'.
 String processPlcCommand(const String& args) {
-    String head = args;
-    int sep = args.indexOf(';');
-    if (sep >= 0) head = args.substring(0, sep);
-    head.trim();
-    head.toUpperCase();
+    // Extract just the verb (CLEAR or DEPLOY) — the part before the first
+    // comma OR semicolon, whichever comes first. Previous version pulled
+    // everything up to ';' which left flags glued to the verb (head =
+    // "DEPLOY,R" instead of "DEPLOY") and the comparison failed.
+    int commaSep = args.indexOf(',');
+    int semiSep  = args.indexOf(';');
+    int verbEnd;
+    if (commaSep < 0)         verbEnd = semiSep;
+    else if (semiSep < 0)     verbEnd = commaSep;
+    else                      verbEnd = (commaSep < semiSep) ? commaSep : semiSep;
+    String verb = (verbEnd >= 0) ? args.substring(0, verbEnd) : args;
+    verb.trim();
+    verb.toUpperCase();
 
     // CLEAR — wipes all 6 PLC tables in one shot. Each individual CLEAR is
     // idempotent so order doesn't matter and partial failure shouldn't happen.
-    if (head == "CLEAR") {
+    if (verb == "CLEAR") {
         processSetpointCommand("CLEAR");
         processCounterCommand("CLEAR");
         processLogicCommand("CLEAR");
@@ -2816,15 +2824,14 @@ String processPlcCommand(const String& args) {
     }
 
     // DEPLOY,<flags>;<prim>;<prim>;...
-    if (head != "DEPLOY") return "ERR,PLC,UNKNOWN";
+    if (verb != "DEPLOY") return "ERR,PLC,UNKNOWN";
+    if (commaSep < 0)      return "ERR,PLC,FORMAT";  // need flags after DEPLOY,
 
-    // Parse <flags> — the bit after 'DEPLOY,' up to the next ';' (or
-    // end of string if no primitives, i.e. equivalent to CLEAR).
-    if (sep < 0) return "ERR,PLC,FORMAT";
-    String body = args.substring(sep + 1);
-    int flagsEnd = body.indexOf(';');
-    String flags = (flagsEnd >= 0) ? body.substring(0, flagsEnd) : body;
-    String rest  = (flagsEnd >= 0) ? body.substring(flagsEnd + 1) : "";
+    // afterVerb = '<flags>;<prim>;<prim>;...' (or just '<flags>' if no prims)
+    String afterVerb = args.substring(commaSep + 1);
+    int flagsEnd = afterVerb.indexOf(';');
+    String flags = (flagsEnd >= 0) ? afterVerb.substring(0, flagsEnd) : afterVerb;
+    String rest  = (flagsEnd >= 0) ? afterVerb.substring(flagsEnd + 1) : "";
     flags.trim();
     flags.toUpperCase();
     bool replace = (flags.indexOf('A') < 0);  // default = replace
