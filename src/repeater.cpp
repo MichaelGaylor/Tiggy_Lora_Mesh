@@ -2769,6 +2769,122 @@ void handleScaleCmd(const String& args, const String& from) {
     bleSend(resp);
 }
 
+// ─── PLC,CLEAR / PLC,DEPLOY — batched rule deploy ──────────────
+// One firmware verb that bundles up to ~6 PLC primitives in a single
+// LoRa packet. Replaces the per-primitive CLEAR+ADD chatter (was 6
+// CLEAR + N ADD = 14+ packets per rule deploy) with one or two
+// PLC,DEPLOY packets.
+//
+//   PLC,CLEAR                                       wipes all 6 PLC tables
+//   PLC,DEPLOY,<flags>;<prim>;<prim>;...            atomic batched deploy
+//
+//   flags: R = replace (clear all PLC tables first, default)
+//          A = append (don't clear; for multi-packet large rules)
+//
+//   <prim> single-char tag + comma + args, where tag dispatches to the
+//   appropriate process function:
+//     S = SETPOINT (raw args, same as 'SETPOINT,<args>')
+//     C = COUNTER  (args after 'ADD,' — wraps to 'COUNTER,ADD,<args>')
+//     L = LOGIC    (wraps to 'LOGIC,ADD,<args>')
+//     K = LATCH    (wraps to 'LATCH,ADD,<args>')  — K not L since L is taken
+//     X = SCALE    (wraps to 'SCALE,ADD,<args>')
+//     T = TIMER    (raw args, same as 'TIMER,<args>')
+//
+// Example:
+//   PLC,DEPLOY,R;T,200,PULSE,15,15,0;L,201,GT,200,1,0,0;S,201,GE,1,MSG,Open,Closed
+//
+// If any sub-command fails, returns 'ERR,PLC,DEPLOY,<idx>,<inner>' and
+// stops (any already-added primitives stay — caller can re-issue with
+// R flag to wipe and retry). On success: 'OK,PLC,DEPLOY,<count>'.
+String processPlcCommand(const String& args) {
+    String head = args;
+    int sep = args.indexOf(';');
+    if (sep >= 0) head = args.substring(0, sep);
+    head.trim();
+    head.toUpperCase();
+
+    // CLEAR — wipes all 6 PLC tables in one shot. Each individual CLEAR is
+    // idempotent so order doesn't matter and partial failure shouldn't happen.
+    if (head == "CLEAR") {
+        processSetpointCommand("CLEAR");
+        processCounterCommand("CLEAR");
+        processLogicCommand("CLEAR");
+        processLatchCommand("CLEAR");
+        processScaleCommand("CLEAR");
+        processTimerCommand("CLEAR");
+        return "OK,PLC,CLEAR";
+    }
+
+    // DEPLOY,<flags>;<prim>;<prim>;...
+    if (head != "DEPLOY") return "ERR,PLC,UNKNOWN";
+
+    // Parse <flags> — the bit after 'DEPLOY,' up to the next ';' (or
+    // end of string if no primitives, i.e. equivalent to CLEAR).
+    if (sep < 0) return "ERR,PLC,FORMAT";
+    String body = args.substring(sep + 1);
+    int flagsEnd = body.indexOf(';');
+    String flags = (flagsEnd >= 0) ? body.substring(0, flagsEnd) : body;
+    String rest  = (flagsEnd >= 0) ? body.substring(flagsEnd + 1) : "";
+    flags.trim();
+    flags.toUpperCase();
+    bool replace = (flags.indexOf('A') < 0);  // default = replace
+
+    if (replace) {
+        processSetpointCommand("CLEAR");
+        processCounterCommand("CLEAR");
+        processLogicCommand("CLEAR");
+        processLatchCommand("CLEAR");
+        processScaleCommand("CLEAR");
+        processTimerCommand("CLEAR");
+    }
+
+    int count = 0;
+    while (rest.length() > 0) {
+        int s = rest.indexOf(';');
+        String tok = (s >= 0) ? rest.substring(0, s) : rest;
+        rest = (s >= 0) ? rest.substring(s + 1) : "";
+        tok.trim();
+        if (tok.length() == 0) continue;
+        if (tok.length() < 2 || tok.charAt(1) != ',') {
+            return "ERR,PLC,DEPLOY," + String(count) + ",BADTOK";
+        }
+        char tag = toupper(tok.charAt(0));
+        String tail = tok.substring(2);  // past 'X,'
+
+        String resp;
+        switch (tag) {
+            case 'S': resp = processSetpointCommand(tail); break;
+            case 'C': resp = processCounterCommand("ADD," + tail); break;
+            case 'L': resp = processLogicCommand("ADD," + tail); break;
+            case 'K': resp = processLatchCommand("ADD," + tail); break;
+            case 'X': resp = processScaleCommand("ADD," + tail); break;
+            case 'T': resp = processTimerCommand(tail); break;
+            default:
+                return "ERR,PLC,DEPLOY," + String(count) + ",BADTAG";
+        }
+        if (resp.startsWith("ERR,")) {
+            // resp is "ERR,SETPOINT,FORMAT" or similar — pass through the
+            // inner ERR as the reason so the GUI sees which primitive
+            // failed and why.
+            return "ERR,PLC,DEPLOY," + String(count) + "," + resp;
+        }
+        count++;
+    }
+    return "OK,PLC,DEPLOY," + String(count);
+}
+
+void handlePlcBle(const String& args) { bleSend(processPlcCommand(args)); }
+void handlePlcCmd(const String& args, const String& from) {
+    String resp = processPlcCommand(args);
+    mesh.cmdsExecuted++;
+    String mid = mesh.generateMsgID();
+    String hex = mesh.encryptMsg(resp);
+    String payload = String(mesh.localID) + "," + from + "," + mid + "," +
+                     String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+    mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+    bleSend(resp);
+}
+
 // ─── Binary SDATA encoding ──────────────────────────────────
 // Base64 encoder (std alphabet, no line wrap). ~30 lines, no dependency.
 static const char B64CHARS[] =
@@ -3001,6 +3117,9 @@ void handleCmd(const String& from, const String& cmdBody) {
     }
     else if (action == "SCALE") {
         handleScaleCmd(rest, from);
+    }
+    else if (action == "PLC") {
+        handlePlcCmd(rest, from);
     }
     else if (action == "BEACON") {
         // BEACON,LIST: server-push. Emit count, each rule, then an END
@@ -3825,6 +3944,9 @@ void processBleCommand(const String& line, bool fromSerial) {
     else if (line.startsWith("SCALE,")) {
         handleScaleBle(line.substring(6));
     }
+    else if (line.startsWith("PLC,")) {
+        handlePlcBle(line.substring(4));
+    }
     else if (line.startsWith("PINMODE,")) {
         // PINMODE,<pin>,PULSE|ANALOG|AUTO — set sensor pin mode
         String args = line.substring(8); args.trim();
@@ -4266,7 +4388,8 @@ void handleSerialConfig() {
              line.startsWith("SETPOINT,") || line.startsWith("AUTOPOLL,") ||
              line.startsWith("BEACON,") || line.startsWith("BLEPIN,") ||
              line.startsWith("COUNTER,") || line.startsWith("LOGIC,") ||
-             line.startsWith("LATCH,") || line.startsWith("SCALE,")) {
+             line.startsWith("LATCH,") || line.startsWith("SCALE,") ||
+             line.startsWith("PLC,")) {
         processBleCommand(line, true);  // fromSerial=true: skip BLE PIN check
     }
     else Serial.println("Commands: ID xxxx | KEY xxx... | Example RELAY 2,4,12 | SENSOR 34,36 | GPS <tx>,<rx> | GPS OFF | STATUS | SAVE | RESET | GATEWAY ON/OFF | AUTOPOLL <id> <sec> | PINMODE <pin> PULSE|AUTO"
