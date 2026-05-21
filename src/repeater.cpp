@@ -2071,16 +2071,30 @@ RTC_DATA_ATTR uint32_t rtcLowBattFlag = 0;
 #endif
 
 // Runtime values — start at compile-time defaults, overridden from EEPROM.
-float    battDivider     = BAT_DIVIDER;
-uint16_t battLowMv       = BAT_LOW_MV;
-uint16_t battRecoverMv   = BAT_RECOVER_MV;
-bool     battCfgIsCustom = false;
+// BATT_HIBERNATE_DEFAULT in Pins.h lets a board ship with the low-volt
+// auto-shutdown disabled (e.g. bench/lab boards, or solar-powered nodes
+// where the user wants to keep transmitting until the LDO browns out
+// naturally rather than the firmware cutting it off early).
+#ifndef BATT_HIBERNATE_DEFAULT
+  #define BATT_HIBERNATE_DEFAULT 1   // 1 = hibernate on low battery; 0 = stay running
+#endif
+float    battDivider           = BAT_DIVIDER;
+uint16_t battLowMv             = BAT_LOW_MV;
+uint16_t battRecoverMv         = BAT_RECOVER_MV;
+bool     battHibernateEnabled  = (BATT_HIBERNATE_DEFAULT != 0);
+bool     battCfgIsCustom       = false;
 
+// Struct version bumped to invalidate any old (4-field) EEPROM record
+// when the firmware boots a new build for the first time. Old records
+// trip the magic check and the firmware falls back to Pins.h defaults
+// — same path as a fresh install. No silent corruption from reading
+// an undersized blob into the larger struct.
 struct __attribute__((packed)) BattCfgEEPROM {
     uint16_t magic;
     float    divider;
     uint16_t lowMv;
     uint16_t recoverMv;
+    uint8_t  hibernateEnabled;   // 0/1; new in v2 of the record
 };
 
 void loadBattCfg() {
@@ -2091,15 +2105,17 @@ void loadBattCfg() {
         && e.divider >= 0.5f && e.divider <= 50.0f
         && e.lowMv >= 1000 && e.lowMv <= 60000
         && e.recoverMv > e.lowMv && e.recoverMv <= 60000) {
-        battDivider     = e.divider;
-        battLowMv       = e.lowMv;
-        battRecoverMv   = e.recoverMv;
-        battCfgIsCustom = true;
+        battDivider           = e.divider;
+        battLowMv             = e.lowMv;
+        battRecoverMv         = e.recoverMv;
+        battHibernateEnabled  = (e.hibernateEnabled != 0);
+        battCfgIsCustom       = true;
     }
 }
 
 void saveBattCfg(float divider, uint16_t lowMv, uint16_t recoverMv) {
-    BattCfgEEPROM e = { EEPROM_BATTCFG_MAGIC, divider, lowMv, recoverMv };
+    BattCfgEEPROM e = { EEPROM_BATTCFG_MAGIC, divider, lowMv, recoverMv,
+                        (uint8_t)(battHibernateEnabled ? 1 : 0) };
     EEPROM.put(EEPROM_BATTCFG_ADDR, e);
     EEPROM.commit();
     battDivider     = divider;
@@ -2108,14 +2124,23 @@ void saveBattCfg(float divider, uint16_t lowMv, uint16_t recoverMv) {
     battCfgIsCustom = true;
 }
 
+void saveBattHibernateFlag(bool enabled) {
+    // Persist just the flag without touching the divider/threshold
+    // fields. Re-uses saveBattCfg's struct-write path so the magic
+    // and sister fields stay valid.
+    battHibernateEnabled = enabled;
+    saveBattCfg(battDivider, battLowMv, battRecoverMv);
+}
+
 void resetBattCfg() {
-    BattCfgEEPROM e = { 0, 0.0f, 0, 0 };
+    BattCfgEEPROM e = { 0, 0.0f, 0, 0, 0 };
     EEPROM.put(EEPROM_BATTCFG_ADDR, e);
     EEPROM.commit();
-    battDivider     = BAT_DIVIDER;
-    battLowMv       = BAT_LOW_MV;
-    battRecoverMv   = BAT_RECOVER_MV;
-    battCfgIsCustom = false;
+    battDivider           = BAT_DIVIDER;
+    battLowMv             = BAT_LOW_MV;
+    battRecoverMv         = BAT_RECOVER_MV;
+    battHibernateEnabled  = (BATT_HIBERNATE_DEFAULT != 0);
+    battCfgIsCustom       = false;
 }
 
 // Returns battery voltage in millivolts, or -1 if no battery monitoring.
@@ -2173,6 +2198,15 @@ void enterLowBatteryShutdown(int mv) {
 }
 
 void checkBatteryAndShutdown() {
+    // Caller can disable auto-shutdown entirely via the BATT_HIBERNATE
+    // OFF command (or by setting BATT_HIBERNATE_DEFAULT=0 in Pins.h).
+    // Useful for: bench/lab nodes on a power supply, solar-powered
+    // nodes where the user prefers a brown-out reset over an early
+    // firmware-driven sleep, and any deployment where you'd rather
+    // see a noisy "low battery" reading on the dashboard than have
+    // the node disappear for BATT_SLEEP_INTERVAL_S at a time.
+    if (!battHibernateEnabled) return;
+
     // Grace period: never auto-shutdown for the first BATT_BOOT_GRACE_MS after
     // boot. Gives the operator time to BATT_DEBUG / BATT_CFG / SOLAR OFF over
     // serial without the chip resetting under their fingers.
@@ -5628,15 +5662,45 @@ void handleSerialConfig() {
     }
     else if (line == "BATT_CFG") {
 #if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
-        Serial.printf("BATT_CFG,div=%.3f,low=%d,recover=%d,source=%s\n",
+        Serial.printf("BATT_CFG,div=%.3f,low=%d,recover=%d,hibernate=%s,source=%s\n",
                       battDivider, (int)battLowMv, (int)battRecoverMv,
+                      battHibernateEnabled ? "ON" : "OFF",
                       battCfgIsCustom ? "EEPROM" : "default");
-        Serial.printf("Defaults (Pins.h): div=%.3f, low=%d, recover=%d\n",
-                      (float)BAT_DIVIDER, (int)BAT_LOW_MV, (int)BAT_RECOVER_MV);
+        Serial.printf("Defaults (Pins.h): div=%.3f, low=%d, recover=%d, hibernate=%s\n",
+                      (float)BAT_DIVIDER, (int)BAT_LOW_MV, (int)BAT_RECOVER_MV,
+                      (BATT_HIBERNATE_DEFAULT != 0) ? "ON" : "OFF");
         Serial.println("Set: BATT_CFG <divider> <low_mv> <recover_mv>");
+        Serial.println("Hibernate: BATT_HIBERNATE ON|OFF");
         Serial.println("Reset to defaults: BATT_CFG_RESET");
 #else
         Serial.println("BATT_CFG,N/A,no battery monitoring on this board");
+#endif
+    }
+    else if (line == "BATT_HIBERNATE") {
+        // Query current hibernate state. With no argument, just print
+        // the current value so the operator can confirm before changing it.
+        Serial.printf("BATT_HIBERNATE,%s,default=%s\n",
+                      battHibernateEnabled ? "ON" : "OFF",
+                      (BATT_HIBERNATE_DEFAULT != 0) ? "ON" : "OFF");
+    }
+    else if (line == "BATT_HIBERNATE ON" || line == "BATT_HIBERNATE OFF") {
+        // Toggle the low-voltage auto-shutdown. When OFF, the firmware
+        // ignores the LOW_MV threshold and stays running until the LDO
+        // browns out the chip naturally. Useful for bench testing, for
+        // solar nodes where you'd rather see a noisy reading than have
+        // the node disappear for an hour, and during commissioning when
+        // you need to keep the node alive while the panel is being wired.
+#if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
+        bool on = (line == "BATT_HIBERNATE ON");
+        saveBattHibernateFlag(on);
+        Serial.printf("OK: BATT_HIBERNATE %s (saved to EEPROM)\n",
+                      on ? "ON" : "OFF");
+        if (!on) {
+            Serial.println("WARN: low-voltage auto-shutdown disabled — "
+                           "battery will run until the LDO browns out.");
+        }
+#else
+        Serial.println("ERR: no battery monitoring on this board");
 #endif
     }
     else if (line.startsWith("BATT_CFG ")) {
@@ -5725,8 +5789,9 @@ void handleSerialConfig() {
         Serial.printf("  read: %d mV at pin → VBAT~%d mV\n",
                       rawMv, (int)(rawMv * battDivider));
   #endif
-        Serial.printf("  divider=%.3f  cut=%d  recover=%d\n",
-                      battDivider, (int)battLowMv, (int)battRecoverMv);
+        Serial.printf("  divider=%.3f  cut=%d  recover=%d  hibernate=%s\n",
+                      battDivider, (int)battLowMv, (int)battRecoverMv,
+                      battHibernateEnabled ? "ON" : "OFF");
 #else
         Serial.println("BATT_DEBUG: no battery monitoring on this board");
 #endif

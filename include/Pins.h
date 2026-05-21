@@ -29,6 +29,16 @@
 // ADC_CTRL_ACTIVE      - HIGH or LOW: which level enables the divider.
 //                        N-channel low-side switch (V3/V4) → HIGH (default)
 //                        P-channel high-side switch       → LOW
+// BATT_HIBERNATE_DEFAULT - 1 (default): firmware sleeps the chip when
+//                          VBAT drops below BAT_LOW_MV, wakes when it
+//                          recovers above BAT_RECOVER_MV.
+//                        - 0: low-voltage auto-shutdown disabled. The
+//                          node stays running until the LDO browns out.
+//                          Useful for bench/lab boards, solar nodes
+//                          where the operator prefers noisy low readings
+//                          over an hour-long sleep, and during field
+//                          commissioning. Override at runtime with the
+//                          BATT_HIBERNATE ON|OFF serial command.
 
 // ═══════════════════════════════════════════════════════════════
 #if defined(BOARD_TDECK_PLUS)
