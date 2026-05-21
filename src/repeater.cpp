@@ -3087,22 +3087,23 @@ String processPlcCommand(const String& args) {
         return setVpinPersist(vpin, onOff != 0);
     }
 
-    // STATUS — proof-of-life query AND capability probe. Counters tick
-    // as primitive scans run (GUI shows WORKING indicator). bin=1
-    // advertises that this firmware accepts the binary-encoded
-    // PLC,DEPLOY shortcut (CMD,B,<base64>). cap=N is a monotonic
-    // capability version the GUI can branch on for future features.
+    // STATUS — proof-of-life query AND capability probe. Kept SHORT so
+    // it fits inside the LoRa frame after AES-GCM + hex encoding. The
+    // earlier verbose form (scans/logic/latch/scale/counter/timer/
+    // setpoint/lastFireMs all spelled out) ballooned past 100 chars
+    // plaintext — when the cipher-hex-framing pipeline added its
+    // overhead, the resulting wire payload overflowed MeshCore's
+    // 256-byte TX stack buffer and triggered a stack-smashing crash on
+    // every status reply. Now we report a single combined fire counter
+    // ("fires" = sum of all primitive types) plus scan ticks; that's
+    // all the GUI's WORKING indicator needs to detect activity.
     if (verb == "STATUS") {
-        return String("OK,PLC,STATUS,scans=")    + String(plcStats.scanTicks)
-             + ",logic="                          + String(plcStats.logicFires)
-             + ",latch="                          + String(plcStats.latchFires)
-             + ",scale="                          + String(plcStats.scaleFires)
-             + ",counter="                        + String(plcStats.counterFires)
-             + ",timer="                          + String(plcStats.timerFires)
-             + ",setpoint="                       + String(plcStats.setpointFires)
-             + ",lastFireMs="                     + String(plcStats.lastFireMs)
-             + ",bin=1"
-             + ",cap=2";
+        uint32_t totalFires = plcStats.logicFires + plcStats.latchFires +
+                              plcStats.scaleFires + plcStats.counterFires +
+                              plcStats.timerFires + plcStats.setpointFires;
+        return String("OK,PLC,STATUS,scans=") + String(plcStats.scanTicks)
+             + ",fires="                       + String(totalFires)
+             + ",bin=1,cap=2";
     }
 
     // CLEAR — wipes all 6 PLC tables in one shot. Each individual CLEAR is
