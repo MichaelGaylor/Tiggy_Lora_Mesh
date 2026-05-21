@@ -202,32 +202,213 @@ void ioExpandSetRelay(int pin, int val);  // forward declaration
 
 // ─── Storage virtual pins (state variables persisted to EEPROM) ─────
 // Pins in [STORAGE_VPIN_BASE, STORAGE_VPIN_BASE + STORAGE_VPIN_RESERVED) don't
-// touch GPIO — they're a STORAGE_VPIN_RESERVED-byte in-firmware array that
-// behaves exactly like digital pins from the perspective of CMD,SET/CMD,GET
-// and beacon-rule RELAY actions. Defaults defined in Pins.h (BASE=200,
-// RESERVED=32, EXPOSED=8) — a board can override by #define'ing them.
+// touch GPIO — they're an in-firmware uint16 array that behaves exactly like
+// digital pins from the perspective of CMD,SET/CMD,GET and beacon-rule RELAY
+// actions. Used as the "wires" between PLC blocks (LOGIC/LATCH/SCALE/COUNTER
+// outputs land here; SETPOINT inputs read from here). Widened from uint8 to
+// uint16 so SCALE outputs and SETPOINT inputs can carry full 16-bit
+// sensor/timer values, not just 0..255.
+//
+// Defaults defined in Pins.h (BASE=200, RESERVED=32, EXPOSED=8) — a board
+// can override by #define'ing them. Each vpin now takes 2 EEPROM bytes
+// (little-endian) so storage occupies 2 × STORAGE_VPIN_RESERVED bytes.
 // Address 1600 is past the beacon rule storage (8 rules × 128 B starting
 // at 512 = up to 1535).
 #define EEPROM_STORAGE_VPIN_ADDR 1600
-uint8_t storageVpinValues[STORAGE_VPIN_RESERVED] = {0};
+uint16_t storageVpinValues[STORAGE_VPIN_RESERVED] = {0};
 
 inline bool isStorageVpin(int pin) {
     return pin >= STORAGE_VPIN_BASE && pin < STORAGE_VPIN_BASE + STORAGE_VPIN_RESERVED;
 }
 
-void setStorageVpin(int pin, uint8_t val) {
+// Persistence opt-in bitmap. One bit per storage vpin (32 vpins → 4 bytes).
+// EEPROM is only written for vpin N if bit N is set. Default 0 = no
+// persistence — values live in RAM only and are lost on reboot. Stored
+// at EEPROM_PERSIST_MASK_ADDR (separate from the value cells themselves).
+// Critical for high-frequency primitives (TIMER PULSE writing every
+// few seconds) where naive EEPROM-on-every-change wore a cell out in
+// ~17 days. Users opt INTO persistence via the Storage Vpin block's
+// Persist checkbox, accepting the wear cost only for values they need
+// to survive reboot (calibration setpoints, latched alarm states, etc).
+#define EEPROM_PERSIST_MASK_ADDR 1668   // 4 bytes; past STORAGE_VPIN array (1600..1663)
+uint32_t storagePersistMask = 0;
+
+inline bool isPersistentVpin(int pin) {
     int idx = pin - STORAGE_VPIN_BASE;
-    if (idx < 0 || idx >= STORAGE_VPIN_RESERVED) return;
-    if (storageVpinValues[idx] == val) return;  // No write if unchanged (saves flash wear)
-    storageVpinValues[idx] = val;
-    EEPROM.write(EEPROM_STORAGE_VPIN_ADDR + idx, val);
+    if (idx < 0 || idx >= STORAGE_VPIN_RESERVED) return false;
+    return (storagePersistMask & (1u << idx)) != 0;
+}
+
+void loadPersistMask() {
+    storagePersistMask = 0;
+    for (int i = 0; i < 4; i++) {
+        storagePersistMask |= ((uint32_t)EEPROM.read(EEPROM_PERSIST_MASK_ADDR + i)) << (i * 8);
+    }
+}
+
+void savePersistMask() {
+    for (int i = 0; i < 4; i++) {
+        EEPROM.write(EEPROM_PERSIST_MASK_ADDR + i,
+                     (uint8_t)((storagePersistMask >> (i * 8)) & 0xFF));
+    }
     EEPROM.commit();
 }
 
-uint8_t getStorageVpin(int pin) {
+// Load any persistent vpin values from EEPROM into the RAM array. Called
+// once at boot, after loadPersistMask. Non-persistent vpins stay at 0.
+void loadPersistentStorageVpins() {
+    for (int idx = 0; idx < STORAGE_VPIN_RESERVED; idx++) {
+        if (storagePersistMask & (1u << idx)) {
+            uint16_t lo = EEPROM.read(EEPROM_STORAGE_VPIN_ADDR + idx * 2);
+            uint16_t hi = EEPROM.read(EEPROM_STORAGE_VPIN_ADDR + idx * 2 + 1);
+            storageVpinValues[idx] = lo | (hi << 8);
+        }
+    }
+}
+
+// Set/clear the persist bit for one vpin. Toggling OFF wipes the
+// EEPROM cell to 0 so the next reboot doesn't read stale data; toggling
+// ON snapshots the current RAM value to EEPROM so it survives.
+String setVpinPersist(int pin, bool persist) {
+    int idx = pin - STORAGE_VPIN_BASE;
+    if (idx < 0 || idx >= STORAGE_VPIN_RESERVED) return "ERR,PERSIST,BADVPIN";
+    bool wasSet = (storagePersistMask & (1u << idx)) != 0;
+    if (wasSet == persist) return "OK,PLC,PERSIST," + String(pin) + "," + String(persist ? 1 : 0);
+
+    if (persist) {
+        storagePersistMask |= (1u << idx);
+        // Snapshot current value so it survives reboot from this point on.
+        uint16_t v = storageVpinValues[idx];
+        EEPROM.write(EEPROM_STORAGE_VPIN_ADDR + idx * 2,     (uint8_t)(v & 0xFF));
+        EEPROM.write(EEPROM_STORAGE_VPIN_ADDR + idx * 2 + 1, (uint8_t)((v >> 8) & 0xFF));
+    } else {
+        storagePersistMask &= ~(1u << idx);
+        // Wipe the EEPROM cell so the previous persistent value doesn't
+        // resurrect itself if the user re-enables persist later.
+        EEPROM.write(EEPROM_STORAGE_VPIN_ADDR + idx * 2,     0);
+        EEPROM.write(EEPROM_STORAGE_VPIN_ADDR + idx * 2 + 1, 0);
+    }
+    savePersistMask();
+    return "OK,PLC,PERSIST," + String(pin) + "," + String(persist ? 1 : 0);
+}
+
+// 16-bit setter / getter. Always updates the RAM array. Writes EEPROM
+// ONLY for vpins the user has opted into persistence for, sparing flash
+// cells from high-frequency primitives (TIMER PULSE, fast Compare,
+// etc.) that don't need their state to survive reboot.
+void setStorageVpin(int pin, uint16_t val) {
+    int idx = pin - STORAGE_VPIN_BASE;
+    if (idx < 0 || idx >= STORAGE_VPIN_RESERVED) return;
+    if (storageVpinValues[idx] == val) return;
+    storageVpinValues[idx] = val;
+    if (storagePersistMask & (1u << idx)) {
+        EEPROM.write(EEPROM_STORAGE_VPIN_ADDR + idx * 2,     (uint8_t)(val & 0xFF));
+        EEPROM.write(EEPROM_STORAGE_VPIN_ADDR + idx * 2 + 1, (uint8_t)((val >> 8) & 0xFF));
+        EEPROM.commit();
+    }
+}
+
+uint16_t getStorageVpin(int pin) {
     int idx = pin - STORAGE_VPIN_BASE;
     if (idx < 0 || idx >= STORAGE_VPIN_RESERVED) return 0;
     return storageVpinValues[idx];
+}
+
+// Wipe all storage vpins back to 0. Used by PLC,CLEAR so an oscillator
+// (TIMER PULSE on a storage vpin) doesn't stay latched at its last value
+// after the rule that owned it has been removed — otherwise SETPOINT,GE,1
+// would still see a stale 1 in the vpin and re-fire downstream actions.
+// setStorageVpin() skips the EEPROM write when value is already 0, so this
+// is safe to call on every deploy without burning flash on idle vpins.
+void clearAllStorageVpins() {
+    for (int i = 0; i < STORAGE_VPIN_RESERVED; i++) {
+        setStorageVpin(STORAGE_VPIN_BASE + i, 0);
+    }
+}
+
+// ─── Scratch virtual pins (compiler-allocated, RAM only) ────────────
+// Range [SCRATCH_VPIN_BASE, SCRATCH_VPIN_BASE + SCRATCH_VPIN_RESERVED).
+// These are the *anonymous wires* between PLC blocks — the compiler picks
+// them automatically when a block needs an output cell but the user hasn't
+// asked for it to be persistent. RAM only: no EEPROM read/write, no
+// flash wear, lost on reboot (the next scan recomputes them from scratch).
+//
+// The storage range (V200-V231) stays reserved for explicit user data —
+// the only way to write there is via a Storage Vpin block placed on the
+// GUI canvas, naming the exact vpin number. Counter / Latch / Compare /
+// Logic / Scale / Timer outputs go to scratch unless the user wires a
+// Storage Vpin block downstream of them.
+#ifndef SCRATCH_VPIN_BASE
+#define SCRATCH_VPIN_BASE 232
+#endif
+#ifndef SCRATCH_VPIN_RESERVED
+#define SCRATCH_VPIN_RESERVED 24
+#endif
+uint16_t scratchVpinValues[SCRATCH_VPIN_RESERVED] = {0};
+
+inline bool isScratchVpin(int pin) {
+    return pin >= SCRATCH_VPIN_BASE &&
+           pin <  SCRATCH_VPIN_BASE + SCRATCH_VPIN_RESERVED;
+}
+
+void setScratchVpin(int pin, uint16_t val) {
+    int idx = pin - SCRATCH_VPIN_BASE;
+    if (idx < 0 || idx >= SCRATCH_VPIN_RESERVED) return;
+    scratchVpinValues[idx] = val;
+}
+
+uint16_t getScratchVpin(int pin) {
+    int idx = pin - SCRATCH_VPIN_BASE;
+    if (idx < 0 || idx >= SCRATCH_VPIN_RESERVED) return 0;
+    return scratchVpinValues[idx];
+}
+
+void clearAllScratchVpins() {
+    for (int i = 0; i < SCRATCH_VPIN_RESERVED; i++) scratchVpinValues[i] = 0;
+}
+
+// Unified vpin set/get. Callers don't need to know which range they're
+// hitting; this dispatches based on pin number. Anything outside both
+// ranges is a no-op for set, returns 0 for get — that's safe because the
+// firmware's pin validators reject those pins upstream.
+inline void setVpinValue(int pin, uint16_t val) {
+    if (isScratchVpin(pin))       setScratchVpin(pin, val);
+    else if (isStorageVpin(pin))  setStorageVpin(pin, val);
+}
+
+inline uint16_t getVpinValue(int pin) {
+    if (isScratchVpin(pin))       return getScratchVpin(pin);
+    if (isStorageVpin(pin))       return getStorageVpin(pin);
+    return 0;
+}
+
+// True if pin can be the input or output of a PLC primitive — covers
+// configurable hardware pins, storage vpins (200-231) AND scratch vpins
+// (232-255). Used by LOGIC/LATCH/SCALE/SETPOINT validators.
+inline bool isPlcPinValid(int pin) {
+    return isScratchVpin(pin) || isStorageVpin(pin);
+    // Note: callers also accept hardware pins separately via isPinConfigurable.
+}
+
+// ─── PLC activity stats — proof of life for the GUI ────────────────
+// Incremented as the firmware's primitive scans run. The GUI polls
+// STATUS,PLC every few seconds; if the counters are advancing, the rule
+// is actually executing (not just sitting installed). Reset on boot and
+// on PLC,CLEAR.
+struct PlcStats {
+    uint32_t scanTicks   = 0;  // Total times the primitive scans ran
+    uint32_t logicFires  = 0;  // LOGIC outputs that changed value
+    uint32_t latchFires  = 0;
+    uint32_t scaleFires  = 0;
+    uint32_t counterFires= 0;
+    uint32_t timerFires  = 0;  // Timer rising/falling edges
+    uint32_t setpointFires = 0; // Setpoint actions actually dispatched
+    uint32_t lastFireMs  = 0;  // millis() of the last setpoint fire
+};
+PlcStats plcStats;
+
+inline void plcResetStats() {
+    plcStats = PlcStats();
 }
 
 // Append VIRTUAL_PINS (defined per-board or globally in Pins.h, default
@@ -274,6 +455,9 @@ static int readSensorPin(int pin) {
     // Storage virtual pins 200-231: in-firmware state variables (persisted to EEPROM).
     // Read returns the last value set via CMD,SET or BEACON,ADD RELAY action.
     if (isStorageVpin(pin)) return (int)getStorageVpin(pin);
+    // Scratch virtual pins 232-255: RAM-only, compiler-allocated "wires"
+    // between PLC blocks. Reads the last value written by a primitive.
+    if (isScratchVpin(pin)) return (int)getScratchVpin(pin);
     // Virtual pins 100-115: IO expansion board
     if (pin >= IO_EXPAND_VPIN_BASE && pin < IO_EXPAND_VPIN_BASE + IO_EXPAND_MAX_PINS)
         return ioExpandRead(pin);
@@ -320,11 +504,28 @@ uint16_t autoPollInterval = 300;  // default 5 min
 unsigned long nextAutoPollTime = 0;
 
 // ─── Node location (static, for nodes without GPS) ──────────
-#define EEPROM_NDLOC_ADDR 449   // 8 bytes: lat(float) + lon(float)
+// ⚠️ Both addresses below were moved out of the 450..466 range that overlaps
+// the AES key (EEPROM_KEY_ADDR=450 in MeshCore.h, 17 bytes including null).
+// Old layout (449 and 457) silently corrupted the AES key whenever BATT_CFG
+// or a node-location write happened; the damage was latent in EEPROM but
+// surfaced on next reboot when loadConfig saw an invalid key and rolled a
+// fresh random one — locking the node out of the existing encrypted mesh.
+// Existing saved values at the old addresses get one-time-lost (re-enter
+// lat/lon and BATT_CFG after upgrade); the key is preserved.
+#define EEPROM_NDLOC_ADDR    480   // 8 bytes: lat(float) + lon(float)
 // Battery config override (runtime-tunable via BATT_CFG serial command).
 // Layout: magic(2) + divider(4 float) + lowMv(2) + recoverMv(2) = 10 bytes.
-#define EEPROM_BATTCFG_ADDR  457
+#define EEPROM_BATTCFG_ADDR  490
 #define EEPROM_BATTCFG_MAGIC 0xBAEEu
+
+// Binary SDATA mode was an opt-in toggle but caused field issues
+// (gateway losing nodes after extended runtime). Disabled pending
+// root-cause. The buildAsciiSDATA helper below is kept as a clean
+// factoring of the inline SDATA build that used to live in three
+// places — no behaviour change vs the pre-SBIN code. EEPROM byte at
+// 470 is left untouched so any old SBIN 1 value is ignored.
+constexpr bool binarySDATA = false;
+
 float nodeLat = 0.0f;
 float nodeLon = 0.0f;
 
@@ -620,6 +821,46 @@ struct SetpointRule {
     unsigned long debounceStart;  // Runtime: when condition first became true
 };
 SetpointRule setpoints[MAX_SETPOINTS];
+
+// ─── Counter primitive (PLC-style) ──────────────────────────
+// Modifies a target storage virtual pin on rising-edge events at up to
+// four trigger inputs (up, down, preset, reset). Persistence is FREE
+// because storage vpins (200..231) are already EEPROM-backed.
+//
+// Counts are bounded 0..255 because the storage-vpin backing store is
+// uint8_t. If wider counters are ever needed, that's an independent
+// widening (extend storageVpinValues to uint16_t — affects POLL output
+// format too) rather than a Counter design change.
+//
+// at_preset / at_zero semantics are NOT carried in this struct — they're
+// composed at the GUI level by feeding the target vpin into a downstream
+// SETPOINT (e.g. SETPOINT,200,GE,100,...). That keeps the firmware
+// primitive minimal and reuses existing setpoint hysteresis as the
+// "latched until reset" latch.
+#define MAX_COUNTERS 8
+// Counter ceiling. Storage vpins are now uint16 so this can go to 65535,
+// matching the SCALE/SETPOINT input range. The user-visible field is also
+// uint16 in the GUI so they round-trip cleanly.
+#define COUNTER_MAX_VALUE 65535
+struct CounterRule {
+    bool active = false;
+    uint8_t targetVpin;     // 200..231 (STORAGE_VPIN_BASE + offset)
+    uint8_t mode;           // 0=UP, 1=DOWN, 2=UPDOWN
+    uint8_t upPin;          // 0 = unused
+    uint8_t downPin;        // 0 = unused
+    uint8_t presetPin;      // 0 = unused — rising edge loads presetValue
+    uint8_t resetPin;       // 0 = unused — rising edge zeros count
+    uint16_t presetValue;   // 0..65535 (matches widened vpin storage)
+    // Edge-detect state. Each is the last-seen logical value of the
+    // corresponding pin (0 or non-zero). Rising edge = was 0, now non-zero.
+    // Stored as int rather than bool to accommodate analog-read sources
+    // without truncating.
+    int lastUp;
+    int lastDown;
+    int lastPreset;
+    int lastReset;
+};
+CounterRule counters[MAX_COUNTERS];
 
 // ─── Solar Mode ─────────────────────────────────────────────
 // Deep low-power mode: OLED off, BLE deinited, ESP32 light-sleeps
@@ -1268,7 +1509,7 @@ int readBatteryMv() {
 }
 
 void enterLowBatteryShutdown(int mv) {
-    Serial.printf("\n!!! BATTERY LOW (%dmV < %dmV) — entering deep sleep for %ds\n",
+    Serial.printf("\n!!! BATTERY LOW (%dmV < %dmV) -- entering deep sleep for %ds\n",
                   mv, (int)battLowMv, (int)BATT_SLEEP_INTERVAL_S);
     Serial.flush();
     delay(500);                        // Make sure UART drains before sleep
@@ -1489,17 +1730,18 @@ bool isVPin(int pin) {
 // EEPROM). Execution guards that need a raw hardware pin (e.g. GPS config)
 // keep calling isPinSafe() directly.
 bool isPinConfigurable(int pin) {
-    return isPinSafe(pin) || isVPin(pin) || isStorageVpin(pin);
+    return isPinSafe(pin) || isVPin(pin) || isStorageVpin(pin) || isScratchVpin(pin);
 }
 
 // Drive an output — local GPIO via digitalWrite, expansion pin via UART !R
-// command, or storage vpin via in-firmware array + EEPROM. Safe to call for
-// any pin that passed isPinConfigurable. On boards without an expansion
-// wired (IO_EXPAND_TX < 0), the vpin branch calls ioExpandSetRelay which
+// command, storage vpin via in-firmware array + EEPROM, or scratch vpin
+// via in-firmware RAM. Safe to call for any pin that passed
+// isPinConfigurable. On boards without an expansion wired
+// (IO_EXPAND_TX < 0), the vpin branch calls ioExpandSetRelay which
 // is a no-op — no hardware effect, no crash.
 void setDigital(int pin, int val) {
-    if (isStorageVpin(pin)) {
-        setStorageVpin(pin, val ? 1 : 0);
+    if (isStorageVpin(pin) || isScratchVpin(pin)) {
+        setVpinValue(pin, val ? 1 : 0);
     } else if (isVPin(pin)) {
         ioExpandSetRelay(pin - IO_EXPAND_VPIN_BASE, val);
     } else {
@@ -1507,11 +1749,11 @@ void setDigital(int pin, int val) {
     }
 }
 
-// Configure an output. Vpins and storage-vpins skip pinMode — there is no
-// physical GPIO behind them. Calling pinMode with a non-existent pin on
-// the main MCU is undefined; this guard avoids it.
+// Configure an output. Vpins, storage-vpins, and scratch-vpins skip
+// pinMode — there is no physical GPIO behind them.
 void setupDigitalOutput(int pin) {
-    if (!isVPin(pin) && !isStorageVpin(pin)) pinMode(pin, OUTPUT);
+    if (!isVPin(pin) && !isStorageVpin(pin) && !isScratchVpin(pin))
+        pinMode(pin, OUTPUT);
 }
 
 void setupGPIO() {
@@ -1787,9 +2029,25 @@ String processSetpointCommand(const String& args) {
         }
     }
 
+    // Replace any existing setpoint on the same (sensorPin, op) tuple before
+    // falling back to the first free slot. Without this, sending the same
+    // SETPOINT twice (e.g. user re-deploys the rule after editing the
+    // threshold) silently consumes a second slot and eventually returns
+    // ERR,SETPOINT,FULL — matching the replace semantics that COUNTER /
+    // LOGIC / LATCH / SCALE / TIMER already implement on their key vpin.
     int slot = -1;
     for (int i = 0; i < MAX_SETPOINTS; i++) {
-        if (!setpoints[i].active) { slot = i; break; }
+        if (setpoints[i].active &&
+            setpoints[i].sensorPin == sensorPin &&
+            setpoints[i].op        == op) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        for (int i = 0; i < MAX_SETPOINTS; i++) {
+            if (!setpoints[i].active) { slot = i; break; }
+        }
     }
     if (slot < 0) return "ERR,SETPOINT,FULL";
 
@@ -1902,6 +2160,8 @@ void processTimers() {
             setDigital(timers[i].pin, timers[i].onAction ? 1 : 0);
             debugPrint("TIMER: pin " + String(timers[i].pin) + " -> " + String(timers[i].onAction ? "ON" : "OFF"));
             bleSend("TIMER,FIRED," + String(timers[i].pin) + "," + String(timers[i].onAction ? "ON" : "OFF"));
+            plcStats.timerFires++;
+            plcStats.lastFireMs = millis();
             timers[i].active = false;
         } else {
             // Pulse timer — alternate ON/OFF phases
@@ -1925,6 +2185,8 @@ void processTimers() {
                 setDigital(timers[i].pin, 1);
                 timers[i].phase = 1;
                 timers[i].nextAt = now + (unsigned long)timers[i].onSec * 1000UL;
+                plcStats.timerFires++;
+                plcStats.lastFireMs = millis();
             }
         }
     }
@@ -1935,6 +2197,8 @@ void processTimers() {
 bool fireSetpointAction(SetpointRule& sp, int value, bool triggered) {
     String target = String(sp.targetNode);
     bool isLocal = (target == String(mesh.localID));
+    plcStats.setpointFires++;
+    plcStats.lastFireMs = millis();
 
     if (sp.actionType == 0) {
         // RELAY action.
@@ -2122,6 +2386,1198 @@ void checkSetpoints() {
     }
 }
 
+// ─── Counter eval / management ──────────────────────────────
+// Helper: rising-edge detect against a stored last value. Reads the pin
+// (physical, sensor, or storage vpin — readSensorPin handles all three).
+// `pin == 0` means "no input wired" and never fires.
+static inline bool counterEdgeRose(uint8_t pin, int& lastVal) {
+    if (pin == 0) { lastVal = 0; return false; }
+    int v = readSensorPin(pin);
+    // Logical edge: was zero / unknown, now non-zero.
+    bool rose = (lastVal == 0 && v != 0);
+    lastVal = v;
+    return rose;
+}
+
+// Apply a clamped delta to the target vpin (0..COUNTER_MAX_VALUE).
+// Uses the unified vpin dispatcher so the value lands in either storage
+// (EEPROM-backed, queryable, persists across reboot) or scratch (RAM,
+// reset on reboot) depending on which range the compiler assigned.
+static inline void counterApplyDelta(uint8_t vpin, int delta) {
+    int cur = (int)getVpinValue(vpin);
+    int next = cur + delta;
+    if (next < 0) next = 0;
+    if (next > COUNTER_MAX_VALUE) next = COUNTER_MAX_VALUE;
+    setVpinValue(vpin, (uint16_t)next);
+    plcStats.counterFires++;
+}
+static inline void counterSetValue(uint8_t vpin, int value) {
+    if (value < 0) value = 0;
+    if (value > COUNTER_MAX_VALUE) value = COUNTER_MAX_VALUE;
+    setVpinValue(vpin, (uint16_t)value);
+    plcStats.counterFires++;
+}
+
+void checkCounters() {
+    for (int i = 0; i < MAX_COUNTERS; i++) {
+        CounterRule& c = counters[i];
+        if (!c.active) continue;
+
+        // Up / down deltas — mode gates whether the input is honoured.
+        // UP   (mode 0): only upPin matters.
+        // DOWN (mode 1): only downPin matters.
+        // UPDOWN (mode 2): both.
+        bool upRose    = counterEdgeRose(c.upPin,    c.lastUp);
+        bool downRose  = counterEdgeRose(c.downPin,  c.lastDown);
+        bool presetRose = counterEdgeRose(c.presetPin, c.lastPreset);
+        bool resetRose  = counterEdgeRose(c.resetPin,  c.lastReset);
+
+        if (presetRose) {
+            counterSetValue(c.targetVpin, c.presetValue);
+            bleSend("COUNTER,SET," + String(c.targetVpin) + "," + String(c.presetValue));
+            continue;  // Don't apply +/- in the same tick as a load.
+        }
+        if (resetRose) {
+            counterSetValue(c.targetVpin, 0);
+            bleSend("COUNTER,RESET," + String(c.targetVpin));
+            continue;
+        }
+        if (upRose && (c.mode == 0 || c.mode == 2)) {
+            counterApplyDelta(c.targetVpin, +1);
+            bleSend("COUNTER,UP," + String(c.targetVpin) + "," + String(getStorageVpin(c.targetVpin)));
+        }
+        if (downRose && (c.mode == 1 || c.mode == 2)) {
+            counterApplyDelta(c.targetVpin, -1);
+            bleSend("COUNTER,DOWN," + String(c.targetVpin) + "," + String(getStorageVpin(c.targetVpin)));
+        }
+    }
+}
+
+// COUNTER serial command dispatcher. Supports:
+//   COUNTER,ADD,<vpin>,<mode>,<up>,<down>,<preset>,<reset>,<preset_value>
+//     where mode = UP | DOWN | UPDOWN, pin args 0 = unused.
+//   COUNTER,LIST
+//   COUNTER,DELETE,<vpin>
+//   COUNTER,CLEAR
+String processCounterCommand(const String& args) {
+    String act = args;
+    int comma = act.indexOf(',');
+    String first = (comma >= 0) ? act.substring(0, comma) : act;
+    String rest  = (comma >= 0) ? act.substring(comma + 1) : "";
+    first.toUpperCase();
+
+    if (first == "CLEAR") {
+        for (int i = 0; i < MAX_COUNTERS; i++) counters[i].active = false;
+        return "OK,COUNTER,CLEAR";
+    }
+
+    if (first == "LIST") {
+        String resp = "COUNTERS";
+        int count = 0;
+        const char* modeStr[] = {"UP", "DOWN", "UPDOWN"};
+        for (int i = 0; i < MAX_COUNTERS; i++) {
+            if (!counters[i].active) continue;
+            count++;
+            resp += "," + String(counters[i].targetVpin) + ":" +
+                    String(counters[i].mode < 3 ? modeStr[counters[i].mode] : "?") + ":" +
+                    "up" + String(counters[i].upPin) + ":" +
+                    "dn" + String(counters[i].downPin) + ":" +
+                    "ps" + String(counters[i].presetPin) + ":" +
+                    "rs" + String(counters[i].resetPin) + ":" +
+                    "pv" + String(counters[i].presetValue) + ":" +
+                    "=" + String(getStorageVpin(counters[i].targetVpin));
+        }
+        if (count == 0) resp += ",NONE";
+        return resp;
+    }
+
+    if (first == "DELETE") {
+        int vpin = rest.toInt();
+        for (int i = 0; i < MAX_COUNTERS; i++) {
+            if (counters[i].active && counters[i].targetVpin == vpin) {
+                counters[i].active = false;
+                return "OK,COUNTER,DELETE," + String(vpin);
+            }
+        }
+        return "ERR,COUNTER,NOTFOUND";
+    }
+
+    if (first == "ADD") {
+        // <vpin>,<mode>,<up>,<down>,<preset>,<reset>,<preset_value>
+        int parts[8] = {0};
+        String tmp = rest;
+        // Mode is a string — peel off vpin first, then mode, then the rest as ints.
+        int c1 = tmp.indexOf(','); if (c1 < 0) return "ERR,COUNTER,FORMAT";
+        int vpin = tmp.substring(0, c1).toInt();
+        tmp = tmp.substring(c1 + 1);
+        int c2 = tmp.indexOf(','); if (c2 < 0) return "ERR,COUNTER,FORMAT";
+        String modeStr = tmp.substring(0, c2); modeStr.toUpperCase();
+        tmp = tmp.substring(c2 + 1);
+        uint8_t mode = 255;
+        if      (modeStr == "UP")     mode = 0;
+        else if (modeStr == "DOWN")   mode = 1;
+        else if (modeStr == "UPDOWN") mode = 2;
+        if (mode > 2) return "ERR,COUNTER,BADMODE";
+
+        // Parse remaining 5 ints: up, down, preset, reset, preset_value
+        int vals[5] = {0,0,0,0,0};
+        for (int k = 0; k < 5; k++) {
+            int ck = tmp.indexOf(',');
+            String tok = (ck >= 0) ? tmp.substring(0, ck) : tmp;
+            vals[k] = tok.toInt();
+            if (ck < 0) { if (k < 4) return "ERR,COUNTER,FORMAT"; break; }
+            tmp = tmp.substring(ck + 1);
+        }
+        int upPin = vals[0], dnPin = vals[1], psPin = vals[2], rsPin = vals[3];
+        int preset = vals[4];
+
+        if (!(isStorageVpin(vpin) || isScratchVpin(vpin))) return "ERR,COUNTER,BADVPIN";
+        if (preset < 0 || preset > COUNTER_MAX_VALUE) return "ERR,COUNTER,BADPRESET";
+
+        // Replace any existing counter on this vpin (one-counter-per-vpin rule);
+        // otherwise find a free slot.
+        int slot = -1;
+        for (int i = 0; i < MAX_COUNTERS; i++) {
+            if (counters[i].active && counters[i].targetVpin == vpin) { slot = i; break; }
+        }
+        if (slot < 0) {
+            for (int i = 0; i < MAX_COUNTERS; i++) {
+                if (!counters[i].active) { slot = i; break; }
+            }
+        }
+        if (slot < 0) return "ERR,COUNTER,FULL";
+
+        memset(&counters[slot], 0, sizeof(CounterRule));
+        counters[slot].active      = true;
+        counters[slot].targetVpin  = (uint8_t)vpin;
+        counters[slot].mode        = mode;
+        counters[slot].upPin       = (uint8_t)upPin;
+        counters[slot].downPin     = (uint8_t)dnPin;
+        counters[slot].presetPin   = (uint8_t)psPin;
+        counters[slot].resetPin    = (uint8_t)rsPin;
+        counters[slot].presetValue = (uint16_t)preset;
+        return "OK,COUNTER,ADD," + String(vpin) + "," + modeStr +
+               "," + String(upPin) + "," + String(dnPin) + "," +
+               String(psPin) + "," + String(rsPin) + "," + String(preset);
+    }
+
+    return "ERR,COUNTER,UNKNOWN";
+}
+
+void handleCounterBle(const String& args) {
+    String resp = processCounterCommand(args);
+    bleSend(resp);
+}
+void handleCounterCmd(const String& args, const String& from) {
+    String resp = processCounterCommand(args);
+    mesh.cmdsExecuted++;
+    String mid = mesh.generateMsgID();
+    String hex = mesh.encryptMsg(resp);
+    String payload = String(mesh.localID) + "," + from + "," + mid + "," +
+                     String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+    mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+    bleSend(resp);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SECTION: PLC primitives — LOGIC, LATCH, SCALE
+//
+// These three together with COUNTER and SETPOINT give the GUI's Logic
+// Builder a complete dataflow target. Each primitive reads from one or
+// two input pins (sensor pins or storage vpins — readSensorPin handles
+// both transparently) and writes to a storage vpin. The GUI deploy
+// planner allocates vpins for intermediate signals so any block graph
+// can compose: e.g. Sensor A → SETPOINT → vpin 200 ┐
+//                                                  ├→ LOGIC AND → vpin 202 → SETPOINT,202,GE,1,MSG
+//                  Sensor B → SETPOINT → vpin 201 ┘
+//
+// All three primitives evaluate every main-loop tick. Cost per tick is
+// trivial (handful of pin reads + a comparison + possible setStorageVpin
+// which itself short-circuits if the value hasn't changed).
+// ═══════════════════════════════════════════════════════════════
+
+// ─── LOGIC: AND / OR / NOT / XOR ───────────────────────────────
+#define MAX_LOGIC_RULES 16
+struct LogicRule {
+    bool active = false;
+    uint8_t outputVpin;     // 200..231
+    uint8_t op;             // 0=AND, 1=OR, 2=NOT (in2 ignored), 3=XOR
+    uint8_t input1Pin;
+    uint16_t input1Thresh;  // input1 >= thresh → logical 1
+    uint8_t input2Pin;      // 0 = unused (required for NOT — set to 0)
+    uint16_t input2Thresh;
+};
+LogicRule logicRules[MAX_LOGIC_RULES];
+
+void checkLogic() {
+    for (int i = 0; i < MAX_LOGIC_RULES; i++) {
+        LogicRule& r = logicRules[i];
+        if (!r.active) continue;
+        // Read raw values once — comparison ops need them, boolean ops
+        // need the boolean form.
+        int v1 = (r.input1Pin > 0) ? readSensorPin(r.input1Pin) : 0;
+        int v2 = (r.input2Pin > 0) ? readSensorPin(r.input2Pin) : 0;
+        bool in1 = (v1 >= (int)r.input1Thresh);
+        bool in2 = (v2 >= (int)r.input2Thresh);
+        bool out = false;
+        switch (r.op) {
+            case 0: out = in1 && in2; break;            // AND
+            case 1: out = in1 || in2; break;            // OR
+            case 2: out = !in1;       break;            // NOT (in2 ignored)
+            case 3: out = in1 != in2; break;            // XOR
+            // Single-input comparison ops — deploy target for the GUI's
+            // Compare block. in1Thresh is the comparison value; in2 ignored.
+            case 4: out = v1 >= (int)r.input1Thresh; break;  // GE
+            case 5: out = v1 <= (int)r.input1Thresh; break;  // LE
+            case 6: out = v1 >  (int)r.input1Thresh; break;  // GT
+            case 7: out = v1 <  (int)r.input1Thresh; break;  // LT
+            case 8: out = v1 == (int)r.input1Thresh; break;  // EQ
+            case 9: out = v1 != (int)r.input1Thresh; break;  // NE
+        }
+        uint16_t prev = getVpinValue(r.outputVpin);
+        uint16_t next = out ? 1 : 0;
+        if (prev != next) {
+            setVpinValue(r.outputVpin, next);
+            plcStats.logicFires++;
+        }
+    }
+}
+
+String processLogicCommand(const String& args) {
+    String act = args;
+    int comma = act.indexOf(',');
+    String first = (comma >= 0) ? act.substring(0, comma) : act;
+    String rest  = (comma >= 0) ? act.substring(comma + 1) : "";
+    first.toUpperCase();
+
+    if (first == "CLEAR") {
+        for (int i = 0; i < MAX_LOGIC_RULES; i++) logicRules[i].active = false;
+        return "OK,LOGIC,CLEAR";
+    }
+    if (first == "LIST") {
+        const char* opStr[] = {"AND","OR","NOT","XOR","GE","LE","GT","LT","EQ","NE"};
+        String resp = "LOGIC";
+        int count = 0;
+        for (int i = 0; i < MAX_LOGIC_RULES; i++) {
+            if (!logicRules[i].active) continue;
+            count++;
+            resp += "," + String(logicRules[i].outputVpin) + ":" +
+                    String(logicRules[i].op < 10 ? opStr[logicRules[i].op] : "?") + ":" +
+                    "i1=" + String(logicRules[i].input1Pin) + ">=" + String(logicRules[i].input1Thresh) + ":" +
+                    "i2=" + String(logicRules[i].input2Pin) + ">=" + String(logicRules[i].input2Thresh) + ":" +
+                    "=" + String(getStorageVpin(logicRules[i].outputVpin));
+        }
+        if (count == 0) resp += ",NONE";
+        return resp;
+    }
+    if (first == "DELETE") {
+        int vpin = rest.toInt();
+        for (int i = 0; i < MAX_LOGIC_RULES; i++) {
+            if (logicRules[i].active && logicRules[i].outputVpin == vpin) {
+                logicRules[i].active = false;
+                return "OK,LOGIC,DELETE," + String(vpin);
+            }
+        }
+        return "ERR,LOGIC,NOTFOUND";
+    }
+    if (first == "ADD") {
+        // <out_vpin>,<op>,<in1>,<thr1>,<in2>,<thr2>
+        int c1 = rest.indexOf(','); if (c1 < 0) return "ERR,LOGIC,FORMAT";
+        int vpin = rest.substring(0, c1).toInt();
+        String tmp = rest.substring(c1 + 1);
+        int c2 = tmp.indexOf(','); if (c2 < 0) return "ERR,LOGIC,FORMAT";
+        String opStr = tmp.substring(0, c2); opStr.toUpperCase();
+        tmp = tmp.substring(c2 + 1);
+        uint8_t op = 255;
+        if      (opStr == "AND") op = 0;
+        else if (opStr == "OR")  op = 1;
+        else if (opStr == "NOT") op = 2;
+        else if (opStr == "XOR") op = 3;
+        else if (opStr == "GE")  op = 4;
+        else if (opStr == "LE")  op = 5;
+        else if (opStr == "GT")  op = 6;
+        else if (opStr == "LT")  op = 7;
+        else if (opStr == "EQ")  op = 8;
+        else if (opStr == "NE")  op = 9;
+        if (op > 9) return "ERR,LOGIC,BADOP";
+
+        // Compact form: NOT and single-input compare ops (GE/LE/GT/LT/EQ/NE)
+        // don't use in2/thr2, so the encoder may omit them. We must accept
+        // both 2-value (in1, thr1) and 4-value (in1, thr1, in2, thr2)
+        // forms and zero-fill the missing tail so the rule struct stays
+        // valid. AND/OR/XOR always require 4 values (need both inputs).
+        int vals[4] = {0,0,0,0};
+        int parsed = 0;
+        for (int k = 0; k < 4 && tmp.length() > 0; k++) {
+            int ck = tmp.indexOf(',');
+            String tok = (ck >= 0) ? tmp.substring(0, ck) : tmp;
+            vals[k] = tok.toInt();
+            parsed++;
+            if (ck < 0) break;
+            tmp = tmp.substring(ck + 1);
+        }
+        if (parsed < 2) return "ERR,LOGIC,FORMAT";
+        bool needsIn2 = (op == 0 || op == 1 || op == 3);  // AND/OR/XOR
+        if (needsIn2 && parsed < 4) return "ERR,LOGIC,FORMAT";
+
+        if (!(isStorageVpin(vpin) || isScratchVpin(vpin))) return "ERR,LOGIC,BADVPIN";
+        // Input pins: 0 is a sentinel ("unwired — treat as 0"); anything else
+        // must be a real configurable pin or a storage vpin we can read.
+        // Without this check, the PLC compiler could ship a bad pin number
+        // (typo, stale board_pins.json) and the rule would silently treat
+        // every read as 0 — producing a permanently-FALSE LOGIC,AND or a
+        // permanently-TRUE LOGIC,NOT with no diagnostic.
+        if (vals[0] != 0 && !isPinConfigurable(vals[0])) return "ERR,LOGIC,BADIN1";
+        // NOT only uses input1; input2 is unused for op == NOT (2).
+        if (op != 2 && vals[2] != 0 && !isPinConfigurable(vals[2])) return "ERR,LOGIC,BADIN2";
+
+        int slot = -1;
+        for (int i = 0; i < MAX_LOGIC_RULES; i++) {
+            if (logicRules[i].active && logicRules[i].outputVpin == vpin) { slot = i; break; }
+        }
+        if (slot < 0) {
+            for (int i = 0; i < MAX_LOGIC_RULES; i++) {
+                if (!logicRules[i].active) { slot = i; break; }
+            }
+        }
+        if (slot < 0) return "ERR,LOGIC,FULL";
+
+        memset(&logicRules[slot], 0, sizeof(LogicRule));
+        logicRules[slot].active       = true;
+        logicRules[slot].outputVpin   = (uint8_t)vpin;
+        logicRules[slot].op           = op;
+        logicRules[slot].input1Pin    = (uint8_t)vals[0];
+        logicRules[slot].input1Thresh = (uint16_t)vals[1];
+        logicRules[slot].input2Pin    = (uint8_t)vals[2];
+        logicRules[slot].input2Thresh = (uint16_t)vals[3];
+        return "OK,LOGIC,ADD," + String(vpin) + "," + opStr +
+               "," + String(vals[0]) + "," + String(vals[1]) +
+               "," + String(vals[2]) + "," + String(vals[3]);
+    }
+    return "ERR,LOGIC,UNKNOWN";
+}
+void handleLogicBle(const String& args) { bleSend(processLogicCommand(args)); }
+void handleLogicCmd(const String& args, const String& from) {
+    String resp = processLogicCommand(args);
+    mesh.cmdsExecuted++;
+    String mid = mesh.generateMsgID();
+    String hex = mesh.encryptMsg(resp);
+    String payload = String(mesh.localID) + "," + from + "," + mid + "," +
+                     String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+    mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+    bleSend(resp);
+}
+
+// ─── LATCH: SR flip-flop ───────────────────────────────────────
+#define MAX_LATCH_RULES 8
+struct LatchRule {
+    bool active = false;
+    uint8_t outputVpin;
+    uint8_t setPin;
+    uint16_t setThresh;
+    uint8_t resetPin;
+    uint16_t resetThresh;
+    // Edge-detect state. lastSet/lastReset >= thresh = logical high
+    // last tick. Rising edge = was low last tick, high now.
+    int lastSet;
+    int lastReset;
+};
+LatchRule latchRules[MAX_LATCH_RULES];
+
+void checkLatches() {
+    for (int i = 0; i < MAX_LATCH_RULES; i++) {
+        LatchRule& r = latchRules[i];
+        if (!r.active) continue;
+        int sNow = (r.setPin > 0)   ? readSensorPin(r.setPin)   : 0;
+        int rNow = (r.resetPin > 0) ? readSensorPin(r.resetPin) : 0;
+        bool sRose = (r.lastSet   <  (int)r.setThresh)   && (sNow >= (int)r.setThresh);
+        bool rRose = (r.lastReset <  (int)r.resetThresh) && (rNow >= (int)r.resetThresh);
+        // Reset has priority (PLC convention for SR latch with reset dominant).
+        if (rRose)      { setVpinValue(r.outputVpin, 0); plcStats.latchFires++; }
+        else if (sRose) { setVpinValue(r.outputVpin, 1); plcStats.latchFires++; }
+        r.lastSet   = sNow;
+        r.lastReset = rNow;
+    }
+}
+
+String processLatchCommand(const String& args) {
+    String act = args;
+    int comma = act.indexOf(',');
+    String first = (comma >= 0) ? act.substring(0, comma) : act;
+    String rest  = (comma >= 0) ? act.substring(comma + 1) : "";
+    first.toUpperCase();
+
+    if (first == "CLEAR") {
+        for (int i = 0; i < MAX_LATCH_RULES; i++) latchRules[i].active = false;
+        return "OK,LATCH,CLEAR";
+    }
+    if (first == "LIST") {
+        String resp = "LATCHES";
+        int count = 0;
+        for (int i = 0; i < MAX_LATCH_RULES; i++) {
+            if (!latchRules[i].active) continue;
+            count++;
+            resp += "," + String(latchRules[i].outputVpin) + ":" +
+                    "s=" + String(latchRules[i].setPin) + ">=" + String(latchRules[i].setThresh) + ":" +
+                    "r=" + String(latchRules[i].resetPin) + ">=" + String(latchRules[i].resetThresh) + ":" +
+                    "=" + String(getStorageVpin(latchRules[i].outputVpin));
+        }
+        if (count == 0) resp += ",NONE";
+        return resp;
+    }
+    if (first == "DELETE") {
+        int vpin = rest.toInt();
+        for (int i = 0; i < MAX_LATCH_RULES; i++) {
+            if (latchRules[i].active && latchRules[i].outputVpin == vpin) {
+                latchRules[i].active = false;
+                return "OK,LATCH,DELETE," + String(vpin);
+            }
+        }
+        return "ERR,LATCH,NOTFOUND";
+    }
+    if (first == "ADD") {
+        // <out_vpin>,<set_pin>,<set_thresh>,<reset_pin>,<reset_thresh>
+        int vals[5] = {0,0,0,0,0};
+        String tmp = rest;
+        for (int k = 0; k < 5; k++) {
+            int ck = tmp.indexOf(',');
+            String tok = (ck >= 0) ? tmp.substring(0, ck) : tmp;
+            vals[k] = tok.toInt();
+            if (ck < 0) { if (k < 4) return "ERR,LATCH,FORMAT"; break; }
+            tmp = tmp.substring(ck + 1);
+        }
+        int vpin = vals[0];
+        if (!(isStorageVpin(vpin) || isScratchVpin(vpin))) return "ERR,LATCH,BADVPIN";
+        // Set/Reset pin sentinels: 0 means "unwired". Anything non-zero must
+        // be a real configurable pin or a storage vpin so the rule does
+        // something measurable. See LOGIC,BADIN1 rationale.
+        if (vals[1] != 0 && !isPinConfigurable(vals[1])) return "ERR,LATCH,BADSET";
+        if (vals[3] != 0 && !isPinConfigurable(vals[3])) return "ERR,LATCH,BADRESET";
+
+        int slot = -1;
+        for (int i = 0; i < MAX_LATCH_RULES; i++) {
+            if (latchRules[i].active && latchRules[i].outputVpin == vpin) { slot = i; break; }
+        }
+        if (slot < 0) {
+            for (int i = 0; i < MAX_LATCH_RULES; i++) {
+                if (!latchRules[i].active) { slot = i; break; }
+            }
+        }
+        if (slot < 0) return "ERR,LATCH,FULL";
+
+        memset(&latchRules[slot], 0, sizeof(LatchRule));
+        latchRules[slot].active      = true;
+        latchRules[slot].outputVpin  = (uint8_t)vpin;
+        latchRules[slot].setPin      = (uint8_t)vals[1];
+        latchRules[slot].setThresh   = (uint16_t)vals[2];
+        latchRules[slot].resetPin    = (uint8_t)vals[3];
+        latchRules[slot].resetThresh = (uint16_t)vals[4];
+        return "OK,LATCH,ADD," + String(vpin) + "," +
+               String(vals[1]) + "," + String(vals[2]) + "," +
+               String(vals[3]) + "," + String(vals[4]);
+    }
+    return "ERR,LATCH,UNKNOWN";
+}
+void handleLatchBle(const String& args) { bleSend(processLatchCommand(args)); }
+void handleLatchCmd(const String& args, const String& from) {
+    String resp = processLatchCommand(args);
+    mesh.cmdsExecuted++;
+    String mid = mesh.generateMsgID();
+    String hex = mesh.encryptMsg(resp);
+    String payload = String(mesh.localID) + "," + from + "," + mid + "," +
+                     String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+    mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+    bleSend(resp);
+}
+
+// ─── SCALE: linear transform with clamp ────────────────────────
+#define MAX_SCALE_RULES 8
+struct ScaleRule {
+    bool active = false;
+    uint8_t outputVpin;
+    uint8_t inputPin;
+    float    factor;    // multiplier
+    int16_t  offset;    // post-multiply offset
+};
+ScaleRule scaleRules[MAX_SCALE_RULES];
+
+void checkScales() {
+    for (int i = 0; i < MAX_SCALE_RULES; i++) {
+        ScaleRule& r = scaleRules[i];
+        if (!r.active) continue;
+        int raw = (r.inputPin > 0) ? readSensorPin(r.inputPin) : 0;
+        long out = (long)((float)raw * r.factor) + r.offset;
+        if (out < 0)     out = 0;
+        if (out > 65535) out = 65535;
+        uint16_t prev = getVpinValue(r.outputVpin);
+        if (prev != (uint16_t)out) {
+            setVpinValue(r.outputVpin, (uint16_t)out);
+            plcStats.scaleFires++;
+        }
+    }
+}
+
+String processScaleCommand(const String& args) {
+    String act = args;
+    int comma = act.indexOf(',');
+    String first = (comma >= 0) ? act.substring(0, comma) : act;
+    String rest  = (comma >= 0) ? act.substring(comma + 1) : "";
+    first.toUpperCase();
+
+    if (first == "CLEAR") {
+        for (int i = 0; i < MAX_SCALE_RULES; i++) scaleRules[i].active = false;
+        return "OK,SCALE,CLEAR";
+    }
+    if (first == "LIST") {
+        String resp = "SCALES";
+        int count = 0;
+        for (int i = 0; i < MAX_SCALE_RULES; i++) {
+            if (!scaleRules[i].active) continue;
+            count++;
+            resp += "," + String(scaleRules[i].outputVpin) + ":" +
+                    "in=" + String(scaleRules[i].inputPin) + ":" +
+                    "x" + String(scaleRules[i].factor, 3) +
+                    "+" + String(scaleRules[i].offset) + ":" +
+                    "=" + String(getStorageVpin(scaleRules[i].outputVpin));
+        }
+        if (count == 0) resp += ",NONE";
+        return resp;
+    }
+    if (first == "DELETE") {
+        int vpin = rest.toInt();
+        for (int i = 0; i < MAX_SCALE_RULES; i++) {
+            if (scaleRules[i].active && scaleRules[i].outputVpin == vpin) {
+                scaleRules[i].active = false;
+                return "OK,SCALE,DELETE," + String(vpin);
+            }
+        }
+        return "ERR,SCALE,NOTFOUND";
+    }
+    if (first == "ADD") {
+        // <out_vpin>,<in_pin>,<factor>,<offset>
+        int c1 = rest.indexOf(','); if (c1 < 0) return "ERR,SCALE,FORMAT";
+        int vpin = rest.substring(0, c1).toInt();
+        String tmp = rest.substring(c1 + 1);
+        int c2 = tmp.indexOf(','); if (c2 < 0) return "ERR,SCALE,FORMAT";
+        int inPin = tmp.substring(0, c2).toInt();
+        tmp = tmp.substring(c2 + 1);
+        int c3 = tmp.indexOf(','); if (c3 < 0) return "ERR,SCALE,FORMAT";
+        float factor = tmp.substring(0, c3).toFloat();
+        int offset = tmp.substring(c3 + 1).toInt();
+
+        if (!(isStorageVpin(vpin) || isScratchVpin(vpin))) return "ERR,SCALE,BADVPIN";
+        if (offset < -32768 || offset > 32767) return "ERR,SCALE,BADOFFSET";
+        // 0 is the sentinel for "unwired input — read as 0 every tick".
+        // Any non-zero input pin must be measurable. Without this check,
+        // a typo'd sensor pin produces a permanently-zero output vpin with
+        // no diagnostic.
+        if (inPin != 0 && !isPinConfigurable(inPin)) return "ERR,SCALE,BADIN";
+
+        int slot = -1;
+        for (int i = 0; i < MAX_SCALE_RULES; i++) {
+            if (scaleRules[i].active && scaleRules[i].outputVpin == vpin) { slot = i; break; }
+        }
+        if (slot < 0) {
+            for (int i = 0; i < MAX_SCALE_RULES; i++) {
+                if (!scaleRules[i].active) { slot = i; break; }
+            }
+        }
+        if (slot < 0) return "ERR,SCALE,FULL";
+
+        memset(&scaleRules[slot], 0, sizeof(ScaleRule));
+        scaleRules[slot].active     = true;
+        scaleRules[slot].outputVpin = (uint8_t)vpin;
+        scaleRules[slot].inputPin   = (uint8_t)inPin;
+        scaleRules[slot].factor     = factor;
+        scaleRules[slot].offset     = (int16_t)offset;
+        return "OK,SCALE,ADD," + String(vpin) + "," + String(inPin) +
+               "," + String(factor, 3) + "," + String(offset);
+    }
+    return "ERR,SCALE,UNKNOWN";
+}
+void handleScaleBle(const String& args) { bleSend(processScaleCommand(args)); }
+void handleScaleCmd(const String& args, const String& from) {
+    String resp = processScaleCommand(args);
+    mesh.cmdsExecuted++;
+    String mid = mesh.generateMsgID();
+    String hex = mesh.encryptMsg(resp);
+    String payload = String(mesh.localID) + "," + from + "," + mid + "," +
+                     String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+    mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+    bleSend(resp);
+}
+
+// ─── PLC,CLEAR / PLC,DEPLOY — batched rule deploy ──────────────
+// One firmware verb that bundles up to ~6 PLC primitives in a single
+// LoRa packet. Replaces the per-primitive CLEAR+ADD chatter (was 6
+// CLEAR + N ADD = 14+ packets per rule deploy) with one or two
+// PLC,DEPLOY packets.
+//
+//   PLC,CLEAR                                       wipes all 6 PLC tables
+//   PLC,DEPLOY,<flags>;<prim>;<prim>;...            atomic batched deploy
+//
+//   flags: R = replace (clear all PLC tables first, default)
+//          A = append (don't clear; for multi-packet large rules)
+//
+//   <prim> single-char tag + comma + args, where tag dispatches to the
+//   appropriate process function:
+//     S = SETPOINT (raw args, same as 'SETPOINT,<args>')
+//     C = COUNTER  (args after 'ADD,' — wraps to 'COUNTER,ADD,<args>')
+//     L = LOGIC    (wraps to 'LOGIC,ADD,<args>')
+//     K = LATCH    (wraps to 'LATCH,ADD,<args>')  — K not L since L is taken
+//     X = SCALE    (wraps to 'SCALE,ADD,<args>')
+//     T = TIMER    (raw args, same as 'TIMER,<args>')
+//
+// Example:
+//   PLC,DEPLOY,R;T,200,PULSE,15,15,0;L,201,GT,200,1,0,0;S,201,GE,1,MSG,Open,Closed
+//
+// If any sub-command fails, returns 'ERR,PLC,DEPLOY,<idx>,<inner>' and
+// stops (any already-added primitives stay — caller can re-issue with
+// R flag to wipe and retry). On success: 'OK,PLC,DEPLOY,<count>'.
+String processPlcCommand(const String& args) {
+    // Extract just the verb (CLEAR or DEPLOY) — the part before the first
+    // comma OR semicolon, whichever comes first. Previous version pulled
+    // everything up to ';' which left flags glued to the verb (head =
+    // "DEPLOY,R" instead of "DEPLOY") and the comparison failed.
+    int commaSep = args.indexOf(',');
+    int semiSep  = args.indexOf(';');
+    int verbEnd;
+    if (commaSep < 0)         verbEnd = semiSep;
+    else if (semiSep < 0)     verbEnd = commaSep;
+    else                      verbEnd = (commaSep < semiSep) ? commaSep : semiSep;
+    String verb = (verbEnd >= 0) ? args.substring(0, verbEnd) : args;
+    verb.trim();
+    verb.toUpperCase();
+
+    // COUNT — cheap verify-by-poll. Returns the number of active rows in
+    // each primitive table so the GUI can confirm the deploy actually
+    // landed (and didn't lose half its primitives to a dropped LoRa
+    // packet). Much smaller reply than PLC,LIST.
+    if (verb == "COUNT") {
+        int sp = 0, ct = 0, lg = 0, lt = 0, sc = 0, tm = 0;
+        for (int i = 0; i < MAX_SETPOINTS;   i++) if (setpoints[i].active)  sp++;
+        for (int i = 0; i < MAX_COUNTERS;    i++) if (counters[i].active)   ct++;
+        for (int i = 0; i < MAX_LOGIC_RULES; i++) if (logicRules[i].active) lg++;
+        for (int i = 0; i < MAX_LATCH_RULES; i++) if (latchRules[i].active) lt++;
+        for (int i = 0; i < MAX_SCALE_RULES; i++) if (scaleRules[i].active) sc++;
+        for (int i = 0; i < MAX_TIMERS;      i++) if (timers[i].active)     tm++;
+        int total = sp + ct + lg + lt + sc + tm;
+        return String("OK,PLC,COUNT,total=") + String(total)
+             + ",setpoint=" + String(sp)
+             + ",counter="  + String(ct)
+             + ",logic="    + String(lg)
+             + ",latch="    + String(lt)
+             + ",scale="    + String(sc)
+             + ",timer="    + String(tm);
+    }
+
+    // PERSIST — toggle the EEPROM-mirror bit for one storage vpin.
+    //   PLC,PERSIST,<vpin>,<0|1>
+    // Default state for every vpin is 0 (RAM only, no EEPROM writes).
+    // Set to 1 to opt into EEPROM persistence; set to 0 to disable and
+    // wipe the corresponding cells. Persist-mask itself lives in EEPROM
+    // so the opt-in survives reboots.
+    if (verb == "PERSIST") {
+        if (commaSep < 0) return "ERR,PLC,PERSIST,FORMAT";
+        String tail = args.substring(commaSep + 1);
+        int c1 = tail.indexOf(',');
+        if (c1 <= 0) return "ERR,PLC,PERSIST,FORMAT";
+        int vpin   = tail.substring(0, c1).toInt();
+        int onOff  = tail.substring(c1 + 1).toInt();
+        return setVpinPersist(vpin, onOff != 0);
+    }
+
+    // STATUS — proof-of-life query AND capability probe. Kept SHORT so
+    // it fits inside the LoRa frame after AES-GCM + hex encoding. The
+    // earlier verbose form (scans/logic/latch/scale/counter/timer/
+    // setpoint/lastFireMs all spelled out) ballooned past 100 chars
+    // plaintext — when the cipher-hex-framing pipeline added its
+    // overhead, the resulting wire payload overflowed MeshCore's
+    // 256-byte TX stack buffer and triggered a stack-smashing crash on
+    // every status reply. Now we report a single combined fire counter
+    // ("fires" = sum of all primitive types) plus scan ticks; that's
+    // all the GUI's WORKING indicator needs to detect activity.
+    if (verb == "STATUS") {
+        uint32_t totalFires = plcStats.logicFires + plcStats.latchFires +
+                              plcStats.scaleFires + plcStats.counterFires +
+                              plcStats.timerFires + plcStats.setpointFires;
+        return String("OK,PLC,STATUS,scans=") + String(plcStats.scanTicks)
+             + ",fires="                       + String(totalFires)
+             + ",bin=1,cap=2";
+    }
+
+    // CLEAR — wipes all 6 PLC tables in one shot. Each individual CLEAR is
+    // idempotent so order doesn't matter and partial failure shouldn't happen.
+    if (verb == "CLEAR") {
+        processSetpointCommand("CLEAR");
+        processCounterCommand("CLEAR");
+        processLogicCommand("CLEAR");
+        processLatchCommand("CLEAR");
+        processScaleCommand("CLEAR");
+        processTimerCommand("CLEAR");
+        clearAllStorageVpins();
+        clearAllScratchVpins();
+        plcResetStats();
+        return "OK,PLC,CLEAR";
+    }
+
+    // DEPLOY,<flags>;<prim>;<prim>;...
+    if (verb != "DEPLOY") return "ERR,PLC,UNKNOWN";
+    if (commaSep < 0)      return "ERR,PLC,FORMAT";  // need flags after DEPLOY,
+
+    // afterVerb = '<flags>;<prim>;<prim>;...' (or just '<flags>' if no prims)
+    String afterVerb = args.substring(commaSep + 1);
+    int flagsEnd = afterVerb.indexOf(';');
+    String flags = (flagsEnd >= 0) ? afterVerb.substring(0, flagsEnd) : afterVerb;
+    String rest  = (flagsEnd >= 0) ? afterVerb.substring(flagsEnd + 1) : "";
+    flags.trim();
+    flags.toUpperCase();
+    // Strict flag check — accept only "R" (replace) or "A" (append),
+    // and empty (defaults to R). Permissive parsing was too easy to
+    // mis-key ('RA' silently appended) so we now reject unknowns.
+    bool replace;
+    if      (flags.length() == 0 || flags == "R") replace = true;
+    else if (flags == "A")                         replace = false;
+    else return "ERR,PLC,BADFLAGS";
+
+    if (replace) {
+        processSetpointCommand("CLEAR");
+        processCounterCommand("CLEAR");
+        processLogicCommand("CLEAR");
+        processLatchCommand("CLEAR");
+        processScaleCommand("CLEAR");
+        processTimerCommand("CLEAR");
+        clearAllStorageVpins();
+        clearAllScratchVpins();
+        plcResetStats();
+    }
+
+    int count = 0;
+    while (rest.length() > 0) {
+        int s = rest.indexOf(';');
+        String tok = (s >= 0) ? rest.substring(0, s) : rest;
+        rest = (s >= 0) ? rest.substring(s + 1) : "";
+        tok.trim();
+        if (tok.length() == 0) continue;
+        if (tok.length() < 2 || tok.charAt(1) != ',') {
+            return "ERR,PLC,DEPLOY," + String(count) + ",BADTOK";
+        }
+        // Tags are CASE-SENSITIVE here. Uppercase legacy tags are the
+        // original verbose forms (S/C/L/K/X/T → SETPOINT/COUNTER/...).
+        // Lowercase tags are compact-encoding shortcuts that pre-expand
+        // into the verbose form before dispatch — they always boil down
+        // to the same processXxxCommand handlers so backwards
+        // compatibility is preserved.
+        //   p,<vpin>,<pin>,<ms>             → S,<vpin>,GE,1,PULSE,<pin>,<ms>
+        //   m,<vpin>,<msg>[,<msgFalse>]     → S,<vpin>,GE,1,MSG,<msg>[,<msgFalse>]
+        //   r,<vpin>,<target>,<pin>,<act>   → S,<vpin>,GE,1,<target>,<pin>,<act>
+        //   q,<vpin>,<pin>,<ms>             → S,<vpin>,LT,1,PULSE,<pin>,<ms> (inverse)
+        //   w,<vpin>,<msg>[,<msgFalse>]     → S,<vpin>,LT,1,MSG,<msg>[,<msgFalse>]
+        // The compact forms shave 5-10 bytes per setpoint, getting most
+        // rules into one LoRa packet on a busy mesh.
+        char rawTag = tok.charAt(0);
+        char tag = (rawTag >= 'a' && rawTag <= 'z') ? rawTag : toupper(rawTag);
+        String tail = tok.substring(2);  // past 'X,'
+
+        String resp;
+        switch (tag) {
+            // ── Verbose (legacy) tags ──
+            case 'S': resp = processSetpointCommand(tail); break;
+            case 'C': resp = processCounterCommand("ADD," + tail); break;
+            case 'L': resp = processLogicCommand("ADD," + tail); break;
+            case 'K': resp = processLatchCommand("ADD," + tail); break;
+            case 'X': resp = processScaleCommand("ADD," + tail); break;
+            case 'T': resp = processTimerCommand(tail); break;
+
+            // ── Compact setpoint shortcuts ──
+            // 'p' / 'q': pulse-action setpoint on high/low. tail is
+            // <vpin>,<pin>,<ms>. Expand to a SETPOINT line.
+            case 'p':
+            case 'q': {
+                int c1 = tail.indexOf(',');
+                if (c1 <= 0) { resp = "ERR,SETPOINT,FORMAT"; break; }
+                String vpin = tail.substring(0, c1);
+                String rest2 = tail.substring(c1 + 1);
+                String spOp = (tag == 'p') ? "GE" : "LT";
+                resp = processSetpointCommand(vpin + "," + spOp + ",1,PULSE," + rest2);
+                break;
+            }
+            // 'm' / 'w': msg-action setpoint on high/low. tail is
+            // <vpin>,<msgTrue>[,<msgFalse>]
+            case 'm':
+            case 'w': {
+                int c1 = tail.indexOf(',');
+                if (c1 <= 0) { resp = "ERR,SETPOINT,FORMAT"; break; }
+                String vpin = tail.substring(0, c1);
+                String rest2 = tail.substring(c1 + 1);
+                String spOp = (tag == 'm') ? "GE" : "LT";
+                resp = processSetpointCommand(vpin + "," + spOp + ",1,MSG," + rest2);
+                break;
+            }
+            // 'r': relay-action setpoint on high. tail is
+            // <vpin>,<target>,<pin>,<action>
+            case 'r': {
+                int c1 = tail.indexOf(',');
+                if (c1 <= 0) { resp = "ERR,SETPOINT,FORMAT"; break; }
+                String vpin = tail.substring(0, c1);
+                String rest2 = tail.substring(c1 + 1);
+                resp = processSetpointCommand(vpin + ",GE,1," + rest2);
+                break;
+            }
+
+            default:
+                return "ERR,PLC,DEPLOY," + String(count) + ",BADTAG";
+        }
+        if (resp.startsWith("ERR,")) {
+            // resp is "ERR,SETPOINT,FORMAT" or similar — pass through the
+            // inner ERR as the reason so the GUI sees which primitive
+            // failed and why.
+            return "ERR,PLC,DEPLOY," + String(count) + "," + resp;
+        }
+        count++;
+    }
+    return "OK,PLC,DEPLOY," + String(count);
+}
+
+void handlePlcBle(const String& args) { bleSend(processPlcCommand(args)); }
+void handlePlcCmd(const String& args, const String& from) {
+    String resp = processPlcCommand(args);
+    mesh.cmdsExecuted++;
+    String mid = mesh.generateMsgID();
+    String hex = mesh.encryptMsg(resp);
+    String payload = String(mesh.localID) + "," + from + "," + mid + "," +
+                     String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+    mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+    bleSend(resp);
+}
+
+// ─── Binary SDATA encoding ──────────────────────────────────
+// Base64 encoder (std alphabet, no line wrap). ~30 lines, no dependency.
+static const char B64CHARS[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+String b64encode(const uint8_t* data, size_t len) {
+    String out;
+    out.reserve(((len + 2) / 3) * 4);
+    for (size_t i = 0; i < len; i += 3) {
+        uint32_t triple = (uint32_t)data[i] << 16;
+        if (i + 1 < len) triple |= (uint32_t)data[i + 1] << 8;
+        if (i + 2 < len) triple |= (uint32_t)data[i + 2];
+        out += B64CHARS[(triple >> 18) & 0x3F];
+        out += B64CHARS[(triple >> 12) & 0x3F];
+        out += (i + 1 < len) ? B64CHARS[(triple >> 6) & 0x3F] : '=';
+        out += (i + 2 < len) ? B64CHARS[triple & 0x3F]        : '=';
+    }
+    return out;
+}
+
+// Base64 decoder. Returns the number of bytes written to `out`, or -1 on
+// invalid input. Caller sizes `out` to at least (len * 3) / 4 bytes —
+// the worst-case output for `len` base64 chars (which is the input
+// length without padding). Skips whitespace; tolerates missing trailing
+// '=' padding (some encoders strip it).
+int b64decode(const char* in, size_t inLen, uint8_t* out, size_t outCap) {
+    static int8_t TABLE[256];
+    static bool tableReady = false;
+    if (!tableReady) {
+        for (int i = 0; i < 256; i++) TABLE[i] = -1;
+        for (int i = 0; i < 64; i++) TABLE[(uint8_t)B64CHARS[i]] = (int8_t)i;
+        tableReady = true;
+    }
+    uint32_t accum = 0;
+    int bits = 0;
+    size_t produced = 0;
+    for (size_t i = 0; i < inLen; i++) {
+        char c = in[i];
+        if (c == '=') break;                 // padding — done
+        if (c == ' ' || c == '\r' || c == '\n' || c == '\t') continue;
+        int8_t v = TABLE[(uint8_t)c];
+        if (v < 0) return -1;                // invalid character
+        accum = (accum << 6) | (uint32_t)v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            if (produced >= outCap) return -1;
+            out[produced++] = (uint8_t)((accum >> bits) & 0xFF);
+        }
+    }
+    return (int)produced;
+}
+
+// ─── Binary PLC encoding ──────────────────────────────────────────
+// Compact replacement for the ASCII PLC,DEPLOY,R;... grammar. The GUI
+// builds a binary blob, base64-encodes it, and sends as the encrypted
+// plaintext "B,<base64>". This node base64-decodes and feeds the raw
+// bytes to processPlcBinary() below.
+//
+// Why binary? On a busy 100-node mesh, ASCII PLC,DEPLOY needed 2-3
+// LoRa round trips for a typical rule. Binary packs the same rule into
+// a single packet because each primitive uses 5-13 bytes instead of
+// 14-25 ASCII chars. One round trip = one ACK to wait on = the partial-
+// deploy problem largely evaporates.
+//
+// Layout (all values little-endian unless noted):
+//   header   1B  magic = 0x01
+//            1B  flags (bit0: 1=replace/CLEAR first, 0=append)
+//            1B  primitive count
+//   body     N × primitive records, each starting with a 1-byte tag:
+//
+//   0x10  TIMER PULSE       <vpin:1> <on_sec:2> <off_sec:2> <repeats:1>
+//   0x20  LOGIC AND         <out:1> <in1:1> <thr1:2> <in2:1> <thr2:2>
+//   0x21  LOGIC OR          <out:1> <in1:1> <thr1:2> <in2:1> <thr2:2>
+//   0x22  LOGIC NOT         <out:1> <in1:1> <thr1:2>
+//   0x23  LOGIC XOR         <out:1> <in1:1> <thr1:2> <in2:1> <thr2:2>
+//   0x24  LOGIC GE          <out:1> <in1:1> <thr1:2>
+//   0x25  LOGIC LE          <out:1> <in1:1> <thr1:2>
+//   0x26  LOGIC GT          <out:1> <in1:1> <thr1:2>
+//   0x27  LOGIC LT          <out:1> <in1:1> <thr1:2>
+//   0x28  LOGIC EQ          <out:1> <in1:1> <thr1:2>
+//   0x29  LOGIC NE          <out:1> <in1:1> <thr1:2>
+//   0x30  LATCH SR          <out:1> <set:1> <setThr:2> <reset:1> <resetThr:2>
+//   0x40  SCALE             <out:1> <in:1> <factor:f32> <offset:i16>
+//   0x50  COUNTER           <out:1> <mode:1> <up:1> <down:1> <preset:1>
+//                           <reset:1> <presetValue:2>
+//   0x60  SETPOINT MSG hi   <vpin:1> <msglen:1> <msg:N bytes>
+//   0x61  SETPOINT MSG lo   <vpin:1> <msglen:1> <msg:N bytes>
+//   0x62  SETPOINT PULSE hi <vpin:1> <pin:1> <ms:2>
+//   0x63  SETPOINT PULSE lo <vpin:1> <pin:1> <ms:2>
+//   0x64  SETPOINT RELAY hi <vpin:1> <target:2 hex-as-u16> <pin:1> <act:1>
+//
+// Returns "OK,PLC,DEPLOY,<count>" on success, "ERR,PLC,..." on failure.
+
+// Forward decls — the binary parser dispatches to the same ADD handlers
+// the ASCII parser uses, so any validation lives in one place.
+String processSetpointCommand(const String& args);
+String processCounterCommand(const String& args);
+String processLogicCommand(const String& args);
+String processLatchCommand(const String& args);
+String processScaleCommand(const String& args);
+String processTimerCommand(const String& args);
+
+static inline uint16_t binRd16LE(const uint8_t* p) {
+    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+static inline float binRd32f_LE(const uint8_t* p) {
+    uint32_t u = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+                 ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+    float f;
+    memcpy(&f, &u, 4);
+    return f;
+}
+
+String processPlcBinary(const uint8_t* data, size_t len) {
+    if (len < 3 || data[0] != 0x01) return "ERR,PLC,BIN,BADMAGIC";
+    uint8_t flags = data[1];
+    uint8_t expected = data[2];
+    size_t off = 3;
+
+    bool replace = (flags & 0x01) != 0;
+    if (replace) {
+        processSetpointCommand("CLEAR");
+        processCounterCommand("CLEAR");
+        processLogicCommand("CLEAR");
+        processLatchCommand("CLEAR");
+        processScaleCommand("CLEAR");
+        processTimerCommand("CLEAR");
+        clearAllStorageVpins();
+        clearAllScratchVpins();
+        plcResetStats();
+    }
+
+    int count = 0;
+    while (off < len && count < expected) {
+        uint8_t tag = data[off++];
+        String resp;
+
+        switch (tag) {
+            case 0x10: {  // TIMER PULSE
+                if (off + 6 > len) return "ERR,PLC,BIN,TIMERTRUNC";
+                uint8_t  vpin   = data[off];
+                uint16_t on_s   = binRd16LE(data + off + 1);
+                uint16_t off_s  = binRd16LE(data + off + 3);
+                uint8_t  reps   = data[off + 5];
+                off += 6;
+                resp = processTimerCommand(
+                    String(vpin) + ",PULSE," + String(on_s) + "," +
+                    String(off_s) + "," + String(reps));
+                break;
+            }
+            case 0x20: case 0x21: case 0x23: {  // LOGIC AND/OR/XOR — needs in2
+                if (off + 8 > len) return "ERR,PLC,BIN,LOGICTRUNC";
+                const char* op = (tag == 0x20) ? "AND" : (tag == 0x21) ? "OR" : "XOR";
+                uint8_t  out   = data[off];
+                uint8_t  in1   = data[off + 1];
+                uint16_t thr1  = binRd16LE(data + off + 2);
+                uint8_t  in2   = data[off + 4];
+                uint16_t thr2  = binRd16LE(data + off + 5);
+                off += 7;
+                resp = processLogicCommand(
+                    String("ADD,") + String(out) + "," + op + "," +
+                    String(in1) + "," + String(thr1) + "," +
+                    String(in2) + "," + String(thr2));
+                break;
+            }
+            case 0x22: case 0x24: case 0x25: case 0x26: case 0x27: case 0x28: case 0x29: {
+                // LOGIC NOT/GE/LE/GT/LT/EQ/NE — single-input forms
+                if (off + 4 > len) return "ERR,PLC,BIN,LOGICTRUNC";
+                const char* op =
+                    (tag == 0x22) ? "NOT" :
+                    (tag == 0x24) ? "GE"  :
+                    (tag == 0x25) ? "LE"  :
+                    (tag == 0x26) ? "GT"  :
+                    (tag == 0x27) ? "LT"  :
+                    (tag == 0x28) ? "EQ"  : "NE";
+                uint8_t  out   = data[off];
+                uint8_t  in1   = data[off + 1];
+                uint16_t thr1  = binRd16LE(data + off + 2);
+                off += 4;
+                resp = processLogicCommand(
+                    String("ADD,") + String(out) + "," + op + "," +
+                    String(in1) + "," + String(thr1));
+                break;
+            }
+            case 0x30: {  // LATCH SR
+                if (off + 7 > len) return "ERR,PLC,BIN,LATCHTRUNC";
+                uint8_t  out      = data[off];
+                uint8_t  setPin   = data[off + 1];
+                uint16_t setThr   = binRd16LE(data + off + 2);
+                uint8_t  rstPin   = data[off + 4];
+                uint16_t rstThr   = binRd16LE(data + off + 5);
+                off += 7;
+                resp = processLatchCommand(
+                    String("ADD,") + String(out) + "," +
+                    String(setPin) + "," + String(setThr) + "," +
+                    String(rstPin) + "," + String(rstThr));
+                break;
+            }
+            case 0x40: {  // SCALE
+                if (off + 7 > len) return "ERR,PLC,BIN,SCALETRUNC";
+                uint8_t  out    = data[off];
+                uint8_t  in     = data[off + 1];
+                float    factor = binRd32f_LE(data + off + 2);
+                int16_t  offs   = (int16_t)binRd16LE(data + off + 6);
+                off += 8;
+                resp = processScaleCommand(
+                    String("ADD,") + String(out) + "," + String(in) + "," +
+                    String(factor, 4) + "," + String(offs));
+                break;
+            }
+            case 0x50: {  // COUNTER
+                if (off + 8 > len) return "ERR,PLC,BIN,COUNTERTRUNC";
+                uint8_t  out       = data[off];
+                uint8_t  modeByte  = data[off + 1];   // 0=UP 1=DOWN 2=UPDOWN
+                uint8_t  up        = data[off + 2];
+                uint8_t  down      = data[off + 3];
+                uint8_t  preset    = data[off + 4];
+                uint8_t  reset     = data[off + 5];
+                uint16_t presetVal = binRd16LE(data + off + 6);
+                off += 8;
+                const char* modeStr = (modeByte == 0) ? "UP"
+                                    : (modeByte == 1) ? "DOWN" : "UPDOWN";
+                resp = processCounterCommand(
+                    String("ADD,") + String(out) + "," + modeStr + "," +
+                    String(up) + "," + String(down) + "," +
+                    String(preset) + "," + String(reset) + "," +
+                    String(presetVal));
+                break;
+            }
+            case 0x60: case 0x61: {  // SETPOINT MSG hi/lo
+                if (off + 2 > len) return "ERR,PLC,BIN,MSGTRUNC";
+                uint8_t vpin   = data[off];
+                uint8_t msgLen = data[off + 1];
+                if (off + 2 + msgLen > len) return "ERR,PLC,BIN,MSGTRUNC";
+                if (msgLen > SETPOINT_MSG_LEN) return "ERR,PLC,BIN,MSGTOOLONG";
+                // Copy message bytes into a sized String (the Setpoint
+                // ASCII parser splits on ',' — the message text must
+                // not contain a comma. Reject those packets explicitly.)
+                for (uint8_t i = 0; i < msgLen; i++)
+                    if (data[off + 2 + i] == ',') return "ERR,PLC,BIN,MSGCOMMA";
+                String msg;
+                msg.reserve(msgLen);
+                for (uint8_t i = 0; i < msgLen; i++)
+                    msg += (char)data[off + 2 + i];
+                off += 2 + msgLen;
+                const char* sp = (tag == 0x60) ? "GE" : "LT";
+                resp = processSetpointCommand(
+                    String(vpin) + "," + sp + ",1,MSG," + msg);
+                break;
+            }
+            case 0x62: case 0x63: {  // SETPOINT PULSE hi/lo
+                if (off + 4 > len) return "ERR,PLC,BIN,PULSETRUNC";
+                uint8_t  vpin = data[off];
+                uint8_t  pin  = data[off + 1];
+                uint16_t ms   = binRd16LE(data + off + 2);
+                off += 4;
+                const char* sp = (tag == 0x62) ? "GE" : "LT";
+                resp = processSetpointCommand(
+                    String(vpin) + "," + sp + ",1,PULSE," +
+                    String(pin) + "," + String(ms));
+                break;
+            }
+            case 0x64: {  // SETPOINT RELAY hi
+                if (off + 5 > len) return "ERR,PLC,BIN,RELAYTRUNC";
+                uint8_t  vpin   = data[off];
+                uint16_t target = binRd16LE(data + off + 1);
+                uint8_t  pin    = data[off + 3];
+                uint8_t  act    = data[off + 4];
+                off += 5;
+                // Render target as 4-char zero-padded hex to match ASCII form.
+                char tbuf[8];
+                snprintf(tbuf, sizeof(tbuf), "%04X", target);
+                resp = processSetpointCommand(
+                    String(vpin) + ",GE,1," + tbuf + "," +
+                    String(pin) + "," + String(act));
+                break;
+            }
+            default:
+                return "ERR,PLC,BIN,BADTAG," + String(tag, HEX);
+        }
+
+        if (resp.startsWith("ERR,")) {
+            return "ERR,PLC,BIN,DEPLOY," + String(count) + "," + resp;
+        }
+        count++;
+    }
+    return "OK,PLC,DEPLOY," + String(count);
+}
+
+// Build the binary SDATA payload for sensorPins[start..end).
+// Layout (pre-base64):
+//   byte 0       : format version (currently 0x01)
+//   byte 1..3N   : N × { pin_byte, value_hi, value_lo } (big-endian int16)
+// Wire form: "SB,<nodeid>,<base64>"
+// No multi-packet for v1 — sized to fit one LoRa frame easily.
+String buildBinarySDATA(int start, int end) {
+    int n = end - start;
+    if (n < 0) n = 0;
+    // Cap at 32 pins to keep base64 output well under 200 chars (fits the
+    // ~255-byte LoRa frame after AES-GCM + hex framing).
+    if (n > 32) n = 32;
+    uint8_t buf[1 + 32 * 3];
+    buf[0] = 0x01;  // format version
+    for (int i = 0; i < n; i++) {
+        int pin = sensorPins[start + i];
+        int value = readSensorPin(pin);
+        buf[1 + i * 3 + 0] = (uint8_t)(pin & 0xFF);
+        buf[1 + i * 3 + 1] = (uint8_t)((value >> 8) & 0xFF);
+        buf[1 + i * 3 + 2] = (uint8_t)(value & 0xFF);
+    }
+    return "SB," + String(mesh.localID) + "," + b64encode(buf, 1 + n * 3);
+}
+
+// Build the ASCII SDATA payload for sensorPins[start..end) — legacy format.
+// `part` and `totalParts` produce the optional P<n>/<m> multi-packet marker.
+String buildAsciiSDATA(int start, int end, int part, int totalParts) {
+    String s = "SDATA," + String(mesh.localID);
+    if (totalParts > 1) s += ",P" + String(part) + "/" + String(totalParts);
+    for (int i = start; i < end; i++) {
+        int pin = sensorPins[i];
+        int value = readSensorPin(pin);
+        s += "," + String(pin) + ":" + String(value);
+    }
+    return s;
+}
+
 // Execute auto-poll — read all sensors and send SDATA to target
 void executeAutoPoll() {
     if (!autoPollEnabled || sensorCount == 0) return;
@@ -2131,12 +3587,11 @@ void executeAutoPoll() {
     // Schedule next poll with ±2s jitter to avoid synchronized collisions
     nextAutoPollTime = now + (unsigned long)autoPollInterval * 1000UL + random(-2000, 2000);
 
-    String sdata = "SDATA," + String(mesh.localID);
-    for (int i = 0; i < sensorCount; i++) {
-        int pin = sensorPins[i];
-        int value = readSensorPin(pin);
-        sdata += "," + String(pin) + ":" + String(value);
-    }
+    // Binary mode fits all pins in one packet; ASCII mode keeps the old
+    // single-packet form (no part marker) for backward compat.
+    String sdata = binarySDATA
+        ? buildBinarySDATA(0, sensorCount)
+        : buildAsciiSDATA(0, sensorCount, 1, 1);
 
     // Send to target node over mesh
     uint16_t dest = strtol(autoPollTarget, nullptr, 16);
@@ -2249,19 +3704,10 @@ void handleCmd(const String& from, const String& cmdBody) {
         // Budget: 8 pin entries per packet keeps plaintext under ~60 bytes
         // (8 × ~7 chars max for analog), encrypted+hex+framed under ~180
         // chars — safely below 255.
-        const int PINS_PER_PACKET = 8;
-        int parts = (sensorCount + PINS_PER_PACKET - 1) / PINS_PER_PACKET;
-        if (parts < 1) parts = 1;
-        for (int p = 0; p < parts; p++) {
-            String sdata = "SDATA," + String(mesh.localID);
-            if (parts > 1) sdata += ",P" + String(p + 1) + "/" + String(parts);
-            int start = p * PINS_PER_PACKET;
-            int end   = (start + PINS_PER_PACKET < sensorCount) ? start + PINS_PER_PACKET : sensorCount;
-            for (int i = start; i < end; i++) {
-                int pin = sensorPins[i];
-                int value = readSensorPin(pin);
-                sdata += "," + String(pin) + ":" + String(value);
-            }
+        // Binary mode: send the whole sensor list in one packet (no split).
+        // ASCII mode: split into 8-pin chunks with the P<part>/<total> marker.
+        if (binarySDATA) {
+            String sdata = buildBinarySDATA(0, sensorCount);
             mesh.cmdsExecuted++;
             String mid = mesh.generateMsgID();
             String hex = mesh.encryptMsg(sdata);
@@ -2269,7 +3715,23 @@ void handleCmd(const String& from, const String& cmdBody) {
                              String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
             mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
             bleSend(sdata);
-            if (p + 1 < parts) delay(50);  // brief pause between packets
+        } else {
+            const int PINS_PER_PACKET = 8;
+            int parts = (sensorCount + PINS_PER_PACKET - 1) / PINS_PER_PACKET;
+            if (parts < 1) parts = 1;
+            for (int p = 0; p < parts; p++) {
+                int start = p * PINS_PER_PACKET;
+                int end   = (start + PINS_PER_PACKET < sensorCount) ? start + PINS_PER_PACKET : sensorCount;
+                String sdata = buildAsciiSDATA(start, end, p + 1, parts);
+                mesh.cmdsExecuted++;
+                String mid = mesh.generateMsgID();
+                String hex = mesh.encryptMsg(sdata);
+                String payload = String(mesh.localID) + "," + from + "," + mid + "," +
+                                 String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+                mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+                bleSend(sdata);
+                if (p + 1 < parts) delay(50);  // brief pause between packets
+            }
         }
     }
     else if (action == "TIMER") {
@@ -2279,6 +3741,49 @@ void handleCmd(const String& from, const String& cmdBody) {
     }
     else if (action == "SETPOINT") {
         handleSetpointCmd(rest, from);
+    }
+    else if (action == "COUNTER") {
+        handleCounterCmd(rest, from);
+    }
+    else if (action == "LOGIC") {
+        handleLogicCmd(rest, from);
+    }
+    else if (action == "LATCH") {
+        handleLatchCmd(rest, from);
+    }
+    else if (action == "SCALE") {
+        handleScaleCmd(rest, from);
+    }
+    else if (action == "PLC") {
+        handlePlcCmd(rest, from);
+    }
+    else if (action == "B") {
+        // Binary PLC deploy: rest is the base64-encoded binary blob. We
+        // decode here (decoupled from the mesh-layer encryption that
+        // already happened), feed the bytes to processPlcBinary, and
+        // reply with OK/ERR exactly like the ASCII PLC,DEPLOY path. Same
+        // mesh-reply + bleSend plumbing so the GUI gets the response the
+        // same way it does for ASCII.
+        size_t b64len = rest.length();
+        // Upper bound on decoded length: base64 expands 3 bytes -> 4
+        // chars, so decoded ≤ 3 * b64len / 4. Cap at 256 bytes (any
+        // deploy bigger than that won't fit in one LoRa packet anyway).
+        const size_t MAX_BIN = 256;
+        uint8_t binBuf[MAX_BIN];
+        int decoded = b64decode(rest.c_str(), b64len, binBuf, MAX_BIN);
+        String resp;
+        if (decoded < 0) {
+            resp = "ERR,PLC,BIN,B64";
+        } else {
+            resp = processPlcBinary(binBuf, (size_t)decoded);
+        }
+        mesh.cmdsExecuted++;
+        String mid = mesh.generateMsgID();
+        String hex = mesh.encryptMsg(resp);
+        String payload = String(mesh.localID) + "," + from + "," + mid + "," +
+                         String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+        mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+        bleSend(resp);
     }
     else if (action == "BEACON") {
         // BEACON,LIST: server-push. Emit count, each rule, then an END
@@ -3030,24 +4535,20 @@ void processBleCommand(const String& line, bool fromSerial) {
         bleSend("NODEEND");
     }
     else if (line == "POLL") {
-        // Local POLL — splits the same way as the mesh one above for
-        // consistency. Single-packet responses keep the pre-existing
-        // format (no P<part>/<total> marker).
-        const int PINS_PER_PACKET = 8;
-        int parts = (sensorCount + PINS_PER_PACKET - 1) / PINS_PER_PACKET;
-        if (parts < 1) parts = 1;
-        for (int p = 0; p < parts; p++) {
-            String sdata = "SDATA," + String(mesh.localID);
-            if (parts > 1) sdata += ",P" + String(p + 1) + "/" + String(parts);
-            int start = p * PINS_PER_PACKET;
-            int end   = (start + PINS_PER_PACKET < sensorCount) ? start + PINS_PER_PACKET : sensorCount;
-            for (int i = start; i < end; i++) {
-                int pin = sensorPins[i];
-                int value = readSensorPin(pin);
-                sdata += "," + String(pin) + ":" + String(value);
+        // Local POLL — fits one packet in binary mode; splits the same way
+        // as the mesh POLL response in ASCII mode.
+        if (binarySDATA) {
+            bleSend(buildBinarySDATA(0, sensorCount));
+        } else {
+            const int PINS_PER_PACKET = 8;
+            int parts = (sensorCount + PINS_PER_PACKET - 1) / PINS_PER_PACKET;
+            if (parts < 1) parts = 1;
+            for (int p = 0; p < parts; p++) {
+                int start = p * PINS_PER_PACKET;
+                int end   = (start + PINS_PER_PACKET < sensorCount) ? start + PINS_PER_PACKET : sensorCount;
+                bleSend(buildAsciiSDATA(start, end, p + 1, parts));
+                if (p + 1 < parts) delay(50);
             }
-            bleSend(sdata);
-            if (p + 1 < parts) delay(50);
         }
     }
     else if (line.startsWith("POLL,")) {
@@ -3094,6 +4595,21 @@ void processBleCommand(const String& line, bool fromSerial) {
     }
     else if (line.startsWith("SETPOINT,")) {
         handleSetpointBle(line.substring(9));
+    }
+    else if (line.startsWith("COUNTER,")) {
+        handleCounterBle(line.substring(8));
+    }
+    else if (line.startsWith("LOGIC,")) {
+        handleLogicBle(line.substring(6));
+    }
+    else if (line.startsWith("LATCH,")) {
+        handleLatchBle(line.substring(6));
+    }
+    else if (line.startsWith("SCALE,")) {
+        handleScaleBle(line.substring(6));
+    }
+    else if (line.startsWith("PLC,")) {
+        handlePlcBle(line.substring(4));
     }
     else if (line.startsWith("PINMODE,")) {
         // PINMODE,<pin>,PULSE|ANALOG|AUTO — set sensor pin mode
@@ -3280,6 +4796,12 @@ void handleSerialConfig() {
         Serial.println("ERR: no battery monitoring on this board");
 #endif
     }
+    else if (line == "SBIN" || line.startsWith("SBIN ")) {
+        // Binary SDATA mode disabled in firmware (caused gateway losing
+        // nodes after extended runtime). Command kept as a no-op so any
+        // old scripts that send it don't error out.
+        Serial.println("OK: SBIN disabled in this firmware (ASCII-only)");
+    }
     else if (line == "BATT_DEBUG") {
 #if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
         Serial.printf("BATT_DEBUG: ADC pin=GPIO%d", (int)BOARD_BAT_ADC);
@@ -3369,11 +4891,11 @@ void handleSerialConfig() {
         beaconScanEnabled = false;
         if (pNimBLEScan) { pNimBLEScan->stop(); pNimBLEScan = nullptr; }
         NimBLEDevice::deinit(false);
-        Serial.println("OK: Gateway mode ON — BLE disabled, packets forwarded over serial");
+        Serial.println("OK: Gateway mode ON -- BLE disabled, packets forwarded over serial");
     }
     else if (line == "GATEWAY OFF") {
         gatewayMode = false;
-        Serial.println("OK: Gateway mode OFF — beacon scan resumed");
+        Serial.println("OK: Gateway mode OFF -- beacon scan resumed");
     }
     else if (line.startsWith("NDLOC,") || line.startsWith("NDLOC ")) {
         String args = line.substring(6); args.trim();
@@ -3419,7 +4941,7 @@ void handleSerialConfig() {
     else if (line == "SOLAR ON") {
         solarMode = true;
         saveConfig();
-        Serial.println("OK: Solar mode ON — OLED off, BLE off, CPU light-sleep between packets");
+        Serial.println("OK: Solar mode ON -- OLED off, BLE off, CPU light-sleep between packets");
         Serial.println("Send SOLAR OFF via serial or press PRG to exit");
         Serial.flush();
         startSolarMode();
@@ -3427,7 +4949,7 @@ void handleSerialConfig() {
     else if (line == "SOLAR OFF") {
         stopSolarMode();
         saveConfig();
-        Serial.println("OK: Solar mode OFF — normal operation restored");
+        Serial.println("OK: Solar mode OFF -- normal operation restored");
     }
 #endif
     else if (line.startsWith("PINMODE ")) {
@@ -3528,7 +5050,10 @@ void handleSerialConfig() {
     else if (line.startsWith("POLL") || line.startsWith("TIMER,") ||
              line.startsWith("CMD,") || line.startsWith("MSG,") ||
              line.startsWith("SETPOINT,") || line.startsWith("AUTOPOLL,") ||
-             line.startsWith("BEACON,") || line.startsWith("BLEPIN,")) {
+             line.startsWith("BEACON,") || line.startsWith("BLEPIN,") ||
+             line.startsWith("COUNTER,") || line.startsWith("LOGIC,") ||
+             line.startsWith("LATCH,") || line.startsWith("SCALE,") ||
+             line.startsWith("PLC,")) {
         processBleCommand(line, true);  // fromSerial=true: skip BLE PIN check
     }
     else Serial.println("Commands: ID xxxx | KEY xxx... | Example RELAY 2,4,12 | SENSOR 34,36 | GPS <tx>,<rx> | GPS OFF | STATUS | SAVE | RESET | GATEWAY ON/OFF | AUTOPOLL <id> <sec> | PINMODE <pin> PULSE|AUTO"
@@ -3958,13 +5483,16 @@ void loadConfig() {
     solarMode = (solarByte == 1);
 
     // Load storage virtual pins — persisted state-machine variables (see
-    // STORAGE_VPIN_BASE in Pins.h). EEPROM cells default to 0xFF after a
-    // fresh chip, so clamp any unwritten cell to 0 (0xFF is treated as
-    // "not set yet" for the boolean / digital interpretation these pins
-    // get from setDigital / readSensorPin).
+    // STORAGE_VPIN_BASE in Pins.h). Two EEPROM bytes per vpin since the
+    // widening to uint16. EEPROM cells default to 0xFF after a fresh chip,
+    // so a freshly-formatted cell reads as 0xFFFF — clamp that to 0 so the
+    // boolean / digital interpretation (used by setDigital / readSensorPin)
+    // doesn't see a sentinel value as "valid 65535".
     for (int i = 0; i < STORAGE_VPIN_RESERVED; i++) {
-        uint8_t v = EEPROM.read(EEPROM_STORAGE_VPIN_ADDR + i);
-        storageVpinValues[i] = (v == 0xFF) ? 0 : v;
+        uint8_t lo = EEPROM.read(EEPROM_STORAGE_VPIN_ADDR + i * 2);
+        uint8_t hi = EEPROM.read(EEPROM_STORAGE_VPIN_ADDR + i * 2 + 1);
+        uint16_t v = ((uint16_t)hi << 8) | lo;
+        storageVpinValues[i] = (v == 0xFFFF) ? 0 : v;
     }
 
     // Load persisted SF (valid range 7-12, else use compile-time default)
@@ -4135,6 +5663,7 @@ void setup() {
     // EEPROM up early so the battery check honours any runtime override.
     EEPROM.begin(EEPROM_SIZE);
     loadBattCfg();
+    // Binary SDATA mode disabled — binarySDATA is now constexpr false.
 
     // ─── Early low-battery recovery check ──────────────────────
     // Only runs if we just woke from a low-battery deep sleep (RTC flag
@@ -4160,6 +5689,11 @@ void setup() {
 
     loadConfig();
     loadBeaconRules();
+    // Storage vpin persistence: read the opt-in bitmap first, then load
+    // values only for vpins the user has marked persistent. Non-persistent
+    // vpins stay at 0 in RAM (and never hit EEPROM during this session).
+    loadPersistMask();
+    loadPersistentStorageVpins();
 
     // Wire up MeshCore callbacks
     mesh.onTransmitRaw = radioTransmit;
@@ -4369,6 +5903,11 @@ void loop() {
         ioExpandPoll();
         updatePulseRates();
         checkSetpoints();
+        checkCounters();
+        checkLogic();
+        checkLatches();
+        checkScales();
+        plcStats.scanTicks++;
         readGPS();
         broadcastGPS();
         executeAutoPoll();
@@ -4499,10 +6038,14 @@ void loop() {
     processTimers();
     checkPulseTimers();   // Phase 1: clear pins whose pulse deadline has passed
 
-    // 8. IO expansion, pulse rates, setpoint rules
+    // 8. IO expansion, pulse rates, all PLC primitives
     ioExpandPoll();
     updatePulseRates();
     checkSetpoints();
+    checkCounters();
+    checkLogic();
+    checkLatches();
+    checkScales();
 
     // 9. GPS read + broadcast
     readGPS();

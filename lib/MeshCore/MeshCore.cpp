@@ -302,13 +302,31 @@ void MeshCore::_doTransmit(uint16_t dest, const String& payload) {
 
     uint16_t src = strtol(localID, nullptr, 16);
     uint16_t seq = seqCounter++;
-    int pktLen = 7 + payload.length();
     uint8_t pkt[256];
+    // Defensive: payload longer than the buffer minus header overflows
+    // the stack canary and crashes with "Stack smashing protect failure".
+    // Truncate (or drop) before memcpy. A LoRa frame can't carry more
+    // than ~255 bytes anyway, so anything longer is already a logic
+    // error in the caller — log + drop the packet rather than corrupt
+    // the stack and reboot the node.
+    const size_t HEADER = 7;
+    size_t plen = payload.length();
+    if (plen > sizeof(pkt) - HEADER) {
+        // Cannot fit. Caller should have sized it themselves. Drop and
+        // log over USB so the developer notices. (Don't transmit a
+        // half-truncated packet — receiver couldn't decrypt it.)
+        Serial.print("TX_DROP: payload ");
+        Serial.print(plen);
+        Serial.print("B > frame budget ");
+        Serial.println(sizeof(pkt) - HEADER);
+        return;
+    }
+    int pktLen = HEADER + (int)plen;
     pkt[0] = dest >> 8;    pkt[1] = dest & 0xFF;
     pkt[2] = src >> 8;     pkt[3] = src & 0xFF;
     pkt[4] = seq >> 8;     pkt[5] = seq & 0xFF;
     pkt[6] = TTL_DEFAULT;
-    memcpy(pkt + 7, payload.c_str(), payload.length());
+    memcpy(pkt + HEADER, payload.c_str(), plen);
 
     waitForClearChannel(200);
 
