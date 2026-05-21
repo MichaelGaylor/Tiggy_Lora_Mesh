@@ -221,20 +221,91 @@ inline bool isStorageVpin(int pin) {
     return pin >= STORAGE_VPIN_BASE && pin < STORAGE_VPIN_BASE + STORAGE_VPIN_RESERVED;
 }
 
-// 16-bit setter / getter. The legacy uint8 callers (boolean relay state,
-// counter tick) use these via implicit conversion — values up to 65535
-// round-trip cleanly. Old uint8_t-clamped callers still work; new PLC
-// primitives (SCALE) can store the full range.
+// Persistence opt-in bitmap. One bit per storage vpin (32 vpins → 4 bytes).
+// EEPROM is only written for vpin N if bit N is set. Default 0 = no
+// persistence — values live in RAM only and are lost on reboot. Stored
+// at EEPROM_PERSIST_MASK_ADDR (separate from the value cells themselves).
+// Critical for high-frequency primitives (TIMER PULSE writing every
+// few seconds) where naive EEPROM-on-every-change wore a cell out in
+// ~17 days. Users opt INTO persistence via the Storage Vpin block's
+// Persist checkbox, accepting the wear cost only for values they need
+// to survive reboot (calibration setpoints, latched alarm states, etc).
+#define EEPROM_PERSIST_MASK_ADDR 1668   // 4 bytes; past STORAGE_VPIN array (1600..1663)
+uint32_t storagePersistMask = 0;
+
+inline bool isPersistentVpin(int pin) {
+    int idx = pin - STORAGE_VPIN_BASE;
+    if (idx < 0 || idx >= STORAGE_VPIN_RESERVED) return false;
+    return (storagePersistMask & (1u << idx)) != 0;
+}
+
+void loadPersistMask() {
+    storagePersistMask = 0;
+    for (int i = 0; i < 4; i++) {
+        storagePersistMask |= ((uint32_t)EEPROM.read(EEPROM_PERSIST_MASK_ADDR + i)) << (i * 8);
+    }
+}
+
+void savePersistMask() {
+    for (int i = 0; i < 4; i++) {
+        EEPROM.write(EEPROM_PERSIST_MASK_ADDR + i,
+                     (uint8_t)((storagePersistMask >> (i * 8)) & 0xFF));
+    }
+    EEPROM.commit();
+}
+
+// Load any persistent vpin values from EEPROM into the RAM array. Called
+// once at boot, after loadPersistMask. Non-persistent vpins stay at 0.
+void loadPersistentStorageVpins() {
+    for (int idx = 0; idx < STORAGE_VPIN_RESERVED; idx++) {
+        if (storagePersistMask & (1u << idx)) {
+            uint16_t lo = EEPROM.read(EEPROM_STORAGE_VPIN_ADDR + idx * 2);
+            uint16_t hi = EEPROM.read(EEPROM_STORAGE_VPIN_ADDR + idx * 2 + 1);
+            storageVpinValues[idx] = lo | (hi << 8);
+        }
+    }
+}
+
+// Set/clear the persist bit for one vpin. Toggling OFF wipes the
+// EEPROM cell to 0 so the next reboot doesn't read stale data; toggling
+// ON snapshots the current RAM value to EEPROM so it survives.
+String setVpinPersist(int pin, bool persist) {
+    int idx = pin - STORAGE_VPIN_BASE;
+    if (idx < 0 || idx >= STORAGE_VPIN_RESERVED) return "ERR,PERSIST,BADVPIN";
+    bool wasSet = (storagePersistMask & (1u << idx)) != 0;
+    if (wasSet == persist) return "OK,PLC,PERSIST," + String(pin) + "," + String(persist ? 1 : 0);
+
+    if (persist) {
+        storagePersistMask |= (1u << idx);
+        // Snapshot current value so it survives reboot from this point on.
+        uint16_t v = storageVpinValues[idx];
+        EEPROM.write(EEPROM_STORAGE_VPIN_ADDR + idx * 2,     (uint8_t)(v & 0xFF));
+        EEPROM.write(EEPROM_STORAGE_VPIN_ADDR + idx * 2 + 1, (uint8_t)((v >> 8) & 0xFF));
+    } else {
+        storagePersistMask &= ~(1u << idx);
+        // Wipe the EEPROM cell so the previous persistent value doesn't
+        // resurrect itself if the user re-enables persist later.
+        EEPROM.write(EEPROM_STORAGE_VPIN_ADDR + idx * 2,     0);
+        EEPROM.write(EEPROM_STORAGE_VPIN_ADDR + idx * 2 + 1, 0);
+    }
+    savePersistMask();
+    return "OK,PLC,PERSIST," + String(pin) + "," + String(persist ? 1 : 0);
+}
+
+// 16-bit setter / getter. Always updates the RAM array. Writes EEPROM
+// ONLY for vpins the user has opted into persistence for, sparing flash
+// cells from high-frequency primitives (TIMER PULSE, fast Compare,
+// etc.) that don't need their state to survive reboot.
 void setStorageVpin(int pin, uint16_t val) {
     int idx = pin - STORAGE_VPIN_BASE;
     if (idx < 0 || idx >= STORAGE_VPIN_RESERVED) return;
-    if (storageVpinValues[idx] == val) return;  // No write if unchanged (saves flash wear)
+    if (storageVpinValues[idx] == val) return;
     storageVpinValues[idx] = val;
-    // Little-endian: low byte first, high byte second. Two EEPROM slots
-    // per vpin starting at EEPROM_STORAGE_VPIN_ADDR.
-    EEPROM.write(EEPROM_STORAGE_VPIN_ADDR + idx * 2,     (uint8_t)(val & 0xFF));
-    EEPROM.write(EEPROM_STORAGE_VPIN_ADDR + idx * 2 + 1, (uint8_t)((val >> 8) & 0xFF));
-    EEPROM.commit();
+    if (storagePersistMask & (1u << idx)) {
+        EEPROM.write(EEPROM_STORAGE_VPIN_ADDR + idx * 2,     (uint8_t)(val & 0xFF));
+        EEPROM.write(EEPROM_STORAGE_VPIN_ADDR + idx * 2 + 1, (uint8_t)((val >> 8) & 0xFF));
+        EEPROM.commit();
+    }
 }
 
 uint16_t getStorageVpin(int pin) {
@@ -2978,11 +3049,49 @@ String processPlcCommand(const String& args) {
     verb.trim();
     verb.toUpperCase();
 
-    // STATUS — proof-of-life query. Returns counters the GUI watches to
-    // confirm a deployed rule is actually executing, not just sitting
-    // installed. Lightweight (no flash reads, no LoRa TX). The GUI polls
-    // this every few seconds for a node it's "running" a rule on; if any
-    // counter advances between polls, the rule is alive.
+    // COUNT — cheap verify-by-poll. Returns the number of active rows in
+    // each primitive table so the GUI can confirm the deploy actually
+    // landed (and didn't lose half its primitives to a dropped LoRa
+    // packet). Much smaller reply than PLC,LIST.
+    if (verb == "COUNT") {
+        int sp = 0, ct = 0, lg = 0, lt = 0, sc = 0, tm = 0;
+        for (int i = 0; i < MAX_SETPOINTS;   i++) if (setpoints[i].active)  sp++;
+        for (int i = 0; i < MAX_COUNTERS;    i++) if (counters[i].active)   ct++;
+        for (int i = 0; i < MAX_LOGIC_RULES; i++) if (logicRules[i].active) lg++;
+        for (int i = 0; i < MAX_LATCH_RULES; i++) if (latchRules[i].active) lt++;
+        for (int i = 0; i < MAX_SCALE_RULES; i++) if (scaleRules[i].active) sc++;
+        for (int i = 0; i < MAX_TIMERS;      i++) if (timers[i].active)     tm++;
+        int total = sp + ct + lg + lt + sc + tm;
+        return String("OK,PLC,COUNT,total=") + String(total)
+             + ",setpoint=" + String(sp)
+             + ",counter="  + String(ct)
+             + ",logic="    + String(lg)
+             + ",latch="    + String(lt)
+             + ",scale="    + String(sc)
+             + ",timer="    + String(tm);
+    }
+
+    // PERSIST — toggle the EEPROM-mirror bit for one storage vpin.
+    //   PLC,PERSIST,<vpin>,<0|1>
+    // Default state for every vpin is 0 (RAM only, no EEPROM writes).
+    // Set to 1 to opt into EEPROM persistence; set to 0 to disable and
+    // wipe the corresponding cells. Persist-mask itself lives in EEPROM
+    // so the opt-in survives reboots.
+    if (verb == "PERSIST") {
+        if (commaSep < 0) return "ERR,PLC,PERSIST,FORMAT";
+        String tail = args.substring(commaSep + 1);
+        int c1 = tail.indexOf(',');
+        if (c1 <= 0) return "ERR,PLC,PERSIST,FORMAT";
+        int vpin   = tail.substring(0, c1).toInt();
+        int onOff  = tail.substring(c1 + 1).toInt();
+        return setVpinPersist(vpin, onOff != 0);
+    }
+
+    // STATUS — proof-of-life query AND capability probe. Counters tick
+    // as primitive scans run (GUI shows WORKING indicator). bin=1
+    // advertises that this firmware accepts the binary-encoded
+    // PLC,DEPLOY shortcut (CMD,B,<base64>). cap=N is a monotonic
+    // capability version the GUI can branch on for future features.
     if (verb == "STATUS") {
         return String("OK,PLC,STATUS,scans=")    + String(plcStats.scanTicks)
              + ",logic="                          + String(plcStats.logicFires)
@@ -2991,7 +3100,9 @@ String processPlcCommand(const String& args) {
              + ",counter="                        + String(plcStats.counterFires)
              + ",timer="                          + String(plcStats.timerFires)
              + ",setpoint="                       + String(plcStats.setpointFires)
-             + ",lastFireMs="                     + String(plcStats.lastFireMs);
+             + ",lastFireMs="                     + String(plcStats.lastFireMs)
+             + ",bin=1"
+             + ",cap=2";
     }
 
     // CLEAR — wipes all 6 PLC tables in one shot. Each individual CLEAR is
@@ -3157,6 +3268,276 @@ String b64encode(const uint8_t* data, size_t len) {
         out += (i + 2 < len) ? B64CHARS[triple & 0x3F]        : '=';
     }
     return out;
+}
+
+// Base64 decoder. Returns the number of bytes written to `out`, or -1 on
+// invalid input. Caller sizes `out` to at least (len * 3) / 4 bytes —
+// the worst-case output for `len` base64 chars (which is the input
+// length without padding). Skips whitespace; tolerates missing trailing
+// '=' padding (some encoders strip it).
+int b64decode(const char* in, size_t inLen, uint8_t* out, size_t outCap) {
+    static int8_t TABLE[256];
+    static bool tableReady = false;
+    if (!tableReady) {
+        for (int i = 0; i < 256; i++) TABLE[i] = -1;
+        for (int i = 0; i < 64; i++) TABLE[(uint8_t)B64CHARS[i]] = (int8_t)i;
+        tableReady = true;
+    }
+    uint32_t accum = 0;
+    int bits = 0;
+    size_t produced = 0;
+    for (size_t i = 0; i < inLen; i++) {
+        char c = in[i];
+        if (c == '=') break;                 // padding — done
+        if (c == ' ' || c == '\r' || c == '\n' || c == '\t') continue;
+        int8_t v = TABLE[(uint8_t)c];
+        if (v < 0) return -1;                // invalid character
+        accum = (accum << 6) | (uint32_t)v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            if (produced >= outCap) return -1;
+            out[produced++] = (uint8_t)((accum >> bits) & 0xFF);
+        }
+    }
+    return (int)produced;
+}
+
+// ─── Binary PLC encoding ──────────────────────────────────────────
+// Compact replacement for the ASCII PLC,DEPLOY,R;... grammar. The GUI
+// builds a binary blob, base64-encodes it, and sends as the encrypted
+// plaintext "B,<base64>". This node base64-decodes and feeds the raw
+// bytes to processPlcBinary() below.
+//
+// Why binary? On a busy 100-node mesh, ASCII PLC,DEPLOY needed 2-3
+// LoRa round trips for a typical rule. Binary packs the same rule into
+// a single packet because each primitive uses 5-13 bytes instead of
+// 14-25 ASCII chars. One round trip = one ACK to wait on = the partial-
+// deploy problem largely evaporates.
+//
+// Layout (all values little-endian unless noted):
+//   header   1B  magic = 0x01
+//            1B  flags (bit0: 1=replace/CLEAR first, 0=append)
+//            1B  primitive count
+//   body     N × primitive records, each starting with a 1-byte tag:
+//
+//   0x10  TIMER PULSE       <vpin:1> <on_sec:2> <off_sec:2> <repeats:1>
+//   0x20  LOGIC AND         <out:1> <in1:1> <thr1:2> <in2:1> <thr2:2>
+//   0x21  LOGIC OR          <out:1> <in1:1> <thr1:2> <in2:1> <thr2:2>
+//   0x22  LOGIC NOT         <out:1> <in1:1> <thr1:2>
+//   0x23  LOGIC XOR         <out:1> <in1:1> <thr1:2> <in2:1> <thr2:2>
+//   0x24  LOGIC GE          <out:1> <in1:1> <thr1:2>
+//   0x25  LOGIC LE          <out:1> <in1:1> <thr1:2>
+//   0x26  LOGIC GT          <out:1> <in1:1> <thr1:2>
+//   0x27  LOGIC LT          <out:1> <in1:1> <thr1:2>
+//   0x28  LOGIC EQ          <out:1> <in1:1> <thr1:2>
+//   0x29  LOGIC NE          <out:1> <in1:1> <thr1:2>
+//   0x30  LATCH SR          <out:1> <set:1> <setThr:2> <reset:1> <resetThr:2>
+//   0x40  SCALE             <out:1> <in:1> <factor:f32> <offset:i16>
+//   0x50  COUNTER           <out:1> <mode:1> <up:1> <down:1> <preset:1>
+//                           <reset:1> <presetValue:2>
+//   0x60  SETPOINT MSG hi   <vpin:1> <msglen:1> <msg:N bytes>
+//   0x61  SETPOINT MSG lo   <vpin:1> <msglen:1> <msg:N bytes>
+//   0x62  SETPOINT PULSE hi <vpin:1> <pin:1> <ms:2>
+//   0x63  SETPOINT PULSE lo <vpin:1> <pin:1> <ms:2>
+//   0x64  SETPOINT RELAY hi <vpin:1> <target:2 hex-as-u16> <pin:1> <act:1>
+//
+// Returns "OK,PLC,DEPLOY,<count>" on success, "ERR,PLC,..." on failure.
+
+// Forward decls — the binary parser dispatches to the same ADD handlers
+// the ASCII parser uses, so any validation lives in one place.
+String processSetpointCommand(const String& args);
+String processCounterCommand(const String& args);
+String processLogicCommand(const String& args);
+String processLatchCommand(const String& args);
+String processScaleCommand(const String& args);
+String processTimerCommand(const String& args);
+
+static inline uint16_t binRd16LE(const uint8_t* p) {
+    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+static inline float binRd32f_LE(const uint8_t* p) {
+    uint32_t u = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+                 ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+    float f;
+    memcpy(&f, &u, 4);
+    return f;
+}
+
+String processPlcBinary(const uint8_t* data, size_t len) {
+    if (len < 3 || data[0] != 0x01) return "ERR,PLC,BIN,BADMAGIC";
+    uint8_t flags = data[1];
+    uint8_t expected = data[2];
+    size_t off = 3;
+
+    bool replace = (flags & 0x01) != 0;
+    if (replace) {
+        processSetpointCommand("CLEAR");
+        processCounterCommand("CLEAR");
+        processLogicCommand("CLEAR");
+        processLatchCommand("CLEAR");
+        processScaleCommand("CLEAR");
+        processTimerCommand("CLEAR");
+        clearAllStorageVpins();
+        clearAllScratchVpins();
+        plcResetStats();
+    }
+
+    int count = 0;
+    while (off < len && count < expected) {
+        uint8_t tag = data[off++];
+        String resp;
+
+        switch (tag) {
+            case 0x10: {  // TIMER PULSE
+                if (off + 6 > len) return "ERR,PLC,BIN,TIMERTRUNC";
+                uint8_t  vpin   = data[off];
+                uint16_t on_s   = binRd16LE(data + off + 1);
+                uint16_t off_s  = binRd16LE(data + off + 3);
+                uint8_t  reps   = data[off + 5];
+                off += 6;
+                resp = processTimerCommand(
+                    String(vpin) + ",PULSE," + String(on_s) + "," +
+                    String(off_s) + "," + String(reps));
+                break;
+            }
+            case 0x20: case 0x21: case 0x23: {  // LOGIC AND/OR/XOR — needs in2
+                if (off + 8 > len) return "ERR,PLC,BIN,LOGICTRUNC";
+                const char* op = (tag == 0x20) ? "AND" : (tag == 0x21) ? "OR" : "XOR";
+                uint8_t  out   = data[off];
+                uint8_t  in1   = data[off + 1];
+                uint16_t thr1  = binRd16LE(data + off + 2);
+                uint8_t  in2   = data[off + 4];
+                uint16_t thr2  = binRd16LE(data + off + 5);
+                off += 7;
+                resp = processLogicCommand(
+                    String("ADD,") + String(out) + "," + op + "," +
+                    String(in1) + "," + String(thr1) + "," +
+                    String(in2) + "," + String(thr2));
+                break;
+            }
+            case 0x22: case 0x24: case 0x25: case 0x26: case 0x27: case 0x28: case 0x29: {
+                // LOGIC NOT/GE/LE/GT/LT/EQ/NE — single-input forms
+                if (off + 4 > len) return "ERR,PLC,BIN,LOGICTRUNC";
+                const char* op =
+                    (tag == 0x22) ? "NOT" :
+                    (tag == 0x24) ? "GE"  :
+                    (tag == 0x25) ? "LE"  :
+                    (tag == 0x26) ? "GT"  :
+                    (tag == 0x27) ? "LT"  :
+                    (tag == 0x28) ? "EQ"  : "NE";
+                uint8_t  out   = data[off];
+                uint8_t  in1   = data[off + 1];
+                uint16_t thr1  = binRd16LE(data + off + 2);
+                off += 4;
+                resp = processLogicCommand(
+                    String("ADD,") + String(out) + "," + op + "," +
+                    String(in1) + "," + String(thr1));
+                break;
+            }
+            case 0x30: {  // LATCH SR
+                if (off + 7 > len) return "ERR,PLC,BIN,LATCHTRUNC";
+                uint8_t  out      = data[off];
+                uint8_t  setPin   = data[off + 1];
+                uint16_t setThr   = binRd16LE(data + off + 2);
+                uint8_t  rstPin   = data[off + 4];
+                uint16_t rstThr   = binRd16LE(data + off + 5);
+                off += 7;
+                resp = processLatchCommand(
+                    String("ADD,") + String(out) + "," +
+                    String(setPin) + "," + String(setThr) + "," +
+                    String(rstPin) + "," + String(rstThr));
+                break;
+            }
+            case 0x40: {  // SCALE
+                if (off + 7 > len) return "ERR,PLC,BIN,SCALETRUNC";
+                uint8_t  out    = data[off];
+                uint8_t  in     = data[off + 1];
+                float    factor = binRd32f_LE(data + off + 2);
+                int16_t  offs   = (int16_t)binRd16LE(data + off + 6);
+                off += 8;
+                resp = processScaleCommand(
+                    String("ADD,") + String(out) + "," + String(in) + "," +
+                    String(factor, 4) + "," + String(offs));
+                break;
+            }
+            case 0x50: {  // COUNTER
+                if (off + 8 > len) return "ERR,PLC,BIN,COUNTERTRUNC";
+                uint8_t  out       = data[off];
+                uint8_t  modeByte  = data[off + 1];   // 0=UP 1=DOWN 2=UPDOWN
+                uint8_t  up        = data[off + 2];
+                uint8_t  down      = data[off + 3];
+                uint8_t  preset    = data[off + 4];
+                uint8_t  reset     = data[off + 5];
+                uint16_t presetVal = binRd16LE(data + off + 6);
+                off += 8;
+                const char* modeStr = (modeByte == 0) ? "UP"
+                                    : (modeByte == 1) ? "DOWN" : "UPDOWN";
+                resp = processCounterCommand(
+                    String("ADD,") + String(out) + "," + modeStr + "," +
+                    String(up) + "," + String(down) + "," +
+                    String(preset) + "," + String(reset) + "," +
+                    String(presetVal));
+                break;
+            }
+            case 0x60: case 0x61: {  // SETPOINT MSG hi/lo
+                if (off + 2 > len) return "ERR,PLC,BIN,MSGTRUNC";
+                uint8_t vpin   = data[off];
+                uint8_t msgLen = data[off + 1];
+                if (off + 2 + msgLen > len) return "ERR,PLC,BIN,MSGTRUNC";
+                if (msgLen > SETPOINT_MSG_LEN) return "ERR,PLC,BIN,MSGTOOLONG";
+                // Copy message bytes into a sized String (the Setpoint
+                // ASCII parser splits on ',' — the message text must
+                // not contain a comma. Reject those packets explicitly.)
+                for (uint8_t i = 0; i < msgLen; i++)
+                    if (data[off + 2 + i] == ',') return "ERR,PLC,BIN,MSGCOMMA";
+                String msg;
+                msg.reserve(msgLen);
+                for (uint8_t i = 0; i < msgLen; i++)
+                    msg += (char)data[off + 2 + i];
+                off += 2 + msgLen;
+                const char* sp = (tag == 0x60) ? "GE" : "LT";
+                resp = processSetpointCommand(
+                    String(vpin) + "," + sp + ",1,MSG," + msg);
+                break;
+            }
+            case 0x62: case 0x63: {  // SETPOINT PULSE hi/lo
+                if (off + 4 > len) return "ERR,PLC,BIN,PULSETRUNC";
+                uint8_t  vpin = data[off];
+                uint8_t  pin  = data[off + 1];
+                uint16_t ms   = binRd16LE(data + off + 2);
+                off += 4;
+                const char* sp = (tag == 0x62) ? "GE" : "LT";
+                resp = processSetpointCommand(
+                    String(vpin) + "," + sp + ",1,PULSE," +
+                    String(pin) + "," + String(ms));
+                break;
+            }
+            case 0x64: {  // SETPOINT RELAY hi
+                if (off + 5 > len) return "ERR,PLC,BIN,RELAYTRUNC";
+                uint8_t  vpin   = data[off];
+                uint16_t target = binRd16LE(data + off + 1);
+                uint8_t  pin    = data[off + 3];
+                uint8_t  act    = data[off + 4];
+                off += 5;
+                // Render target as 4-char zero-padded hex to match ASCII form.
+                char tbuf[8];
+                snprintf(tbuf, sizeof(tbuf), "%04X", target);
+                resp = processSetpointCommand(
+                    String(vpin) + ",GE,1," + tbuf + "," +
+                    String(pin) + "," + String(act));
+                break;
+            }
+            default:
+                return "ERR,PLC,BIN,BADTAG," + String(tag, HEX);
+        }
+
+        if (resp.startsWith("ERR,")) {
+            return "ERR,PLC,BIN,DEPLOY," + String(count) + "," + resp;
+        }
+        count++;
+    }
+    return "OK,PLC,DEPLOY," + String(count);
 }
 
 // Build the binary SDATA payload for sensorPins[start..end).
@@ -3374,6 +3755,34 @@ void handleCmd(const String& from, const String& cmdBody) {
     }
     else if (action == "PLC") {
         handlePlcCmd(rest, from);
+    }
+    else if (action == "B") {
+        // Binary PLC deploy: rest is the base64-encoded binary blob. We
+        // decode here (decoupled from the mesh-layer encryption that
+        // already happened), feed the bytes to processPlcBinary, and
+        // reply with OK/ERR exactly like the ASCII PLC,DEPLOY path. Same
+        // mesh-reply + bleSend plumbing so the GUI gets the response the
+        // same way it does for ASCII.
+        size_t b64len = rest.length();
+        // Upper bound on decoded length: base64 expands 3 bytes -> 4
+        // chars, so decoded ≤ 3 * b64len / 4. Cap at 256 bytes (any
+        // deploy bigger than that won't fit in one LoRa packet anyway).
+        const size_t MAX_BIN = 256;
+        uint8_t binBuf[MAX_BIN];
+        int decoded = b64decode(rest.c_str(), b64len, binBuf, MAX_BIN);
+        String resp;
+        if (decoded < 0) {
+            resp = "ERR,PLC,BIN,B64";
+        } else {
+            resp = processPlcBinary(binBuf, (size_t)decoded);
+        }
+        mesh.cmdsExecuted++;
+        String mid = mesh.generateMsgID();
+        String hex = mesh.encryptMsg(resp);
+        String payload = String(mesh.localID) + "," + from + "," + mid + "," +
+                         String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+        mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+        bleSend(resp);
     }
     else if (action == "BEACON") {
         // BEACON,LIST: server-push. Emit count, each rule, then an END
@@ -5279,6 +5688,11 @@ void setup() {
 
     loadConfig();
     loadBeaconRules();
+    // Storage vpin persistence: read the opt-in bitmap first, then load
+    // values only for vpins the user has marked persistent. Non-persistent
+    // vpins stay at 0 in RAM (and never hit EEPROM during this session).
+    loadPersistMask();
+    loadPersistentStorageVpins();
 
     // Wire up MeshCore callbacks
     mesh.onTransmitRaw = radioTransmit;
