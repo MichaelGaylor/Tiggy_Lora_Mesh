@@ -411,6 +411,302 @@ inline void plcResetStats() {
     plcStats = PlcStats();
 }
 
+// ─── Peripheral devices ────────────────────────────────────────────
+// Standard Arduino-style sensors (DHT11/22, HC-SR04 ultrasonic, DS18B20,
+// generic I2C, SSD1306 OLED) get a small device table here. Each entry
+// is serviced from the main loop at its natural cadence and writes its
+// reading into one or more vpins (scratch by default). The PLC
+// primitives read those vpins like any other source — no special-case
+// logic for "did this come from a sensor or a Compare". This makes the
+// firmware a real platform: the user wires sensors in the GUI and the
+// firmware figures out how to talk to them.
+#define MAX_DEVICES 8
+#define DEVICE_OLED_FMT_LEN 64
+enum DeviceType : uint8_t {
+    DEV_NONE       = 0,
+    DEV_DHT11      = 1,
+    DEV_DHT22      = 2,
+    DEV_HCSR04     = 3,
+    DEV_DS18B20    = 4,
+    DEV_I2C_READ   = 5,
+    DEV_OLED       = 6,
+};
+struct Device {
+    bool      active;
+    uint8_t   type;          // DeviceType
+    uint8_t   pin1;          // primary pin (DATA, TRIG, ONEWIRE bus, …)
+    uint8_t   pin2;          // secondary (ECHO for ultrasonic; unused otherwise)
+    uint8_t   i2cAddr;       // I2C address for DEV_I2C_READ and DEV_OLED
+    uint8_t   i2cReg;        // register byte for DEV_I2C_READ
+    uint8_t   readBytes;     // 1 or 2 for DEV_I2C_READ
+    uint8_t   outVpin[4];    // up to 4 output vpins (DHT: temp+humid, I2C: 1)
+    uint16_t  intervalMs;    // service interval
+    uint32_t  lastServiceMs; // when this device last ran
+    // OLED-only: template string referencing vpins as {Vnnn}. Statically
+    // sized so the table stays POD; truncated by encoder.
+    char      oledFmt[DEVICE_OLED_FMT_LEN + 1];
+};
+Device devices[MAX_DEVICES];
+
+bool hasActiveOledDevice() {
+    for (int i = 0; i < MAX_DEVICES; i++) {
+        if (devices[i].active && devices[i].type == DEV_OLED) return true;
+    }
+    return false;
+}
+
+// Forward decl — lastOledRefresh lives down with the timing globals;
+// this lets clearAllDevices() force a system-default redraw when the
+// last OLED block goes away.
+extern unsigned long lastOledRefresh;
+
+void clearAllDevices() {
+    bool hadOled = hasActiveOledDevice();
+    for (int i = 0; i < MAX_DEVICES; i++) {
+        devices[i].active = false;
+        devices[i].oledFmt[0] = '\0';
+    }
+    // If an OLED block was running, revert to system-default OLED
+    // content (node ID, battery, etc.) by zeroing the refresh timer so
+    // updateOLED() fires on its next call instead of waiting 5s.
+    if (hadOled) {
+        lastOledRefresh = 0;
+    }
+}
+
+// Find free or matching-key device slot. For most devices the "key" is
+// (type, pin1) so re-deploying the same DHT on the same pin replaces
+// rather than fills a new slot. For I2C devices the key is (type, addr).
+int allocDeviceSlot(uint8_t type, uint8_t pin1, uint8_t i2cAddr) {
+    for (int i = 0; i < MAX_DEVICES; i++) {
+        if (!devices[i].active) continue;
+        if (devices[i].type != type) continue;
+        if (type == DEV_I2C_READ || type == DEV_OLED) {
+            if (devices[i].i2cAddr == i2cAddr) return i;
+        } else if (devices[i].pin1 == pin1) {
+            return i;
+        }
+    }
+    for (int i = 0; i < MAX_DEVICES; i++) if (!devices[i].active) return i;
+    return -1;
+}
+
+// ─── DHT11 / DHT22 minimal driver ────────────────────────────────
+// Single-wire timing protocol — host pulls low ≥18ms, releases, sensor
+// drives 80µs low + 80µs high handshake, then 40 data bits (each: 50µs
+// low + 26-70µs high; long high = 1, short high = 0). No library
+// dependency — ~50 lines. DHT22 uses the same protocol with different
+// scaling (signed 0.1°C and 0.1%, vs DHT11's integer °C and %).
+static bool dhtRead(uint8_t pin, bool isDht22, float* outTempC, float* outHumPct) {
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, LOW);
+    delay(isDht22 ? 1 : 18);  // DHT22 needs at least 1ms, DHT11 needs 18ms
+    digitalWrite(pin, HIGH);
+    delayMicroseconds(40);
+    pinMode(pin, INPUT_PULLUP);
+
+    // Wait for sensor low handshake (max ~85µs).
+    uint32_t t0 = micros();
+    while (digitalRead(pin) == HIGH) { if (micros() - t0 > 100) return false; }
+    t0 = micros();
+    while (digitalRead(pin) == LOW)  { if (micros() - t0 > 100) return false; }
+    t0 = micros();
+    while (digitalRead(pin) == HIGH) { if (micros() - t0 > 100) return false; }
+
+    uint8_t data[5] = {0,0,0,0,0};
+    for (int i = 0; i < 40; i++) {
+        // Wait through the 50µs low pulse that prefixes each bit.
+        t0 = micros();
+        while (digitalRead(pin) == LOW)  { if (micros() - t0 > 80) return false; }
+        // High duration encodes the bit. ~26µs = 0, ~70µs = 1. Threshold at 40µs.
+        uint32_t tHi = micros();
+        while (digitalRead(pin) == HIGH) { if (micros() - tHi > 100) return false; }
+        if (micros() - tHi > 40) data[i / 8] |= (uint8_t)(1 << (7 - (i % 8)));
+    }
+    // Checksum: low byte of (RH_int + RH_dec + T_int + T_dec).
+    if (((data[0] + data[1] + data[2] + data[3]) & 0xFF) != data[4]) return false;
+
+    if (isDht22) {
+        uint16_t rh  = ((uint16_t)data[0] << 8) | data[1];
+        int16_t  tC  = ((int16_t) (data[2] & 0x7F) << 8) | data[3];
+        if (data[2] & 0x80) tC = -tC;
+        *outHumPct = (float)rh / 10.0f;
+        *outTempC  = (float)tC / 10.0f;
+    } else {
+        *outHumPct = (float)data[0];
+        *outTempC  = (float)data[2];
+    }
+    return true;
+}
+
+// ─── HC-SR04 ultrasonic ──────────────────────────────────────────
+// 10µs HIGH pulse on TRIG, then time the HIGH on ECHO. Distance =
+// echoUs / 58 cm (speed of sound ~340 m/s round trip). Returns -1 on
+// timeout (out of range or sensor disconnected).
+static int hcsr04ReadCm(uint8_t trigPin, uint8_t echoPin) {
+    pinMode(trigPin, OUTPUT);
+    pinMode(echoPin, INPUT);
+    digitalWrite(trigPin, LOW);
+    delayMicroseconds(2);
+    digitalWrite(trigPin, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(trigPin, LOW);
+    // pulseIn returns 0 on timeout. 30000µs timeout = ~5m range cap.
+    unsigned long us = pulseIn(echoPin, HIGH, 30000UL);
+    if (us == 0) return -1;
+    return (int)(us / 58);
+}
+
+// ─── DS18B20 OneWire minimal driver ──────────────────────────────
+// Implements just enough to broadcast a "convert + read scratchpad" to
+// every DS18B20 on the bus and return the first one's temperature.
+// Saves pulling in OneWire + DallasTemperature (~10KB) for one feature.
+static bool oneWireReset(uint8_t pin) {
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, LOW);
+    delayMicroseconds(480);
+    pinMode(pin, INPUT_PULLUP);
+    delayMicroseconds(70);
+    bool present = (digitalRead(pin) == LOW);
+    delayMicroseconds(410);
+    return present;
+}
+static void oneWireWriteBit(uint8_t pin, bool bit) {
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, LOW);
+    delayMicroseconds(bit ? 6 : 60);
+    pinMode(pin, INPUT_PULLUP);
+    delayMicroseconds(bit ? 64 : 10);
+}
+static bool oneWireReadBit(uint8_t pin) {
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, LOW);
+    delayMicroseconds(6);
+    pinMode(pin, INPUT_PULLUP);
+    delayMicroseconds(9);
+    bool b = (digitalRead(pin) != 0);
+    delayMicroseconds(55);
+    return b;
+}
+static void oneWireWriteByte(uint8_t pin, uint8_t v) {
+    for (int i = 0; i < 8; i++) { oneWireWriteBit(pin, v & 1); v >>= 1; }
+}
+static uint8_t oneWireReadByte(uint8_t pin) {
+    uint8_t v = 0;
+    for (int i = 0; i < 8; i++) if (oneWireReadBit(pin)) v |= (1 << i);
+    return v;
+}
+
+// Returns temp °C × 10 (so the int fits in a uint16 vpin with 0.1°C
+// resolution). INT16_MIN on error.
+static int16_t ds18b20ReadTempC10(uint8_t pin) {
+    if (!oneWireReset(pin)) return INT16_MIN;
+    oneWireWriteByte(pin, 0xCC);  // SKIP ROM (broadcast to all devices)
+    oneWireWriteByte(pin, 0x44);  // CONVERT T
+    // Wait up to 750ms for 12-bit conversion. We use a blocking poll —
+    // the firmware's main loop already tolerates 100ms blocking calls.
+    uint32_t t0 = millis();
+    while (millis() - t0 < 800) {
+        if (oneWireReadBit(pin)) break;  // conversion done when bus reads 1
+    }
+    if (!oneWireReset(pin)) return INT16_MIN;
+    oneWireWriteByte(pin, 0xCC);  // SKIP ROM
+    oneWireWriteByte(pin, 0xBE);  // READ SCRATCHPAD
+    uint8_t lo = oneWireReadByte(pin);
+    uint8_t hi = oneWireReadByte(pin);
+    int16_t raw = (int16_t)((hi << 8) | lo);
+    // Raw is in 1/16°C steps (DS18B20 default 12-bit). Convert to ×10°C.
+    return (int16_t)((int32_t)raw * 10 / 16);
+}
+
+// ─── Device service loop ─────────────────────────────────────────
+// Called from the main loop every tick. Each active device runs at its
+// own cadence (intervalMs since lastServiceMs). Reads land in the
+// configured vpins via setVpinValue, which means they integrate with
+// the PLC primitives' scratch/storage dispatch automatically.
+void serviceDevices() {
+    uint32_t now = millis();
+    for (int i = 0; i < MAX_DEVICES; i++) {
+        Device& d = devices[i];
+        if (!d.active) continue;
+        if (d.intervalMs && (now - d.lastServiceMs) < d.intervalMs) continue;
+        d.lastServiceMs = now;
+        switch (d.type) {
+            case DEV_DHT11:
+            case DEV_DHT22: {
+                float t = 0, h = 0;
+                if (dhtRead(d.pin1, d.type == DEV_DHT22, &t, &h)) {
+                    if (d.outVpin[0]) setVpinValue(d.outVpin[0], (uint16_t)(t * 10));  // °C×10
+                    if (d.outVpin[1]) setVpinValue(d.outVpin[1], (uint16_t)(h * 10));  // %×10
+                }
+                break;
+            }
+            case DEV_HCSR04: {
+                int cm = hcsr04ReadCm(d.pin1, d.pin2);
+                if (cm >= 0 && d.outVpin[0]) setVpinValue(d.outVpin[0], (uint16_t)cm);
+                break;
+            }
+            case DEV_DS18B20: {
+                int16_t tC10 = ds18b20ReadTempC10(d.pin1);
+                if (tC10 != INT16_MIN && d.outVpin[0]) {
+                    // Store as unsigned — caller does its own signed
+                    // interpretation if needed. Negative temps wrap to
+                    // high uint16 values which downstream Compare blocks
+                    // can still discriminate against.
+                    setVpinValue(d.outVpin[0], (uint16_t)tC10);
+                }
+                break;
+            }
+            case DEV_I2C_READ: {
+                Wire.beginTransmission(d.i2cAddr);
+                Wire.write(d.i2cReg);
+                if (Wire.endTransmission(false) != 0) break;
+                uint8_t n = (d.readBytes == 2) ? 2 : 1;
+                Wire.requestFrom((int)d.i2cAddr, (int)n);
+                if (Wire.available() < n) break;
+                uint16_t v = Wire.read();
+                if (n == 2) v = (v << 8) | Wire.read();
+                if (d.outVpin[0]) setVpinValue(d.outVpin[0], v);
+                break;
+            }
+            case DEV_OLED: {
+                if (!oledAvailable) break;
+                // Substitute {Vnnn} placeholders with current vpin values
+                // and render. Format string is null-terminated, max
+                // DEVICE_OLED_FMT_LEN chars. Up to 4 lines via \n.
+                char rendered[DEVICE_OLED_FMT_LEN * 2 + 1];
+                size_t r = 0;
+                const char* p = d.oledFmt;
+                while (*p && r < sizeof(rendered) - 1) {
+                    if (p[0] == '{' && p[1] == 'V') {
+                        // Parse {Vnnn} — find closing brace.
+                        const char* close = strchr(p, '}');
+                        if (close && (close - p) <= 6) {
+                            int vp = atoi(p + 2);
+                            uint16_t v = getVpinValue(vp);
+                            int wrote = snprintf(rendered + r,
+                                                 sizeof(rendered) - r,
+                                                 "%u", (unsigned)v);
+                            if (wrote > 0) r += (size_t)wrote;
+                            p = close + 1;
+                            continue;
+                        }
+                    }
+                    rendered[r++] = *p++;
+                }
+                rendered[r] = '\0';
+                oled.clearDisplay();
+                oled.setTextSize(1);
+                oled.setTextColor(SSD1306_WHITE);
+                oled.setCursor(0, 0);
+                oled.print(rendered);
+                oled.display();
+                break;
+            }
+        }
+    }
+}
+
 // Append VIRTUAL_PINS (defined per-board or globally in Pins.h, default
 // {200..207}) onto BOTH relayPins[] and sensorPins[], skipping duplicates
 // and respecting MAX_*_CFG. Called from loadConfig on first boot and after
@@ -3117,6 +3413,7 @@ String processPlcCommand(const String& args) {
         processTimerCommand("CLEAR");
         clearAllStorageVpins();
         clearAllScratchVpins();
+        clearAllDevices();
         plcResetStats();
         return "OK,PLC,CLEAR";
     }
@@ -3149,6 +3446,7 @@ String processPlcCommand(const String& args) {
         processTimerCommand("CLEAR");
         clearAllStorageVpins();
         clearAllScratchVpins();
+        clearAllDevices();
         plcResetStats();
     }
 
@@ -3381,6 +3679,7 @@ String processPlcBinary(const uint8_t* data, size_t len) {
         processTimerCommand("CLEAR");
         clearAllStorageVpins();
         clearAllScratchVpins();
+        clearAllDevices();
         plcResetStats();
     }
 
@@ -3539,6 +3838,176 @@ String processPlcBinary(const uint8_t* data, size_t len) {
         count++;
     }
     return "OK,PLC,DEPLOY," + String(count);
+}
+
+// ─── DEVICE,* command handler ────────────────────────────────────
+// Parallel to processPlcCommand. The GUI emits DEVICE,ADD,... lines
+// for each peripheral block on a rule. PLC,CLEAR / PLC,DEPLOY,R also
+// call clearAllDevices() so re-deploys are atomic.
+//
+//   DEVICE,CLEAR                                 wipe all peripherals
+//   DEVICE,LIST                                  enumerate active devices
+//   DEVICE,ADD,DHT11,<pin>,<vT>,<vH>             temp×10 → vT, humid×10 → vH
+//   DEVICE,ADD,DHT22,<pin>,<vT>,<vH>             same with DHT22 scaling
+//   DEVICE,ADD,HCSR04,<trig>,<echo>,<vCm>        distance cm → vCm
+//   DEVICE,ADD,DS18B20,<pin>,<vT>                temp×10 °C → vT
+//   DEVICE,ADD,I2C,<addr>,<reg>,<bytes>,<vOut>   raw read, 1 or 2 bytes
+//   DEVICE,ADD,OLED,<base64_format>,<vp1>,...    OLED display block
+//                                                  format string base64'd
+//                                                  to escape commas
+String processDeviceCommand(const String& args) {
+    String act = args;
+    int comma = act.indexOf(',');
+    String first = (comma >= 0) ? act.substring(0, comma) : act;
+    String rest  = (comma >= 0) ? act.substring(comma + 1) : "";
+    first.toUpperCase();
+
+    if (first == "CLEAR") {
+        clearAllDevices();
+        return "OK,DEVICE,CLEAR";
+    }
+
+    if (first == "LIST") {
+        String resp = "DEVICES";
+        int count = 0;
+        const char* names[] = {"NONE","DHT11","DHT22","HCSR04","DS18B20","I2C","OLED"};
+        for (int i = 0; i < MAX_DEVICES; i++) {
+            if (!devices[i].active) continue;
+            count++;
+            uint8_t t = devices[i].type;
+            const char* tn = (t < sizeof(names)/sizeof(names[0])) ? names[t] : "?";
+            resp += String(",") + tn + ":";
+            if (t == DEV_HCSR04) {
+                resp += "trig" + String(devices[i].pin1) + "/echo" + String(devices[i].pin2);
+            } else if (t == DEV_I2C_READ || t == DEV_OLED) {
+                resp += "0x" + String(devices[i].i2cAddr, HEX);
+            } else {
+                resp += "p" + String(devices[i].pin1);
+            }
+            resp += "->v" + String(devices[i].outVpin[0]);
+            if (devices[i].outVpin[1]) resp += "+v" + String(devices[i].outVpin[1]);
+        }
+        if (count == 0) resp += ",NONE";
+        return resp;
+    }
+
+    if (first != "ADD") return "ERR,DEVICE,UNKNOWN";
+
+    // ADD,<type>,<args>
+    int c1 = rest.indexOf(',');
+    if (c1 < 0) return "ERR,DEVICE,FORMAT";
+    String typeStr = rest.substring(0, c1); typeStr.toUpperCase();
+    String tail    = rest.substring(c1 + 1);
+
+    uint8_t type = DEV_NONE;
+    if      (typeStr == "DHT11")   type = DEV_DHT11;
+    else if (typeStr == "DHT22")   type = DEV_DHT22;
+    else if (typeStr == "HCSR04")  type = DEV_HCSR04;
+    else if (typeStr == "DS18B20") type = DEV_DS18B20;
+    else if (typeStr == "I2C")     type = DEV_I2C_READ;
+    else if (typeStr == "OLED")    type = DEV_OLED;
+    else return "ERR,DEVICE,BADTYPE";
+
+    // Per-type parsing — each branch reads its args off tail and
+    // populates a temporary Device record, then claims a slot.
+    Device tmp = {};
+    tmp.type = type;
+    tmp.active = true;
+    tmp.lastServiceMs = 0;
+    tmp.oledFmt[0] = '\0';
+
+    auto nextTok = [&](String& src) -> String {
+        int p = src.indexOf(',');
+        String t = (p >= 0) ? src.substring(0, p) : src;
+        src = (p >= 0) ? src.substring(p + 1) : String("");
+        return t;
+    };
+
+    if (type == DEV_DHT11 || type == DEV_DHT22) {
+        // <pin>,<vT>,<vH>
+        String spin = nextTok(tail);
+        String svT  = nextTok(tail);
+        String svH  = nextTok(tail);
+        if (svT.length() == 0) return "ERR,DEVICE,FORMAT";
+        tmp.pin1 = (uint8_t)spin.toInt();
+        tmp.outVpin[0] = (uint8_t)svT.toInt();
+        tmp.outVpin[1] = (uint8_t)svH.toInt();
+        tmp.intervalMs = 2000;  // DHT11/22 need ≥1s between reads
+        if (!isPinConfigurable(tmp.pin1)) return "ERR,DEVICE,BADPIN";
+    } else if (type == DEV_HCSR04) {
+        // <trig>,<echo>,<vCm>
+        String strig = nextTok(tail);
+        String secho = nextTok(tail);
+        String svCm  = nextTok(tail);
+        if (svCm.length() == 0) return "ERR,DEVICE,FORMAT";
+        tmp.pin1 = (uint8_t)strig.toInt();
+        tmp.pin2 = (uint8_t)secho.toInt();
+        tmp.outVpin[0] = (uint8_t)svCm.toInt();
+        tmp.intervalMs = 200;   // 5Hz ultrasonic ping rate
+        if (!isPinConfigurable(tmp.pin1) || !isPinConfigurable(tmp.pin2))
+            return "ERR,DEVICE,BADPIN";
+    } else if (type == DEV_DS18B20) {
+        // <pin>,<vT>
+        String spin = nextTok(tail);
+        String svT  = nextTok(tail);
+        if (svT.length() == 0) return "ERR,DEVICE,FORMAT";
+        tmp.pin1 = (uint8_t)spin.toInt();
+        tmp.outVpin[0] = (uint8_t)svT.toInt();
+        tmp.intervalMs = 2000;
+        if (!isPinConfigurable(tmp.pin1)) return "ERR,DEVICE,BADPIN";
+    } else if (type == DEV_I2C_READ) {
+        // <addr>,<reg>,<bytes>,<vOut>
+        String saddr = nextTok(tail);
+        String sreg  = nextTok(tail);
+        String slen  = nextTok(tail);
+        String svout = nextTok(tail);
+        if (svout.length() == 0) return "ERR,DEVICE,FORMAT";
+        long a = saddr.startsWith("0x") ? strtol(saddr.c_str()+2, nullptr, 16)
+                                        : saddr.toInt();
+        long r = sreg.startsWith("0x")  ? strtol(sreg.c_str()+2,  nullptr, 16)
+                                        : sreg.toInt();
+        tmp.i2cAddr  = (uint8_t)a;
+        tmp.i2cReg   = (uint8_t)r;
+        tmp.readBytes = (uint8_t)slen.toInt();
+        if (tmp.readBytes != 1 && tmp.readBytes != 2) return "ERR,DEVICE,BADBYTES";
+        tmp.outVpin[0] = (uint8_t)svout.toInt();
+        tmp.intervalMs = 250;   // 4Hz I2C sample rate (plenty for env sensors)
+    } else if (type == DEV_OLED) {
+        // <base64_format>,<vp1>[,<vp2>...]
+        // Format is base64'd because it may contain commas/spaces/etc.
+        String b64 = nextTok(tail);
+        uint8_t decoded[DEVICE_OLED_FMT_LEN + 2];
+        int n = b64decode(b64.c_str(), b64.length(), decoded, sizeof(decoded));
+        if (n < 0) return "ERR,DEVICE,B64";
+        if (n > DEVICE_OLED_FMT_LEN) n = DEVICE_OLED_FMT_LEN;
+        for (int i = 0; i < n; i++) tmp.oledFmt[i] = (char)decoded[i];
+        tmp.oledFmt[n] = '\0';
+        // Up to 4 referenced vpins. Optional — the format string already
+        // knows {Vnnn} so this list is for status/debug only.
+        for (int i = 0; i < 4 && tail.length() > 0; i++) {
+            tmp.outVpin[i] = (uint8_t)nextTok(tail).toInt();
+        }
+        tmp.intervalMs = 500;   // 2Hz refresh — plenty for human reading
+    }
+
+    // Claim slot — replace-by-key on (type, pin1/addr) so re-deploys
+    // overwrite instead of running out of slots.
+    int slot = allocDeviceSlot(type, tmp.pin1, tmp.i2cAddr);
+    if (slot < 0) return "ERR,DEVICE,FULL";
+    devices[slot] = tmp;
+    return String("OK,DEVICE,ADD,") + typeStr;
+}
+
+void handleDeviceBle(const String& args) { bleSend(processDeviceCommand(args)); }
+void handleDeviceCmd(const String& args, const String& from) {
+    String resp = processDeviceCommand(args);
+    mesh.cmdsExecuted++;
+    String mid = mesh.generateMsgID();
+    String hex = mesh.encryptMsg(resp);
+    String payload = String(mesh.localID) + "," + from + "," + mid + "," +
+                     String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+    mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+    bleSend(resp);
 }
 
 // Build the binary SDATA payload for sensorPins[start..end).
@@ -3756,6 +4225,9 @@ void handleCmd(const String& from, const String& cmdBody) {
     }
     else if (action == "PLC") {
         handlePlcCmd(rest, from);
+    }
+    else if (action == "DEVICE") {
+        handleDeviceCmd(rest, from);
     }
     else if (action == "B") {
         // Binary PLC deploy: rest is the base64-encoded binary blob. We
@@ -5553,6 +6025,11 @@ void loadConfig() {
 
 void updateOLED() {
     if (!oledAvailable) return;
+    // If a Logic Builder OLED device is active it owns the screen.
+    // The block's serviceDevices() loop renders its own content, so
+    // suppress the system-default redraw to avoid both functions
+    // racing for the framebuffer (would cause visible flicker).
+    if (hasActiveOledDevice()) return;
     if (millis() - lastOledRefresh < 5000) return;
     lastOledRefresh = millis();
 
@@ -5907,6 +6384,7 @@ void loop() {
         checkLogic();
         checkLatches();
         checkScales();
+        serviceDevices();
         plcStats.scanTicks++;
         readGPS();
         broadcastGPS();
