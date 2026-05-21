@@ -18,6 +18,11 @@
 #include <Wire.h>
 #include <EEPROM.h>
 #include <RadioLib.h>
+// VL53L0X / VL53L1X laser time-of-flight distance sensors. Pololu's
+// libraries are smaller than Adafruit's (~5KB vs ~30KB) and have a
+// cleaner API for our use case (one-shot read from a service loop).
+#include <VL53L0X.h>
+#include <VL53L1X.h>
 // BLE stack: NimBLE-Arduino (replaces bluedroid). NimBLEDevice.h pulls in
 // the server, service, characteristic, scan, advertised-device APIs all
 // from one header. Security and 2902 descriptors are handled by methods
@@ -435,6 +440,9 @@ enum DeviceType : uint8_t {
     DEV_SHT31      = 8,   // high-accuracy temp + humidity
     DEV_INA226     = 9,   // bus voltage + current (shunt-based)
     DEV_MCP9808    = 10,  // ±0.25°C precision temperature
+    // Tier 3 — laser time-of-flight distance sensors
+    DEV_VL53L0X    = 11,  // ~30-1200mm, default addr 0x29
+    DEV_VL53L1X    = 12,  // ~40-4000mm, default addr 0x29 (long mode)
 };
 struct Device {
     bool      active;
@@ -455,6 +463,29 @@ struct Device {
     char      oledFmt[DEVICE_OLED_FMT_LEN + 1];
 };
 Device devices[MAX_DEVICES];
+
+// ─── VL53L0X / VL53L1X driver singletons ─────────────────────────
+// Each ToF sensor type has its own library instance + init flag.
+// We use the default I2C address (0x29) for both, so a node can
+// host at most one of each. Multi-sensor support would need XSHUT-
+// pin re-addressing — out of scope for v1; users who need multiple
+// ToF sensors can use the generic I2C block instead.
+//
+// initTried prevents retrying init on every service call after a
+// hardware failure (no sensor connected, bad wiring, etc.) — saves
+// 50ms per cycle of useless I2C timeouts and stops the logs filling
+// with the same retry message.
+static VL53L0X vl53l0x_drv;
+static bool    vl53l0x_initOK  = false;
+static bool    vl53l0x_initTried = false;
+static VL53L1X vl53l1x_drv;
+static bool    vl53l1x_initOK  = false;
+static bool    vl53l1x_initTried = false;
+
+static void vl53ResetState() {
+    vl53l0x_initOK = vl53l0x_initTried = false;
+    vl53l1x_initOK = vl53l1x_initTried = false;
+}
 
 bool hasActiveOledDevice() {
     for (int i = 0; i < MAX_DEVICES; i++) {
@@ -480,6 +511,10 @@ void clearAllDevices() {
     if (hadOled) {
         lastOledRefresh = 0;
     }
+    // Reset ToF sensor init state — next deploy that includes a
+    // VL53L0X/L1X will re-init from scratch (necessary because the
+    // user may have re-wired or power-cycled the sensor).
+    vl53ResetState();
 }
 
 // Find free or matching-key device slot. For most devices the "key" is
@@ -913,6 +948,57 @@ void serviceDevices() {
                 int16_t tC10 = 0;
                 if (mcp9808Read(d.i2cAddr, &tC10)) {
                     if (d.outVpin[0]) setVpinValue(d.outVpin[0], (uint16_t)tC10);
+                }
+                break;
+            }
+            case DEV_VL53L0X: {
+                // Lazy init on first service call. setBus() lets the
+                // library know our existing Wire instance — saves
+                // another Wire.begin() elsewhere. If sensor isn't
+                // physically present, init returns false and we never
+                // retry (initTried gate) to avoid log spam.
+                if (!vl53l0x_initTried) {
+                    vl53l0x_initTried = true;
+                    vl53l0x_drv.setBus(&Wire);
+                    vl53l0x_drv.setTimeout(500);
+                    if (vl53l0x_drv.init()) {
+                        // 50ms timing budget → ~20Hz max, good middle
+                        // ground between accuracy and update rate.
+                        vl53l0x_drv.setMeasurementTimingBudget(50000);
+                        vl53l0x_initOK = true;
+                    }
+                }
+                if (!vl53l0x_initOK) break;
+                uint16_t mm = vl53l0x_drv.readRangeSingleMillimeters();
+                // Library writes 65535 + sets timeout flag on read
+                // failure. Don't propagate that as a real reading —
+                // leave the vpin holding its last valid value.
+                if (!vl53l0x_drv.timeoutOccurred() && mm < 8190) {
+                    if (d.outVpin[0]) setVpinValue(d.outVpin[0], mm);
+                }
+                break;
+            }
+            case DEV_VL53L1X: {
+                if (!vl53l1x_initTried) {
+                    vl53l1x_initTried = true;
+                    vl53l1x_drv.setBus(&Wire);
+                    vl53l1x_drv.setTimeout(500);
+                    if (vl53l1x_drv.init()) {
+                        // Long-distance mode (~4m range) + 50ms TB —
+                        // typical use is "is something in the room",
+                        // so prioritise range over precision.
+                        vl53l1x_drv.setDistanceMode(VL53L1X::Long);
+                        vl53l1x_drv.setMeasurementTimingBudget(50000);
+                        vl53l1x_drv.startContinuous(50);  // 50ms interval
+                        vl53l1x_initOK = true;
+                    }
+                }
+                if (!vl53l1x_initOK) break;
+                if (vl53l1x_drv.dataReady()) {
+                    uint16_t mm = vl53l1x_drv.read(false);
+                    if (mm > 0 && mm < 8000) {
+                        if (d.outVpin[0]) setVpinValue(d.outVpin[0], mm);
+                    }
                 }
                 break;
             }
@@ -4118,7 +4204,8 @@ String processDeviceCommand(const String& args) {
         String resp = "DEVICES";
         int count = 0;
         const char* names[] = {"NONE","DHT11","DHT22","HCSR04","DS18B20","I2C","OLED",
-                               "BME280","SHT31","INA226","MCP9808"};
+                               "BME280","SHT31","INA226","MCP9808",
+                               "VL53L0X","VL53L1X"};
         for (int i = 0; i < MAX_DEVICES; i++) {
             if (!devices[i].active) continue;
             count++;
@@ -4158,6 +4245,8 @@ String processDeviceCommand(const String& args) {
     else if (typeStr == "SHT31")   type = DEV_SHT31;
     else if (typeStr == "INA226")  type = DEV_INA226;
     else if (typeStr == "MCP9808") type = DEV_MCP9808;
+    else if (typeStr == "VL53L0X") type = DEV_VL53L0X;
+    else if (typeStr == "VL53L1X") type = DEV_VL53L1X;
     else return "ERR,DEVICE,BADTYPE";
 
     // Per-type parsing — each branch reads its args off tail and
@@ -4291,6 +4380,17 @@ String processDeviceCommand(const String& args) {
         tmp.i2cAddr = (uint8_t)a;
         tmp.outVpin[0] = (uint8_t)svT.toInt();
         tmp.intervalMs = 1000;
+    } else if (type == DEV_VL53L0X || type == DEV_VL53L1X) {
+        // <vDistMm>   no address config (default 0x29; multi-sensor
+        // support needs XSHUT pin handling which v1 doesn't do).
+        String svDist = nextTok(tail);
+        if (svDist.length() == 0) return "ERR,DEVICE,FORMAT";
+        tmp.i2cAddr = 0x29;  // canonical ToF address
+        tmp.outVpin[0] = (uint8_t)svDist.toInt();
+        // VL53L0X: single-shot in service, allow 200ms between reads.
+        // VL53L1X: continuous mode, library buffers — service polls
+        // dataReady() so polling at 100ms is fine, no extra work.
+        tmp.intervalMs = (type == DEV_VL53L0X) ? 200 : 100;
     }
 
     // Claim slot — replace-by-key on (type, pin1/addr) so re-deploys
