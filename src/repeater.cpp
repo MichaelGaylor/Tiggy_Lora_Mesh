@@ -430,6 +430,11 @@ enum DeviceType : uint8_t {
     DEV_DS18B20    = 4,
     DEV_I2C_READ   = 5,
     DEV_OLED       = 6,
+    // Tier 2 — canned I2C wrappers for the most-asked sensors.
+    DEV_BME280     = 7,   // temp + pressure + humidity
+    DEV_SHT31      = 8,   // high-accuracy temp + humidity
+    DEV_INA226     = 9,   // bus voltage + current (shunt-based)
+    DEV_MCP9808    = 10,  // ±0.25°C precision temperature
 };
 struct Device {
     bool      active;
@@ -440,6 +445,9 @@ struct Device {
     uint8_t   i2cReg;        // register byte for DEV_I2C_READ
     uint8_t   readBytes;     // 1 or 2 for DEV_I2C_READ
     uint8_t   outVpin[4];    // up to 4 output vpins (DHT: temp+humid, I2C: 1)
+    // Per-device extra config — INA226 uses cfgA for shunt resistance
+    // in milliohms (e.g. 100 for a 0.1Ω shunt). Unused for other types.
+    int16_t   cfgA;
     uint16_t  intervalMs;    // service interval
     uint32_t  lastServiceMs; // when this device last ran
     // OLED-only: template string referencing vpins as {Vnnn}. Statically
@@ -619,6 +627,206 @@ static int16_t ds18b20ReadTempC10(uint8_t pin) {
     return (int16_t)((int32_t)raw * 10 / 16);
 }
 
+// ─── I2C helpers (Tier 2) ────────────────────────────────────────
+// Tiny wrappers used by all the canned I2C wrappers below. Each returns
+// false on bus error so the caller can leave the previous vpin value
+// in place instead of writing garbage. They use the standard Wire bus
+// configured for OLED elsewhere — sharing one bus between sensors and
+// the optional OLED is fine; the addresses don't collide.
+static bool i2cWrite8(uint8_t addr, uint8_t reg, uint8_t val) {
+    Wire.beginTransmission(addr);
+    Wire.write(reg);
+    Wire.write(val);
+    return Wire.endTransmission() == 0;
+}
+static bool i2cWrite16(uint8_t addr, uint8_t reg, uint16_t val) {
+    Wire.beginTransmission(addr);
+    Wire.write(reg);
+    Wire.write((uint8_t)(val >> 8));
+    Wire.write((uint8_t)(val & 0xFF));
+    return Wire.endTransmission() == 0;
+}
+static bool i2cReadN(uint8_t addr, uint8_t reg, uint8_t* buf, size_t n) {
+    Wire.beginTransmission(addr);
+    Wire.write(reg);
+    if (Wire.endTransmission(false) != 0) return false;
+    size_t got = Wire.requestFrom((int)addr, (int)n);
+    if (got < n) return false;
+    for (size_t i = 0; i < n; i++) buf[i] = Wire.read();
+    return true;
+}
+
+// ─── SHT31 driver (high-accuracy temp+humidity, addr 0x44/0x45) ──
+// Single-shot high-repeatability conversion: write 0x2400, wait ~15ms,
+// read 6 bytes (temp_hi temp_lo crc hum_hi hum_lo crc). We skip CRC
+// validation — a corrupted byte just produces an obviously-wrong value
+// the user will spot on the canvas, and CRC8 in 30 lines isn't worth
+// the code size for a sanity net.
+// Returns temp °C×10 and humidity %×10 via out params, or false on bus
+// error. -45°C..+130°C ×10 fits in int16_t; humidity 0..1000 in uint16.
+static bool sht31Read(uint8_t addr, int16_t* tempC10, uint16_t* humPct10) {
+    Wire.beginTransmission(addr);
+    Wire.write(0x24);
+    Wire.write(0x00);
+    if (Wire.endTransmission() != 0) return false;
+    delay(16);  // SHT31 high-rep conversion is ~15ms
+    uint8_t b[6];
+    Wire.requestFrom((int)addr, 6);
+    if (Wire.available() < 6) return false;
+    for (int i = 0; i < 6; i++) b[i] = Wire.read();
+    uint16_t rawT = ((uint16_t)b[0] << 8) | b[1];
+    uint16_t rawH = ((uint16_t)b[3] << 8) | b[4];
+    // Datasheet conversion (×10 scaled to fit uint16):
+    //   T_°C = -45 + 175 × rawT / 65535
+    //   RH_% =   0 + 100 × rawH / 65535
+    *tempC10  = (int16_t)((int32_t)175 * rawT / 65535 - 450) * 10 / 10;
+    // Better precision: scale to ×10 first, then divide.
+    *tempC10  = (int16_t)((int32_t)1750 * rawT / 65535 - 4500);
+    *humPct10 = (uint16_t)((int32_t)1000 * rawH / 65535);
+    return true;
+}
+
+// ─── MCP9808 driver (±0.25°C precision temp, addr 0x18..0x1F) ────
+// Just 2 bytes from register 0x05 (T_AMBIENT). Top 3 bits are flags
+// (alert/limit), low 13 bits are sign-extended 12.4 fixed-point °C.
+// Returns temp °C×10, or false on bus error. Range -40..+125°C.
+static bool mcp9808Read(uint8_t addr, int16_t* tempC10) {
+    uint8_t b[2];
+    if (!i2cReadN(addr, 0x05, b, 2)) return false;
+    int16_t raw = ((int16_t)(b[0] & 0x1F) << 8) | b[1];  // 13 bits
+    if (b[0] & 0x10) raw -= 0x2000;                       // sign extend
+    // raw is in 1/16°C steps. Convert to ×10°C:  raw * 10 / 16.
+    *tempC10 = (int16_t)((int32_t)raw * 10 / 16);
+    return true;
+}
+
+// ─── INA226 driver (bus voltage + current, addr 0x40..0x4F) ──────
+// Configures the calibration register on every read so the user can
+// hot-swap shunt resistors without rebooting. Then reads bus voltage
+// from reg 0x02 (LSB 1.25mV) and current from reg 0x04. cfgA is the
+// shunt resistance in milliohms — typical values 100 (0.1Ω, fits up
+// to ~20A) or 1 (0.001Ω, very high current shunt). Returns vMv (bus
+// voltage in millivolts) and iMa (current in milliamps).
+//
+// Calibration formula (per Texas Instruments INA226 datasheet):
+//   Current_LSB (A) = max_expected_current / 2^15
+//   CAL = 0.00512 / (Current_LSB × Rshunt)
+// We pick Current_LSB = 1 mA (so the raw current reg = mA directly)
+// → CAL = 5120 / Rshunt_mΩ
+static bool ina226Init(uint8_t addr, int16_t shuntMOhm) {
+    if (shuntMOhm <= 0) shuntMOhm = 100;  // default 0.1Ω
+    uint16_t cal = (uint16_t)(5120 / (uint32_t)shuntMOhm);
+    return i2cWrite16(addr, 0x05, cal);
+}
+static bool ina226Read(uint8_t addr, uint16_t* vMv, int16_t* iMa) {
+    uint8_t b[2];
+    if (!i2cReadN(addr, 0x02, b, 2)) return false;     // BUS_VOLTAGE
+    uint16_t rawV = ((uint16_t)b[0] << 8) | b[1];
+    // Bus voltage LSB = 1.25 mV.  rawV × 1.25 → mV
+    *vMv = (uint16_t)(((uint32_t)rawV * 5) / 4);
+    if (!i2cReadN(addr, 0x04, b, 2)) return false;     // CURRENT
+    int16_t rawI = (int16_t)(((uint16_t)b[0] << 8) | b[1]);
+    *iMa = rawI;  // Current_LSB chosen as 1 mA → raw == mA
+    return true;
+}
+
+// ─── BME280 driver (temp + pressure + humidity, addr 0x76/0x77) ──
+// Reads calibration coefficients fresh on every cycle. They could be
+// cached but the I2C reads are cheap (~3ms total) and stateless code
+// is half the size — no per-device cache struct to manage. Bosch's
+// integer compensation routines from the datasheet appendix produce
+// ×100 °C, Pa Q24.8, ×1024 %RH. We rescale to fit uint16 vpins:
+//   temp:     °C × 10  (e.g. 23.4°C = 234, signed)
+//   pressure: hPa × 10 (e.g. 1013.2 hPa = 10132, fits 9000–11000)
+//   humidity: % × 10   (0..1000)
+struct BmeCal {
+    uint16_t T1; int16_t T2, T3;
+    uint16_t P1; int16_t P2,P3,P4,P5,P6,P7,P8,P9;
+    uint8_t  H1; int16_t H2; uint8_t H3; int16_t H4, H5; int8_t H6;
+};
+static bool bme280ReadCal(uint8_t addr, BmeCal& c) {
+    uint8_t b[26];
+    if (!i2cReadN(addr, 0x88, b, 26)) return false;
+    c.T1 = (uint16_t)(b[0]  | (b[1]  << 8));
+    c.T2 = (int16_t) (b[2]  | (b[3]  << 8));
+    c.T3 = (int16_t) (b[4]  | (b[5]  << 8));
+    c.P1 = (uint16_t)(b[6]  | (b[7]  << 8));
+    c.P2 = (int16_t) (b[8]  | (b[9]  << 8));
+    c.P3 = (int16_t) (b[10] | (b[11] << 8));
+    c.P4 = (int16_t) (b[12] | (b[13] << 8));
+    c.P5 = (int16_t) (b[14] | (b[15] << 8));
+    c.P6 = (int16_t) (b[16] | (b[17] << 8));
+    c.P7 = (int16_t) (b[18] | (b[19] << 8));
+    c.P8 = (int16_t) (b[20] | (b[21] << 8));
+    c.P9 = (int16_t) (b[22] | (b[23] << 8));
+    c.H1 = b[25];
+    uint8_t h[7];
+    if (!i2cReadN(addr, 0xE1, h, 7)) return false;
+    c.H2 = (int16_t)(h[0] | (h[1] << 8));
+    c.H3 = h[2];
+    c.H4 = (int16_t)(((int16_t)h[3] << 4) | (h[4] & 0x0F));
+    c.H5 = (int16_t)(((int16_t)h[5] << 4) | (h[4] >> 4));
+    c.H6 = (int8_t)h[6];
+    return true;
+}
+static bool bme280Read(uint8_t addr, int16_t* tempC10, uint16_t* hPa10,
+                       uint16_t* humPct10) {
+    BmeCal cal;
+    if (!bme280ReadCal(addr, cal)) return false;
+    // Configure: humidity oversample x1, temp+press oversample x1, forced mode.
+    i2cWrite8(addr, 0xF2, 0x01);   // ctrl_hum
+    i2cWrite8(addr, 0xF4, 0x25);   // ctrl_meas (osrs_t=1, osrs_p=1, mode=forced)
+    delay(10);                     // wait for measurement
+    uint8_t b[8];
+    if (!i2cReadN(addr, 0xF7, b, 8)) return false;
+    int32_t adc_P = ((int32_t)b[0] << 12) | ((int32_t)b[1] << 4) | (b[2] >> 4);
+    int32_t adc_T = ((int32_t)b[3] << 12) | ((int32_t)b[4] << 4) | (b[5] >> 4);
+    int32_t adc_H = ((int32_t)b[6] <<  8) |  (int32_t)b[7];
+
+    // ─ Temperature (Bosch datasheet reference, int32) ─
+    int32_t var1, var2, t_fine, T;
+    var1 = ((((adc_T >> 3) - ((int32_t)cal.T1 << 1))) * ((int32_t)cal.T2)) >> 11;
+    var2 = (((((adc_T >> 4) - ((int32_t)cal.T1)) *
+             ((adc_T >> 4) - ((int32_t)cal.T1))) >> 12) * ((int32_t)cal.T3)) >> 14;
+    t_fine = var1 + var2;
+    T = (t_fine * 5 + 128) >> 8;   // °C × 100
+    *tempC10 = (int16_t)(T / 10);
+
+    // ─ Pressure (Bosch reference, int64 — works fine on ESP32-S3) ─
+    int64_t pv1, pv2, p;
+    pv1 = ((int64_t)t_fine) - 128000;
+    pv2 = pv1 * pv1 * (int64_t)cal.P6;
+    pv2 = pv2 + ((pv1 * (int64_t)cal.P5) << 17);
+    pv2 = pv2 + (((int64_t)cal.P4) << 35);
+    pv1 = ((pv1 * pv1 * (int64_t)cal.P3) >> 8) + ((pv1 * (int64_t)cal.P2) << 12);
+    pv1 = ((((int64_t)1) << 47) + pv1) * ((int64_t)cal.P1) >> 33;
+    if (pv1 == 0) { *hPa10 = 0; }
+    else {
+        p = 1048576 - adc_P;
+        p = (((p << 31) - pv2) * 3125) / pv1;
+        pv1 = (((int64_t)cal.P9) * (p >> 13) * (p >> 13)) >> 25;
+        pv2 = (((int64_t)cal.P8) * p) >> 19;
+        p = ((p + pv1 + pv2) >> 8) + (((int64_t)cal.P7) << 4);
+        // p is Pa in Q24.8. Convert to hPa × 10: p / 256 / 10 = p / 2560.
+        *hPa10 = (uint16_t)(p / 2560);
+    }
+
+    // ─ Humidity (Bosch reference, int32) ─
+    int32_t v_x1_u32r = (t_fine - ((int32_t)76800));
+    v_x1_u32r = (((((adc_H << 14) - (((int32_t)cal.H4) << 20) -
+                    (((int32_t)cal.H5) * v_x1_u32r)) + ((int32_t)16384)) >> 15) *
+                 (((((((v_x1_u32r * ((int32_t)cal.H6)) >> 10) *
+                      (((v_x1_u32r * ((int32_t)cal.H3)) >> 11) + ((int32_t)32768))) >> 10) +
+                    ((int32_t)2097152)) * ((int32_t)cal.H2) + 8192) >> 14));
+    v_x1_u32r = (v_x1_u32r - (((((v_x1_u32r >> 15) * (v_x1_u32r >> 15)) >> 7) *
+                                ((int32_t)cal.H1)) >> 4));
+    v_x1_u32r = (v_x1_u32r < 0) ? 0 : v_x1_u32r;
+    v_x1_u32r = (v_x1_u32r > 419430400) ? 419430400 : v_x1_u32r;
+    uint32_t humQ22 = (uint32_t)(v_x1_u32r >> 12);   // %RH × 1024
+    *humPct10 = (uint16_t)((humQ22 * 10) / 1024);
+    return true;
+}
+
 // ─── Device service loop ─────────────────────────────────────────
 // Called from the main loop every tick. Each active device runs at its
 // own cadence (intervalMs since lastServiceMs). Reads land in the
@@ -667,6 +875,45 @@ void serviceDevices() {
                 uint16_t v = Wire.read();
                 if (n == 2) v = (v << 8) | Wire.read();
                 if (d.outVpin[0]) setVpinValue(d.outVpin[0], v);
+                break;
+            }
+            case DEV_BME280: {
+                int16_t  tC10  = 0;
+                uint16_t hPa10 = 0;
+                uint16_t hum10 = 0;
+                if (bme280Read(d.i2cAddr, &tC10, &hPa10, &hum10)) {
+                    if (d.outVpin[0]) setVpinValue(d.outVpin[0], (uint16_t)tC10);
+                    if (d.outVpin[1]) setVpinValue(d.outVpin[1], hPa10);
+                    if (d.outVpin[2]) setVpinValue(d.outVpin[2], hum10);
+                }
+                break;
+            }
+            case DEV_SHT31: {
+                int16_t  tC10  = 0;
+                uint16_t hum10 = 0;
+                if (sht31Read(d.i2cAddr, &tC10, &hum10)) {
+                    if (d.outVpin[0]) setVpinValue(d.outVpin[0], (uint16_t)tC10);
+                    if (d.outVpin[1]) setVpinValue(d.outVpin[1], hum10);
+                }
+                break;
+            }
+            case DEV_INA226: {
+                // Cheap re-init on each cycle — keeps the firmware
+                // stateless and lets the user hot-swap shunts.
+                ina226Init(d.i2cAddr, d.cfgA);
+                uint16_t vMv = 0;
+                int16_t  iMa = 0;
+                if (ina226Read(d.i2cAddr, &vMv, &iMa)) {
+                    if (d.outVpin[0]) setVpinValue(d.outVpin[0], vMv);
+                    if (d.outVpin[1]) setVpinValue(d.outVpin[1], (uint16_t)iMa);
+                }
+                break;
+            }
+            case DEV_MCP9808: {
+                int16_t tC10 = 0;
+                if (mcp9808Read(d.i2cAddr, &tC10)) {
+                    if (d.outVpin[0]) setVpinValue(d.outVpin[0], (uint16_t)tC10);
+                }
                 break;
             }
             case DEV_OLED: {
@@ -3870,7 +4117,8 @@ String processDeviceCommand(const String& args) {
     if (first == "LIST") {
         String resp = "DEVICES";
         int count = 0;
-        const char* names[] = {"NONE","DHT11","DHT22","HCSR04","DS18B20","I2C","OLED"};
+        const char* names[] = {"NONE","DHT11","DHT22","HCSR04","DS18B20","I2C","OLED",
+                               "BME280","SHT31","INA226","MCP9808"};
         for (int i = 0; i < MAX_DEVICES; i++) {
             if (!devices[i].active) continue;
             count++;
@@ -3906,6 +4154,10 @@ String processDeviceCommand(const String& args) {
     else if (typeStr == "DS18B20") type = DEV_DS18B20;
     else if (typeStr == "I2C")     type = DEV_I2C_READ;
     else if (typeStr == "OLED")    type = DEV_OLED;
+    else if (typeStr == "BME280")  type = DEV_BME280;
+    else if (typeStr == "SHT31")   type = DEV_SHT31;
+    else if (typeStr == "INA226")  type = DEV_INA226;
+    else if (typeStr == "MCP9808") type = DEV_MCP9808;
     else return "ERR,DEVICE,BADTYPE";
 
     // Per-type parsing — each branch reads its args off tail and
@@ -3988,6 +4240,57 @@ String processDeviceCommand(const String& args) {
             tmp.outVpin[i] = (uint8_t)nextTok(tail).toInt();
         }
         tmp.intervalMs = 500;   // 2Hz refresh — plenty for human reading
+    } else if (type == DEV_BME280) {
+        // <addr>,<vT>,<vP>,<vH>   addr accepts 0x76 / 0x77 / decimal
+        String saddr = nextTok(tail);
+        String svT   = nextTok(tail);
+        String svP   = nextTok(tail);
+        String svH   = nextTok(tail);
+        if (svH.length() == 0) return "ERR,DEVICE,FORMAT";
+        long a = saddr.startsWith("0x") ? strtol(saddr.c_str()+2, nullptr, 16)
+                                        : saddr.toInt();
+        tmp.i2cAddr = (uint8_t)a;
+        tmp.outVpin[0] = (uint8_t)svT.toInt();
+        tmp.outVpin[1] = (uint8_t)svP.toInt();
+        tmp.outVpin[2] = (uint8_t)svH.toInt();
+        tmp.intervalMs = 2000;  // BME280 forced-mode cycle suits ~0.5Hz
+    } else if (type == DEV_SHT31) {
+        // <addr>,<vT>,<vH>   addr accepts 0x44 / 0x45 / decimal
+        String saddr = nextTok(tail);
+        String svT   = nextTok(tail);
+        String svH   = nextTok(tail);
+        if (svH.length() == 0) return "ERR,DEVICE,FORMAT";
+        long a = saddr.startsWith("0x") ? strtol(saddr.c_str()+2, nullptr, 16)
+                                        : saddr.toInt();
+        tmp.i2cAddr = (uint8_t)a;
+        tmp.outVpin[0] = (uint8_t)svT.toInt();
+        tmp.outVpin[1] = (uint8_t)svH.toInt();
+        tmp.intervalMs = 1000;
+    } else if (type == DEV_INA226) {
+        // <addr>,<shunt_mOhm>,<vBusMv>,<iMa>
+        String saddr  = nextTok(tail);
+        String sshunt = nextTok(tail);
+        String svBus  = nextTok(tail);
+        String svI    = nextTok(tail);
+        if (svI.length() == 0) return "ERR,DEVICE,FORMAT";
+        long a = saddr.startsWith("0x") ? strtol(saddr.c_str()+2, nullptr, 16)
+                                        : saddr.toInt();
+        tmp.i2cAddr = (uint8_t)a;
+        tmp.cfgA    = (int16_t)sshunt.toInt();
+        if (tmp.cfgA <= 0) tmp.cfgA = 100;  // sensible default: 0.1Ω
+        tmp.outVpin[0] = (uint8_t)svBus.toInt();
+        tmp.outVpin[1] = (uint8_t)svI.toInt();
+        tmp.intervalMs = 500;   // 2Hz current monitoring
+    } else if (type == DEV_MCP9808) {
+        // <addr>,<vT>   addr accepts 0x18..0x1F
+        String saddr = nextTok(tail);
+        String svT   = nextTok(tail);
+        if (svT.length() == 0) return "ERR,DEVICE,FORMAT";
+        long a = saddr.startsWith("0x") ? strtol(saddr.c_str()+2, nullptr, 16)
+                                        : saddr.toInt();
+        tmp.i2cAddr = (uint8_t)a;
+        tmp.outVpin[0] = (uint8_t)svT.toInt();
+        tmp.intervalMs = 1000;
     }
 
     // Claim slot — replace-by-key on (type, pin1/addr) so re-deploys
