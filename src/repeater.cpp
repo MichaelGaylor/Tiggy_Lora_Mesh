@@ -5937,8 +5937,10 @@ void loadConfig() {
 
     // Pin config version check — if version doesn't match, reset to defaults
     // This catches old EEPROM with wrong pins (e.g., 19/20/33 on ESP32-S3)
-    #define PIN_CONFIG_VERSION 9  // v9: storage vpins 200-207 baked into DEFAULT_*_PINS,
-                                  //     MAX_*_CFG bumped 8/6 -> 16/16, EEPROM addr 410 -> 1700
+    #define PIN_CONFIG_VERSION 10 // v10: TiggyOpenMesh V1 sensor list += GPIO40 (J9
+                                  //      direct-connect for DHT22/DS18B20/HC-SR04);
+                                  //      v9: storage vpins 200-207 baked into DEFAULT_*_PINS,
+                                  //      MAX_*_CFG bumped 8/6 -> 16/16, EEPROM addr 410 -> 1700
     #define EEPROM_PIN_VER_ADDR 448  // After BLEPIN (443-446), safe gap
     uint8_t pinVer = EEPROM.read(EEPROM_PIN_VER_ADDR);
     if (pinVer != PIN_CONFIG_VERSION) {

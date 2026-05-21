@@ -667,10 +667,19 @@
 //   46      strap pin
 //   47      RF_SW
 //   1       Battery ADC (after rework)
+// Sensor headers:
+//   5, 6, 7    opto-isolated digital inputs (active LOW on GPIO side —
+//              external HIGH lights the opto LED → GPIO reads LOW). Use
+//              an inverter / Compare<1 downstream if your logic expects
+//              positive polarity.
+//   40         J9 direct-connect digital pin (JP1 closed bypasses opto).
+//              Bidirectional + fast — required for DHT22, DS18B20,
+//              HC-SR04 echo. R18 5.1k pull-up to 3.3V already on board.
+//   15, 16     spare digital pins
 // Available extras for future use: 45, 48
 #define USER_GPIO_COUNT     8
 #define DEFAULT_RELAY_PINS  { 2, 3, 4 }
-#define DEFAULT_SENSOR_PINS { 5, 6, 7, 15, 16 }
+#define DEFAULT_SENSOR_PINS { 5, 6, 7, 15, 16, 40 }
 #define SENSOR_PIN_COUNT    5
 
 // ═══════════════════════════════════════════════════════════════
