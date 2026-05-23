@@ -4059,6 +4059,7 @@ String processLogicCommand(const String& args);
 String processLatchCommand(const String& args);
 String processScaleCommand(const String& args);
 String processTimerCommand(const String& args);
+void   saveBeaconRules();  // used by processBeaconBinary on REPLACE
 
 static inline uint16_t binRd16LE(const uint8_t* p) {
     return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
@@ -4246,6 +4247,185 @@ String processPlcBinary(const uint8_t* data, size_t len) {
         count++;
     }
     return "OK,PLC,DEPLOY," + String(count);
+}
+
+// ─── Binary BEACON,ADD deploy ────────────────────────────────────
+// Parallel to processPlcBinary but for BEACON,ADD records. Cut down
+// from the ASCII path because BEACON,ADD with a leave-message was
+// pushing 250 B plaintext (over the 249 B LoRa frame budget) once the
+// MAC + name + cooldown + enter/leave fields were all on the wire.
+// Binary fits the same record in ~45 B, leaving plenty of headroom
+// for future fields and multi-beacon deploys in a single packet.
+//
+// Wire verb: CMD,BB,<base64>    (BB = "Beacon Binary")
+//
+// Layout (all values little-endian unless noted):
+//   header  1B  magic = 0x02
+//           1B  flags  (bit 0: 1 = call BEACON,CLEAR first, 0 = append)
+//           1B  record count
+//   body    N × records, each:
+//           1B  tag (only 0x70 currently)
+//
+//   0x70  BEACON_ADD
+//           1B   id_type        0 = MAC (6 B), 1 = UUID (16 B)
+//           6/16 id              binary MAC or UUID
+//           1B   name_len
+//           N    name bytes
+//           1B   rssi           int8, e.g. -70 → 0xBA
+//           1B   action         0 = RELAY, 1 = MSG, 2 = PULSE
+//           2B   cooldown_ms    uint16 LE
+//           [action-specific tail]
+//             RELAY:
+//               1B  pin
+//               1B  state
+//               2B  target_node    uint16 LE (0 = local)
+//               2B  revert_ms      0 = no revert
+//             MSG:
+//               1B  enter_len
+//               N   enter_msg
+//               1B  leave_len      0 = no leave message
+//               N   leave_msg
+//             PULSE:
+//               1B  pin
+//               2B  duration_ms
+//               1B  leave_rssi     int8, 0 = no leave action
+//               1B  leave_pin      0 = no leave action
+//               2B  leave_pulse_ms 0 = no leave action
+//
+// For each record we re-build the ASCII BEACON,ADD form and dispatch
+// to processBeaconCommand so all validation (slot allocation, EEPROM
+// save, pin checks) lives in one place. The per-record reply
+// (OK,BEACON,ADD,<slot>,<name> or ERR,BEACON,...) is emitted via the
+// existing bleSend / notifyBeaconEvent path so the GUI's existing
+// pending-deploy tracking just works.
+//
+// Returns "OK,BCN,DEPLOY,<count>" on success or "ERR,BCN,BIN,..." on
+// a malformed packet. Per-record ERRs from processBeaconCommand abort
+// the whole deploy with the record index attached.
+static String _binHexBytes(const uint8_t* p, size_t n, char sep) {
+    String s;
+    char buf[4];
+    for (size_t i = 0; i < n; i++) {
+        snprintf(buf, sizeof(buf), "%02X", p[i]);
+        s += buf;
+        if (sep && i + 1 < n) s += sep;
+    }
+    return s;
+}
+
+String processBeaconBinary(const uint8_t* data, size_t len, const String& from) {
+    if (len < 3 || data[0] != 0x02) return "ERR,BCN,BIN,BADMAGIC";
+    uint8_t flags    = data[1];
+    uint8_t expected = data[2];
+    size_t  off      = 3;
+
+    if (flags & 0x01) {
+        // REPLACE — wipe existing beacon rules first so the deploy is
+        // atomic from the user's perspective.
+        for (int i = 0; i < MAX_BEACON_RULES; i++) beaconRules[i].active = false;
+        saveBeaconRules();
+    }
+
+    int count = 0;
+    while (off < len && count < expected) {
+        uint8_t tag = data[off++];
+        if (tag != 0x70) {
+            return "ERR,BCN,BIN,BADTAG," + String(tag, HEX);
+        }
+        // Header up to action_type for length-sanity check.
+        if (off + 1 > len) return "ERR,BCN,BIN,TRUNC,IDTYPE";
+        uint8_t idType = data[off++];
+        size_t  idLen  = (idType == 0) ? 6 : 16;
+        if (off + idLen > len) return "ERR,BCN,BIN,TRUNC,ID";
+        String idStr = (idType == 0)
+            ? _binHexBytes(data + off, 6, ':')   // MAC: AA:BB:CC:DD:EE:FF
+            : _binHexBytes(data + off, 16, 0);   // UUID hex; reformatted below
+        if (idType == 1) {
+            // 8-4-4-4-12 UUID format with dashes.
+            idStr = idStr.substring(0, 8)  + "-" + idStr.substring(8, 12) + "-" +
+                    idStr.substring(12, 16) + "-" + idStr.substring(16, 20) + "-" +
+                    idStr.substring(20);
+        }
+        off += idLen;
+
+        if (off + 1 > len) return "ERR,BCN,BIN,TRUNC,NAMELEN";
+        uint8_t nameLen = data[off++];
+        if (off + nameLen > len) return "ERR,BCN,BIN,TRUNC,NAME";
+        String name; name.reserve(nameLen);
+        for (uint8_t i = 0; i < nameLen; i++) {
+            char c = (char)data[off + i];
+            if (c == ',') return "ERR,BCN,BIN,NAMECOMMA";
+            name += c;
+        }
+        off += nameLen;
+
+        if (off + 4 > len) return "ERR,BCN,BIN,TRUNC,HDR";
+        int8_t   rssi       = (int8_t)data[off];
+        uint8_t  action     = data[off + 1];
+        uint16_t cooldownMs = binRd16LE(data + off + 2);
+        off += 4;
+
+        String args = "ADD," + idStr + "," + name + "," + String((int)rssi) + ",";
+        if (action == 0) {
+            // RELAY
+            if (off + 6 > len) return "ERR,BCN,BIN,TRUNC,RELAY";
+            uint8_t  pin       = data[off];
+            uint8_t  state     = data[off + 1];
+            uint16_t target    = binRd16LE(data + off + 2);
+            uint16_t revertMs  = binRd16LE(data + off + 4);
+            off += 6;
+            args += "RELAY,";
+            if (target) {
+                char tbuf[8];
+                snprintf(tbuf, sizeof(tbuf), "%04X", target);
+                args += String(tbuf) + ",";
+            }
+            args += String(pin) + "," + String(state) + "," + String(cooldownMs);
+            if (revertMs > 0) args += ",REVERT," + String(revertMs);
+        } else if (action == 1) {
+            // MSG — enter text, optional leave text. ASCII path uses
+            // ",LEAVE,<leave>" suffix; the firmware already understands it.
+            if (off + 1 > len) return "ERR,BCN,BIN,TRUNC,MSGENTERLEN";
+            uint8_t enterLen = data[off++];
+            if (off + enterLen > len) return "ERR,BCN,BIN,TRUNC,MSGENTER";
+            String enterMsg; enterMsg.reserve(enterLen);
+            for (uint8_t i = 0; i < enterLen; i++) enterMsg += (char)data[off + i];
+            off += enterLen;
+            if (off + 1 > len) return "ERR,BCN,BIN,TRUNC,MSGLEAVELEN";
+            uint8_t leaveLen = data[off++];
+            if (off + leaveLen > len) return "ERR,BCN,BIN,TRUNC,MSGLEAVE";
+            String leaveMsg; leaveMsg.reserve(leaveLen);
+            for (uint8_t i = 0; i < leaveLen; i++) leaveMsg += (char)data[off + i];
+            off += leaveLen;
+            args += "MSG," + enterMsg + "," + String(cooldownMs);
+            if (leaveLen > 0) args += ",LEAVE," + leaveMsg;
+        } else if (action == 2) {
+            // PULSE — optional asymmetric LEAVE.
+            if (off + 7 > len) return "ERR,BCN,BIN,TRUNC,PULSE";
+            uint8_t  pin           = data[off];
+            uint16_t durMs         = binRd16LE(data + off + 1);
+            int8_t   leaveRssi     = (int8_t)data[off + 3];
+            uint8_t  leavePin      = data[off + 4];
+            uint16_t leavePulseMs  = binRd16LE(data + off + 5);
+            off += 7;
+            args += "PULSE," + String(pin) + "," + String(durMs) + "," + String(cooldownMs);
+            if (leavePin > 0 && leavePulseMs > 0) {
+                args += ",LEAVE," + String((int)leaveRssi) + "," +
+                        String(leavePin) + "," + String(leavePulseMs);
+            }
+        } else {
+            return "ERR,BCN,BIN,BADACTION," + String(action);
+        }
+
+        String resp = processBeaconCommand(args);
+        // Emit reply through the same channels the ASCII path uses.
+        notifyBeaconEvent(resp, from != "LOCAL");
+        if (resp.startsWith("ERR,")) {
+            return "ERR,BCN,BIN,DEPLOY," + String(count) + "," + resp;
+        }
+        count++;
+    }
+    return "OK,BCN,DEPLOY," + String(count);
 }
 
 // ─── DEVICE,* command handler ────────────────────────────────────
@@ -4726,6 +4906,34 @@ void handleCmd(const String& from, const String& cmdBody) {
             resp = "ERR,PLC,BIN,B64";
         } else {
             resp = processPlcBinary(binBuf, (size_t)decoded);
+        }
+        mesh.cmdsExecuted++;
+        String mid = mesh.generateMsgID();
+        String hex = mesh.encryptMsg(resp);
+        String payload = String(mesh.localID) + "," + from + "," + mid + "," +
+                         String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+        mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+        bleSend(resp);
+    }
+    else if (action == "BB") {
+        // Binary BEACON deploy. Same wire pattern as "B" but the binary
+        // blob is dispatched to processBeaconBinary instead of
+        // processPlcBinary — see that function for the layout. We needed
+        // a separate verb (not just another tag inside "B,") because the
+        // per-record reply from BEACON,ADD is "OK,BEACON,ADD,<slot>,
+        // <name>" which is what the GUI's pending-deploy tracker is
+        // listening for. processBeaconBinary emits those per record via
+        // notifyBeaconEvent, then we send the summary "OK,BCN,DEPLOY,N"
+        // back over mesh/BLE just like the ASCII path's overall reply.
+        size_t b64len = rest.length();
+        const size_t MAX_BIN = 256;
+        uint8_t binBuf[MAX_BIN];
+        int decoded = b64decode(rest.c_str(), b64len, binBuf, MAX_BIN);
+        String resp;
+        if (decoded < 0) {
+            resp = "ERR,BCN,BIN,B64";
+        } else {
+            resp = processBeaconBinary(binBuf, (size_t)decoded, from);
         }
         mesh.cmdsExecuted++;
         String mid = mesh.generateMsgID();
