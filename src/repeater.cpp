@@ -3060,13 +3060,29 @@ void checkSetpoints() {
             // a transient drop below threshold during the hold window would
             // double-fire the revert.
             if (setpoints[i].triggered && setpoints[i].holdMs == 0) {
-                // Falling edge — hysteresis check on scaled value
-                float margin = fabsf(setpoints[i].threshold) * 0.1f;
-                if (margin < 0.1f) margin = 0.1f;
+                // Falling edge — hysteresis check on scaled value.
+                //
+                // For integer thresholds (boolean-domain rules: vpin GE,1
+                // and LT,1 from the PLC compiler), skip the margin: a
+                // digital source can only be 0 or 1, so the value can
+                // NEVER cross "threshold ± margin" (e.g. for LT,1 the
+                // clear gate becomes value > 1.1 which V=1 never
+                // satisfies — leaves the setpoint stuck triggered after
+                // its first fire and "Gate Close" / equivalent
+                // falling-edge MSG never re-fires).
+                //
+                // For non-integer thresholds (analog sensor rules), keep
+                // the 10%-minimum-0.1 margin to suppress chatter.
+                bool is_int_thresh =
+                    (setpoints[i].threshold == floorf(setpoints[i].threshold));
+                float margin = is_int_thresh
+                    ? 0.0f
+                    : fabsf(setpoints[i].threshold) * 0.1f;
+                if (!is_int_thresh && margin < 0.1f) margin = 0.1f;
                 bool clearCondition = false;
                 switch (setpoints[i].op) {
-                    case 0: case 3: clearCondition = (scaled < (setpoints[i].threshold - margin)); break;
-                    case 1: case 4: clearCondition = (scaled > (setpoints[i].threshold + margin)); break;
+                    case 0: case 3: clearCondition = (scaled <  (setpoints[i].threshold - margin)); break;
+                    case 1: case 4: clearCondition = (scaled >= (setpoints[i].threshold + margin)); break;
                     case 2: clearCondition = (fabsf(scaled - setpoints[i].threshold) >= 0.001f); break;
                     case 5: clearCondition = (fabsf(scaled - setpoints[i].threshold) < 0.001f); break;
                     default: clearCondition = true;
