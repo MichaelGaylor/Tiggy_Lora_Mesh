@@ -29,16 +29,19 @@
 // ADC_CTRL_ACTIVE      - HIGH or LOW: which level enables the divider.
 //                        N-channel low-side switch (V3/V4) → HIGH (default)
 //                        P-channel high-side switch       → LOW
-// BATT_HIBERNATE_DEFAULT - 1 (default): firmware sleeps the chip when
+// BATT_HIBERNATE_DEFAULT  1 (default): firmware sleeps the chip when
 //                          VBAT drops below BAT_LOW_MV, wakes when it
 //                          recovers above BAT_RECOVER_MV.
-//                        - 0: low-voltage auto-shutdown disabled. The
+//                        0: low-voltage auto-shutdown disabled. The
 //                          node stays running until the LDO browns out.
 //                          Useful for bench/lab boards, solar nodes
 //                          where the operator prefers noisy low readings
 //                          over an hour-long sleep, and during field
 //                          commissioning. Override at runtime with the
 //                          BATT_HIBERNATE ON|OFF serial command.
+//                        Set per-board with `#define BATT_HIBERNATE_DEFAULT 0`
+//                        inside that board's block below, or globally
+//                        via a -DBATT_HIBERNATE_DEFAULT=0 build flag.
 
 // ═══════════════════════════════════════════════════════════════
 #if defined(BOARD_TDECK_PLUS)
@@ -602,6 +605,7 @@
 #define HAS_OLED            1     // optional, header J5 (I2C SSD1306)
 #define RADIO_SX1262        1
 #define RADIO_TCXO_VOLTAGE  1.8f  // Wio-SX1262 TCXO at 1.8V
+#define BATT_HIBERNATE_DEFAULT 0 // 0 for disabled 1 for enabled 
 
 // Power
 #define BOARD_POWERON       -1
