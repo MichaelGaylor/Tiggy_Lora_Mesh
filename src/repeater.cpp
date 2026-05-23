@@ -2742,17 +2742,35 @@ String processSetpointCommand(const String& args) {
         }
     }
 
-    // Replace any existing setpoint on the same (sensorPin, op) tuple before
-    // falling back to the first free slot. Without this, sending the same
-    // SETPOINT twice (e.g. user re-deploys the rule after editing the
-    // threshold) silently consumes a second slot and eventually returns
-    // ERR,SETPOINT,FULL — matching the replace semantics that COUNTER /
-    // LOGIC / LATCH / SCALE / TIMER already implement on their key vpin.
+    // Replace any existing setpoint on the same (sensorPin, op,
+    // actionType) tuple before falling back to the first free slot.
+    //
+    // The PLC compiler legitimately emits MULTIPLE setpoints on the
+    // same (sensorPin, op) pair when one block has both a PULSE
+    // action (Actuator Open/Close) and another has a MSG action
+    // (Broadcast) wired to the same vpin transition — e.g.:
+    //   SETPOINT,200,GE,1,PULSE,<openPin>,5000   (gate motor open)
+    //   SETPOINT,200,GE,1,MSG,Gate Open          (broadcast)
+    // These must live in SEPARATE slots; the (sensorPin, op)-only
+    // replace key used to overwrite the PULSE with the MSG (or
+    // vice-versa depending on install order), silently dropping
+    // half the actions. The user saw "Gate Open" broadcasts fine
+    // but the actuator pin never pulsed — verify-by-poll caught it
+    // as a 2/4 mismatch and rolled back the whole rule.
+    //
+    // Include actionType in the dedupe key (decode from actionPart
+    // prefix) so PULSE/MSG/RELAY coexist. The within-action-type
+    // replace semantics still apply — re-deploying the same rule
+    // updates fields in place rather than allocating a new slot.
+    uint8_t newActionType =
+        actionPart.startsWith("MSG,")   ? 1 :
+        actionPart.startsWith("PULSE,") ? 2 : 0;  // 0 = RELAY (default)
     int slot = -1;
     for (int i = 0; i < MAX_SETPOINTS; i++) {
         if (setpoints[i].active &&
             setpoints[i].sensorPin == sensorPin &&
-            setpoints[i].op        == op) {
+            setpoints[i].op        == op &&
+            setpoints[i].actionType == newActionType) {
             slot = i;
             break;
         }
