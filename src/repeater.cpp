@@ -6440,6 +6440,57 @@ String processBeaconCommand(const String& args) {
         return "ERR,BEACON,BADINDEX";
     }
 
+    if (args.startsWith("SETLEAVE,")) {
+        // Attach a leave-message to an existing MSG-action beacon rule
+        // AFTER a successful BEACON,ADD. The split exists because a
+        // BEACON,ADD that carries both enter+leave text can blow the
+        // 249 B LoRa frame budget; old firmware (no binary BB verb)
+        // therefore needs this two-packet path:
+        //
+        //   1. BEACON,ADD,<id>,<name>,<rssi>,MSG,<enter>,<cooldown>
+        //   2. BEACON,SETLEAVE,<name>,<leave_text>
+        //
+        // Format: SETLEAVE,<name>,<leave_text>
+        // Lookup is by name (not slot) because the gateway knows the
+        // name it just sent — the slot number isn't known until the
+        // OK,BEACON,ADD,<slot>,<name> reply lands, but a name-based
+        // SETLEAVE can be enqueued back-to-back with the ADD without
+        // waiting for the round-trip. Returns OK,BEACON,SETLEAVE,
+        // <slot>,<name> on success so the gateway's pending tracker
+        // can resolve it the same way it does OK,BEACON,ADD.
+        String rest = args.substring(9);
+        int c1 = rest.indexOf(',');
+        if (c1 < 0) return "ERR,BEACON,SETLEAVE,FORMAT";
+        String nameStr  = rest.substring(0, c1);
+        String leaveMsg = rest.substring(c1 + 1);
+        int slot = -1;
+        for (int i = 0; i < MAX_BEACON_RULES; i++) {
+            if (!beaconRules[i].active) continue;
+            if (String(beaconRules[i].name) == nameStr) { slot = i; break; }
+        }
+        if (slot < 0) return "ERR,BEACON,SETLEAVE,NOTFOUND";
+        if (beaconRules[slot].actionType != 1)
+            return "ERR,BEACON,SETLEAVE,NOTMSG";
+        BeaconRule& r = beaconRules[slot];
+        // Re-pack the leave text after the enter text's null terminator
+        // — same embedded layout the ASCII LEAVE clause and the binary
+        // BB verb both use. Truncate cleanly if the combined length
+        // would overflow the 32-byte buffer.
+        size_t enterLen = strnlen(r.message, sizeof(r.message));
+        if (enterLen + 1 >= sizeof(r.message) - 1) {
+            return "ERR,BEACON,SETLEAVE,NOROOM";
+        }
+        size_t avail = sizeof(r.message) - (enterLen + 1) - 1;
+        // Zero out the leave region first so a shorter new leave-msg
+        // doesn't leave stale bytes from a previous SETLEAVE behind.
+        memset(r.message + enterLen + 1, 0,
+               sizeof(r.message) - (enterLen + 1));
+        strncpy(r.message + enterLen + 1, leaveMsg.c_str(), avail);
+        r.message[sizeof(r.message) - 1] = '\0';
+        saveBeaconRules();
+        return "OK,BEACON,SETLEAVE," + String(slot) + "," + nameStr;
+    }
+
     if (args.startsWith("ADD,")) {
         // BEACON,ADD,<uuid_or_mac>,<name>,<rssi>,RELAY,<pin>,<state>[,<cooldown>][,REVERT,<ms>]
         // BEACON,ADD,<uuid_or_mac>,<name>,<rssi>,MSG,<text>[,<cooldown_ms>][,LEAVE,<leave_text>]
