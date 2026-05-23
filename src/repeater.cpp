@@ -4153,6 +4153,17 @@ int b64decode(const char* in, size_t inLen, uint8_t* out, size_t outCap) {
 //   0x63  SETPOINT PULSE lo <vpin:1> <pin:1> <ms:2>
 //   0x64  SETPOINT RELAY hi <vpin:1> <target:2 hex-as-u16> <pin:1> <act:1>
 //
+//   _CD variants — identical to the corresponding base tag but with
+//   an extra 2 B cooldown_ms suffix. Used when the rule's
+//   "Min action gap" differs from the firmware's hardcoded 10 s
+//   default. Lets the user's GUI setting take effect without
+//   forcing the deploy onto the unreliable ASCII multi-packet path.
+//   0x65  SETPOINT MSG hi   + cooldown   <vpin:1> <msglen:1> <msg:N> <cd:2>
+//   0x66  SETPOINT MSG lo   + cooldown   <vpin:1> <msglen:1> <msg:N> <cd:2>
+//   0x67  SETPOINT PULSE hi + cooldown   <vpin:1> <pin:1> <ms:2> <cd:2>
+//   0x68  SETPOINT PULSE lo + cooldown   <vpin:1> <pin:1> <ms:2> <cd:2>
+//   0x69  SETPOINT RELAY hi + cooldown   <vpin:1> <target:2> <pin:1> <act:1> <cd:2>
+//
 // Returns "OK,PLC,DEPLOY,<count>" on success, "ERR,PLC,..." on failure.
 
 // Forward decls — the binary parser dispatches to the same ADD handlers
@@ -4365,6 +4376,62 @@ String processPlcBinary(const uint8_t* data, size_t len) {
                 resp = processSetpointCommand(
                     String(vpin) + ",GE,1," + tbuf + "," +
                     String(pin) + "," + String(act));
+                if (!resp.startsWith("ERR,"))
+                    markSetpointBoolean(vpin, 3);
+                break;
+            }
+            case 0x65: case 0x66: {  // SETPOINT MSG hi/lo + cooldown
+                if (off + 2 > len) return "ERR,PLC,BIN,MSGTRUNC";
+                uint8_t vpin   = data[off];
+                uint8_t msgLen = data[off + 1];
+                if (off + 2 + msgLen + 2 > len) return "ERR,PLC,BIN,MSGTRUNC";
+                if (msgLen > SETPOINT_MSG_LEN) return "ERR,PLC,BIN,MSGTOOLONG";
+                for (uint8_t i = 0; i < msgLen; i++)
+                    if (data[off + 2 + i] == ',') return "ERR,PLC,BIN,MSGCOMMA";
+                String msg;
+                msg.reserve(msgLen);
+                for (uint8_t i = 0; i < msgLen; i++)
+                    msg += (char)data[off + 2 + i];
+                uint16_t cooldown = binRd16LE(data + off + 2 + msgLen);
+                off += 2 + msgLen + 2;
+                const char* sp = (tag == 0x65) ? "GE" : "LT";
+                resp = processSetpointCommand(
+                    String(vpin) + "," + sp + ",1,MSG," + msg +
+                    ",COOLDOWN," + String(cooldown));
+                if (!resp.startsWith("ERR,"))
+                    markSetpointBoolean(vpin, (tag == 0x65) ? 3 : 1);
+                break;
+            }
+            case 0x67: case 0x68: {  // SETPOINT PULSE hi/lo + cooldown
+                if (off + 6 > len) return "ERR,PLC,BIN,PULSETRUNC";
+                uint8_t  vpin = data[off];
+                uint8_t  pin  = data[off + 1];
+                uint16_t ms   = binRd16LE(data + off + 2);
+                uint16_t cooldown = binRd16LE(data + off + 4);
+                off += 6;
+                const char* sp = (tag == 0x67) ? "GE" : "LT";
+                resp = processSetpointCommand(
+                    String(vpin) + "," + sp + ",1,PULSE," +
+                    String(pin) + "," + String(ms) +
+                    ",COOLDOWN," + String(cooldown));
+                if (!resp.startsWith("ERR,"))
+                    markSetpointBoolean(vpin, (tag == 0x67) ? 3 : 1);
+                break;
+            }
+            case 0x69: {  // SETPOINT RELAY hi + cooldown
+                if (off + 7 > len) return "ERR,PLC,BIN,RELAYTRUNC";
+                uint8_t  vpin   = data[off];
+                uint16_t target = binRd16LE(data + off + 1);
+                uint8_t  pin    = data[off + 3];
+                uint8_t  act    = data[off + 4];
+                uint16_t cooldown = binRd16LE(data + off + 5);
+                off += 7;
+                char tbuf[8];
+                snprintf(tbuf, sizeof(tbuf), "%04X", target);
+                resp = processSetpointCommand(
+                    String(vpin) + ",GE,1," + tbuf + "," +
+                    String(pin) + "," + String(act) +
+                    ",COOLDOWN," + String(cooldown));
                 if (!resp.startsWith("ERR,"))
                     markSetpointBoolean(vpin, 3);
                 break;
