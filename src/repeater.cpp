@@ -4115,18 +4115,24 @@ String processScaleCommand(const String& args);
 String processTimerCommand(const String& args);
 void   saveBeaconRules();  // used by processBeaconBinary on REPLACE
 
-// Mark the SETPOINT slot just installed via a binary PLC tag as
-// boolean-domain. The runtime in checkSetpoints uses this to skip
-// the analog hysteresis margin — see comment on SetpointRule.
-// `vpin` + `op` uniquely identify the slot (same key processSetpointCommand
-// uses for its replace-if-exists lookup).
+// Mark every SETPOINT slot matching (vpin, op) as boolean-domain.
+// The runtime in checkSetpoints uses this to skip the analog
+// hysteresis margin — see comment on SetpointRule.
+//
+// `(vpin, op)` is NOT a unique slot key any more — after the
+// actionType-aware dedupe (commit 4cfd921), one Open-on-GE-1-PULSE
+// and one Broadcast-on-GE-1-MSG can coexist in two slots sharing
+// the same (vpin, op). Marking only the FIRST match left the MSG
+// slot with booleanDomain=false → margin=0.1 → LT,1 never cleared
+// after V=1 → "Gate Close" stuck. Mark ALL matching slots: every
+// binary-tagged setpoint is boolean-domain by construction
+// (threshold = exactly 1.0).
 static void markSetpointBoolean(uint8_t vpin, uint8_t op) {
     for (int i = 0; i < MAX_SETPOINTS; i++) {
         if (setpoints[i].active &&
             setpoints[i].sensorPin == vpin &&
             setpoints[i].op == op) {
             setpoints[i].booleanDomain = true;
-            return;
         }
     }
 }
@@ -4830,7 +4836,17 @@ void handleCmd(const String& from, const String& cmdBody) {
         if (!isPinConfigurable(pin)) return;
         setupDigitalOutput(pin);
         setDigital(pin, val);
-        refreshDeadman(pin, val);  // Start/refresh dead-man's switch
+        // Deadman is a safety latch for HARDWARE OUTPUT relays — if
+        // comms drop, revert the pin to its safe state so a stuck
+        // gate / heater / etc. doesn't hold a dangerous output.
+        // Storage vpins (200-231) are PLC logical state, not hardware
+        // outputs — reverting them silently confuses the setpoint
+        // runtime AND triggers spurious transitions ("Gate Close"
+        // appearing 30s after a "Gate Open" toggle even though the
+        // user didn't click anything). Skip deadman for storage vpins.
+        if (!isStorageVpin(pin)) {
+            refreshDeadman(pin, val);  // Start/refresh dead-man's switch
+        }
         mesh.cmdsExecuted++;
         // Send response back over mesh
         String mid = mesh.generateMsgID();
