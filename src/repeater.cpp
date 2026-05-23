@@ -4476,12 +4476,20 @@ String processBeaconBinary(const uint8_t* data, size_t len, const String& from) 
         }
 
         String resp = processBeaconCommand(args);
-        // Emit reply through the same channels the ASCII path uses.
+        // Per-record reply: emit to BLE always, and broadcast over mesh
+        // when the deploy came in remotely (the gateway tracks each
+        // OK,BEACON,ADD,<slot>,<name> against its own pending list).
+        // Add a small spacing between records so back-to-back records
+        // don't TX-storm — matches the inter-frame delay BEACON,LIST
+        // already uses (line ~4783) for the same reason. Without this,
+        // a 6-beacon BB deploy fires 7 LoRa frames in immediate
+        // succession and channel-busy collisions drop replies.
         notifyBeaconEvent(resp, from != "LOCAL");
         if (resp.startsWith("ERR,")) {
             return "ERR,BCN,BIN,DEPLOY," + String(count) + "," + resp;
         }
         count++;
+        if (from != "LOCAL") delay(50);
     }
     return "OK,BCN,DEPLOY," + String(count);
 }
