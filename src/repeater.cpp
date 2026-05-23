@@ -1662,6 +1662,19 @@ void notifyBeaconEvent(const String& event, bool meshBroadcast = false) {
     }
 }
 
+// Return a pointer to the embedded "leave" message within r.message[] for
+// MSG-action beacons, or nullptr if no leave message was configured. We
+// pack the leave text into the same 32-byte buffer as the enter text,
+// separated by the enter text's null terminator, to avoid bumping the
+// EEPROM stride (which would invalidate every existing beacon record).
+static const char* beaconLeaveMessage(const BeaconRule& r) {
+    if (r.actionType != 1) return nullptr;
+    size_t enterLen = strnlen(r.message, sizeof(r.message));
+    if (enterLen + 1 >= sizeof(r.message)) return nullptr;
+    if (r.message[enterLen + 1] == '\0') return nullptr;
+    return r.message + enterLen + 1;
+}
+
 void executeBeaconAction(BeaconRule& r) {
     if (r.actionType == 0) {
         // Relay action — local or remote
@@ -1795,7 +1808,35 @@ void checkBeaconReverts() {
     unsigned long now = millis();
     for (int i = 0; i < MAX_BEACON_RULES; i++) {
         BeaconRule& r = beaconRules[i];
-        if (!r.active || !r.triggered || r.revertMs == 0) continue;
+        // MSG-action rules don't have a revertMs (no relay to flip back), so
+        // the original loop body would skip them with the `r.revertMs == 0`
+        // guard. They have their own leave path below — handle them first.
+        if (!r.active || !r.triggered) continue;
+        if (r.actionType == 1) {
+            // Once the beacon has been gone for cooldownMs:
+            //   - if a leave message is embedded in r.message[], broadcast
+            //     it once on the mesh and reset triggered so a fresh enter
+            //     broadcast can fire on re-entry.
+            //   - if no leave message, just rearm (existing behaviour).
+            unsigned long grace = r.cooldownMs > 0 ? r.cooldownMs : 10000;
+            if (now - r.lastSeen > grace) {
+                const char* leaveMsg = beaconLeaveMessage(r);
+                if (leaveMsg) {
+                    String mid = mesh.generateMsgID();
+                    String hex = mesh.encryptMsg("MSG," + String(leaveMsg));
+                    String payload = String(mesh.localID) + ",FFFF," + mid + "," +
+                                     String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+                    mesh.transmitPacket(0xFFFF, payload);
+                    debugPrint("BEACON: " + String(r.name) + " -> LEAVE broadcast: " + String(leaveMsg));
+                    notifyBeaconEvent("BEACON,LEAVE," + String(r.name) + ",MSG," + String(leaveMsg), true);
+                } else {
+                    debugPrint("BEACON: " + String(r.name) + " -> MSG rearmed (no leave configured)");
+                }
+                r.triggered = false;
+            }
+            continue;
+        }
+        if (r.revertMs == 0) continue;
         if (r.actionType == 2) {
             // Phase 2/3: PULSE — pin is auto-cleared by checkPulseTimers().
             // Once the beacon has been gone for cooldownMs (default 10s):
@@ -6116,6 +6157,10 @@ static String formatBeaconRule(int i) {
         resp += ":LEAVE" + String(beaconRules[i].leavePin) +
                 "@" + String(beaconRules[i].leaveRssi) + "dBm" +
                 ":" + String(beaconRules[i].leavePulseMs) + "ms";
+    if (beaconRules[i].actionType == 1) {
+        const char* lm = beaconLeaveMessage(beaconRules[i]);
+        if (lm) resp += ":LEAVE:" + String(lm);
+    }
     return resp;
 }
 
@@ -6189,7 +6234,7 @@ String processBeaconCommand(const String& args) {
 
     if (args.startsWith("ADD,")) {
         // BEACON,ADD,<uuid_or_mac>,<name>,<rssi>,RELAY,<pin>,<state>[,<cooldown>][,REVERT,<ms>]
-        // BEACON,ADD,<uuid_or_mac>,<name>,<rssi>,MSG,<text>[,<cooldown>]
+        // BEACON,ADD,<uuid_or_mac>,<name>,<rssi>,MSG,<text>[,<cooldown_ms>][,LEAVE,<leave_text>]
         int slot = -1;
         for (int i = 0; i < MAX_BEACON_RULES; i++) {
             if (!beaconRules[i].active) { slot = i; break; }
@@ -6265,13 +6310,42 @@ String processBeaconCommand(const String& args) {
                 }
             }
         } else if (actionStr == "MSG") {
+            // Format: MSG,<text>[,<cooldown_ms>][,LEAVE,<leave_text>]
+            //
+            // Both messages share the existing 32-byte r.message[] buffer to
+            // avoid changing the EEPROM layout. Enter text goes at offset 0;
+            // a second null-terminated string immediately after holds the
+            // leave text (if any). Old firmware reading new records sees only
+            // the enter string and ignores the trailing bytes.
             r.actionType = 1;
-            int c5 = actionArgs.indexOf(',');
+            memset(r.message, 0, sizeof(r.message));
+
+            // Split off any optional ",LEAVE,<text>" suffix first so we can
+            // measure the enter+cooldown portion without it.
+            int leaveIdx = actionArgs.indexOf(",LEAVE,");
+            String head = (leaveIdx >= 0) ? actionArgs.substring(0, leaveIdx) : actionArgs;
+            String leaveMsg = (leaveIdx >= 0) ? actionArgs.substring(leaveIdx + 7) : String("");
+
+            int c5 = head.indexOf(',');
+            String enterMsg;
             if (c5 < 0) {
-                strncpy(r.message, actionArgs.c_str(), 31); r.message[31] = '\0';
+                enterMsg = head;
             } else {
-                strncpy(r.message, actionArgs.substring(0, c5).c_str(), 31); r.message[31] = '\0';
-                r.cooldownMs = actionArgs.substring(c5 + 1).toInt();
+                enterMsg = head.substring(0, c5);
+                r.cooldownMs = (uint16_t)head.substring(c5 + 1).toInt();
+            }
+            strncpy(r.message, enterMsg.c_str(), 31);
+            r.message[31] = '\0';
+
+            // Embed the leave text after the enter text's null terminator.
+            // Reserve one byte for the trailing null after the leave text.
+            if (leaveMsg.length() > 0) {
+                size_t enterLen = strlen(r.message);
+                if (enterLen + 1 < sizeof(r.message) - 1) {
+                    size_t avail = sizeof(r.message) - (enterLen + 1) - 1;
+                    strncpy(r.message + enterLen + 1, leaveMsg.c_str(), avail);
+                    r.message[sizeof(r.message) - 1] = '\0';
+                }
             }
         } else if (actionStr == "PULSE") {
             // Phase 2 base format:
