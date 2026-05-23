@@ -2493,10 +2493,21 @@ void setupGPIO() {
 // SECTION: Timer / Setpoint / Auto-Poll Handlers
 // ═══════════════════════════════════════════════════════════════
 
+// EEPROM persistence for PLC primitives. Forward-declared here so the
+// timer / setpoint / counter / logic / latch / scale handlers below
+// can call savePlcTables() after each successful ADD or CLEAR. Defined
+// after loadBeaconRules (around line 6470) alongside the existing
+// EEPROM helpers — putting the call sites first because most of the
+// PLC processing lives here and chasing fwd-decl warnings is noisier
+// than putting the impl with the other EEPROM code.
+void savePlcTables();
+void loadPlcTables();
+
 // Core timer logic — returns response string, used by both mesh and BLE paths
 String processTimerCommand(const String& args) {
     if (args == "CLEAR") {
         for (int i = 0; i < MAX_TIMERS; i++) timers[i].active = false;
+        savePlcTables();
         return "OK,TIMER,CLEAR";
     }
     if (args == "LIST") {
@@ -2553,6 +2564,7 @@ String processTimerCommand(const String& args) {
         timers[slot].onAction = (action == "ON");
         timers[slot].nextAt = millis() + (unsigned long)seconds * 1000UL;
         timers[slot].phase = 0;
+        savePlcTables();
         return "OK,TIMER," + String(pin) + "," + action + "," + String(seconds);
     }
     else if (action == "PULSE") {
@@ -2577,6 +2589,7 @@ String processTimerCommand(const String& args) {
         timers[slot].repeats = repeats;
         timers[slot].remaining = (repeats > 0) ? repeats : 0;
         timers[slot].nextAt = millis() + (unsigned long)onSec * 1000UL;
+        savePlcTables();
         return "OK,TIMER," + String(pin) + ",PULSE," + String(onSec) + "," + String(offSec) + "," + String(repeats);
     }
 
@@ -2606,6 +2619,7 @@ void handleTimerBle(const String& args) {
 String processSetpointCommand(const String& args) {
     if (args == "CLEAR") {
         for (int i = 0; i < MAX_SETPOINTS; i++) setpoints[i].active = false;
+        savePlcTables();
         return "OK,SETPOINT,CLEAR";
     }
     if (args == "LIST") {
@@ -2859,6 +2873,7 @@ String processSetpointCommand(const String& args) {
         resp += ",HOLD," + String(holdMs);
     if (leavePin > 0 && leavePulseMs > 0)
         resp += ",LEAVE,PULSE," + String(leavePin) + "," + String(leavePulseMs);
+    savePlcTables();
     return resp;
 }
 
@@ -3226,6 +3241,7 @@ String processCounterCommand(const String& args) {
 
     if (first == "CLEAR") {
         for (int i = 0; i < MAX_COUNTERS; i++) counters[i].active = false;
+        savePlcTables();
         return "OK,COUNTER,CLEAR";
     }
 
@@ -3254,6 +3270,7 @@ String processCounterCommand(const String& args) {
         for (int i = 0; i < MAX_COUNTERS; i++) {
             if (counters[i].active && counters[i].targetVpin == vpin) {
                 counters[i].active = false;
+                savePlcTables();
                 return "OK,COUNTER,DELETE," + String(vpin);
             }
         }
@@ -3314,6 +3331,7 @@ String processCounterCommand(const String& args) {
         counters[slot].presetPin   = (uint8_t)psPin;
         counters[slot].resetPin    = (uint8_t)rsPin;
         counters[slot].presetValue = (uint16_t)preset;
+        savePlcTables();
         return "OK,COUNTER,ADD," + String(vpin) + "," + modeStr +
                "," + String(upPin) + "," + String(dnPin) + "," +
                String(psPin) + "," + String(rsPin) + "," + String(preset);
@@ -3410,6 +3428,7 @@ String processLogicCommand(const String& args) {
 
     if (first == "CLEAR") {
         for (int i = 0; i < MAX_LOGIC_RULES; i++) logicRules[i].active = false;
+        savePlcTables();
         return "OK,LOGIC,CLEAR";
     }
     if (first == "LIST") {
@@ -3433,6 +3452,7 @@ String processLogicCommand(const String& args) {
         for (int i = 0; i < MAX_LOGIC_RULES; i++) {
             if (logicRules[i].active && logicRules[i].outputVpin == vpin) {
                 logicRules[i].active = false;
+                savePlcTables();
                 return "OK,LOGIC,DELETE," + String(vpin);
             }
         }
@@ -3508,6 +3528,7 @@ String processLogicCommand(const String& args) {
         logicRules[slot].input1Thresh = (uint16_t)vals[1];
         logicRules[slot].input2Pin    = (uint8_t)vals[2];
         logicRules[slot].input2Thresh = (uint16_t)vals[3];
+        savePlcTables();
         return "OK,LOGIC,ADD," + String(vpin) + "," + opStr +
                "," + String(vals[0]) + "," + String(vals[1]) +
                "," + String(vals[2]) + "," + String(vals[3]);
@@ -3567,6 +3588,7 @@ String processLatchCommand(const String& args) {
 
     if (first == "CLEAR") {
         for (int i = 0; i < MAX_LATCH_RULES; i++) latchRules[i].active = false;
+        savePlcTables();
         return "OK,LATCH,CLEAR";
     }
     if (first == "LIST") {
@@ -3588,6 +3610,7 @@ String processLatchCommand(const String& args) {
         for (int i = 0; i < MAX_LATCH_RULES; i++) {
             if (latchRules[i].active && latchRules[i].outputVpin == vpin) {
                 latchRules[i].active = false;
+                savePlcTables();
                 return "OK,LATCH,DELETE," + String(vpin);
             }
         }
@@ -3630,6 +3653,7 @@ String processLatchCommand(const String& args) {
         latchRules[slot].setThresh   = (uint16_t)vals[2];
         latchRules[slot].resetPin    = (uint8_t)vals[3];
         latchRules[slot].resetThresh = (uint16_t)vals[4];
+        savePlcTables();
         return "OK,LATCH,ADD," + String(vpin) + "," +
                String(vals[1]) + "," + String(vals[2]) + "," +
                String(vals[3]) + "," + String(vals[4]);
@@ -3684,6 +3708,7 @@ String processScaleCommand(const String& args) {
 
     if (first == "CLEAR") {
         for (int i = 0; i < MAX_SCALE_RULES; i++) scaleRules[i].active = false;
+        savePlcTables();
         return "OK,SCALE,CLEAR";
     }
     if (first == "LIST") {
@@ -3706,6 +3731,7 @@ String processScaleCommand(const String& args) {
         for (int i = 0; i < MAX_SCALE_RULES; i++) {
             if (scaleRules[i].active && scaleRules[i].outputVpin == vpin) {
                 scaleRules[i].active = false;
+                savePlcTables();
                 return "OK,SCALE,DELETE," + String(vpin);
             }
         }
@@ -3748,6 +3774,7 @@ String processScaleCommand(const String& args) {
         scaleRules[slot].inputPin   = (uint8_t)inPin;
         scaleRules[slot].factor     = factor;
         scaleRules[slot].offset     = (int16_t)offset;
+        savePlcTables();
         return "OK,SCALE,ADD," + String(vpin) + "," + String(inPin) +
                "," + String(factor, 3) + "," + String(offset);
     }
@@ -6454,6 +6481,128 @@ void loadBeaconRules() {
     }
 }
 
+// ─── PLC primitive persistence ──────────────────────────────────
+// Without this, every reboot or reflash silently wipes every
+// deployed PLC rule on the node — the gateway-side GUI still shows
+// "deployed: confirmed" while the firmware tables are empty. User
+// has to remember to Undeploy + Deploy after every power cycle.
+// Beacon rules already persist (saveBeaconRules / loadBeaconRules)
+// so this just brings the PLC tables to parity.
+//
+// EEPROM layout (after the existing regions ending around 1700):
+//   2048      1 B magic byte (0xAB = "this is a valid PLC blob")
+//   2049+        SetpointRule[MAX_SETPOINTS]
+//   ...           LogicRule[MAX_LOGIC_RULES]
+//   ...           CounterRule[MAX_COUNTERS]
+//   ...           LatchRule[MAX_LATCH_RULES]
+//   ...           ScaleRule[MAX_SCALE_RULES]
+//   ...           RelayTimer[MAX_TIMERS]
+//
+// Each table is dumped/restored as a flat struct array via
+// EEPROM.put / EEPROM.get — keeps the save code small at the
+// cost of tying the on-disk layout to the C++ struct layout
+// (already true for BeaconRule). On struct changes, bump the
+// magic byte to force a fresh-init.
+#define EEPROM_PLC_BASE        2048
+#define EEPROM_PLC_MAGIC_ADDR  EEPROM_PLC_BASE
+#define EEPROM_PLC_MAGIC_VAL   0xAB
+
+// Cached offsets — computed once at boot from sizeof() so any
+// struct change auto-shifts the downstream regions. Initialised
+// in loadPlcTables() before the first read so save can reuse them.
+static int eeprom_plc_setpoint_addr = 0;
+static int eeprom_plc_logic_addr    = 0;
+static int eeprom_plc_counter_addr  = 0;
+static int eeprom_plc_latch_addr    = 0;
+static int eeprom_plc_scale_addr    = 0;
+static int eeprom_plc_timer_addr    = 0;
+static int eeprom_plc_end_addr      = 0;
+
+static void plcOffsetsInit() {
+    if (eeprom_plc_setpoint_addr) return;  // already computed
+    eeprom_plc_setpoint_addr = EEPROM_PLC_MAGIC_ADDR + 1;
+    eeprom_plc_logic_addr    = eeprom_plc_setpoint_addr + sizeof(setpoints);
+    eeprom_plc_counter_addr  = eeprom_plc_logic_addr    + sizeof(logicRules);
+    eeprom_plc_latch_addr    = eeprom_plc_counter_addr  + sizeof(counters);
+    eeprom_plc_scale_addr    = eeprom_plc_latch_addr    + sizeof(latchRules);
+    eeprom_plc_timer_addr    = eeprom_plc_scale_addr    + sizeof(scaleRules);
+    eeprom_plc_end_addr      = eeprom_plc_timer_addr    + sizeof(timers);
+}
+
+void savePlcTables() {
+    plcOffsetsInit();
+    if (eeprom_plc_end_addr > EEPROM_SIZE) {
+        // Tables grew beyond the EEPROM region. Caller has no good
+        // recovery — emit a diag and skip save so we don't trash
+        // adjacent memory.
+        debugPrint("PLC: persist SKIPPED — tables exceed EEPROM_SIZE");
+        return;
+    }
+    EEPROM.write(EEPROM_PLC_MAGIC_ADDR, EEPROM_PLC_MAGIC_VAL);
+    EEPROM.put(eeprom_plc_setpoint_addr, setpoints);
+    EEPROM.put(eeprom_plc_logic_addr,    logicRules);
+    EEPROM.put(eeprom_plc_counter_addr,  counters);
+    EEPROM.put(eeprom_plc_latch_addr,    latchRules);
+    EEPROM.put(eeprom_plc_scale_addr,    scaleRules);
+    EEPROM.put(eeprom_plc_timer_addr,    timers);
+    EEPROM.commit();
+}
+
+void loadPlcTables() {
+    plcOffsetsInit();
+    if (eeprom_plc_end_addr > EEPROM_SIZE) {
+        debugPrint("PLC: persist DISABLED — tables exceed EEPROM_SIZE");
+        return;
+    }
+    uint8_t magic = EEPROM.read(EEPROM_PLC_MAGIC_ADDR);
+    if (magic != EEPROM_PLC_MAGIC_VAL) {
+        // Fresh EEPROM, or a previous firmware version that didn't
+        // persist PLC tables. Either way: leave the in-RAM defaults
+        // (all `active = false`) and write a clean magic on next save.
+        return;
+    }
+    EEPROM.get(eeprom_plc_setpoint_addr, setpoints);
+    EEPROM.get(eeprom_plc_logic_addr,    logicRules);
+    EEPROM.get(eeprom_plc_counter_addr,  counters);
+    EEPROM.get(eeprom_plc_latch_addr,    latchRules);
+    EEPROM.get(eeprom_plc_scale_addr,    scaleRules);
+    EEPROM.get(eeprom_plc_timer_addr,    timers);
+    // Sanitise runtime-only state. Persisted structs contain BOTH the
+    // user's rule config (op, threshold, msgTrue, …) AND volatile
+    // runtime fields (triggered, lastFired, edge-detect lastUp, …)
+    // because we dump the whole struct. After load, reset the runtime
+    // fields so a mid-action reboot doesn't replay stale state.
+    for (int i = 0; i < MAX_SETPOINTS; i++) {
+        if (!setpoints[i].active) continue;
+        setpoints[i].triggered    = false;
+        setpoints[i].holdLatched  = false;
+        setpoints[i].lastFired    = 0;
+        setpoints[i].debounceStart = 0;
+    }
+    for (int i = 0; i < MAX_COUNTERS; i++) {
+        if (!counters[i].active) continue;
+        counters[i].lastUp     = 0;
+        counters[i].lastDown   = 0;
+        counters[i].lastPreset = 0;
+        counters[i].lastReset  = 0;
+    }
+    for (int i = 0; i < MAX_LATCH_RULES; i++) {
+        if (!latchRules[i].active) continue;
+        latchRules[i].lastSet   = 0;
+        latchRules[i].lastReset = 0;
+    }
+    // Logic / Scale primitives have no runtime-state fields in their
+    // struct — they re-evaluate from current inputs every tick.
+    // RelayTimer.phase / nextAt are runtime; reset so timers re-arm
+    // cleanly from phase 0 after reboot.
+    for (int i = 0; i < MAX_TIMERS; i++) {
+        if (!timers[i].active) continue;
+        timers[i].phase = 0;
+        timers[i].nextAt = 0;
+    }
+    debugPrint("PLC: loaded tables from EEPROM");
+}
+
 // Helper — serialise a single beacon rule by index. Used by both BEACON,GET
 // and (for backward compat) the old all-in-one BEACON,LIST format. Format
 // matches what BEACON,LIST used to emit for one entry, just standalone.
@@ -7079,6 +7228,11 @@ void setup() {
 
     loadConfig();
     loadBeaconRules();
+    // PLC tables (SETPOINT / LOGIC / COUNTER / LATCH / SCALE / TIMER).
+    // Without this, every reboot wiped every deployed PLC rule — gateway
+    // still thought the rule was confirmed but the firmware tables were
+    // empty. Beacon rules already persist; this brings PLC to parity.
+    loadPlcTables();
     // Storage vpin persistence: read the opt-in bitmap first, then load
     // values only for vpins the user has marked persistent. Non-persistent
     // vpins stay at 0 in RAM (and never hit EEPROM during this session).
