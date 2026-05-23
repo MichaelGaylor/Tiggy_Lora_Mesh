@@ -1446,6 +1446,15 @@ struct SetpointRule {
     // before the rule can fire again. Without this, a steady-state
     // above-threshold sensor re-fires every (HOLD + COOLDOWN) ms forever.
     bool holdLatched;
+    // Boolean-domain flag: set true when the SETPOINT was installed via
+    // the binary PLC compiler with the well-known boolean form (vpin
+    // with op=GE,1 or op=LT,1 — see processPlcBinary tags 0x60-0x63).
+    // The runtime uses this to skip the analog hysteresis margin —
+    // digital sources don't chatter, AND a margin around threshold=1
+    // creates a dead zone that prevents LT,1 from ever re-arming after
+    // its first fire. Defaults false; ASCII installs and analog setpoints
+    // never set it.
+    bool booleanDomain;
     unsigned long lastFired;
     unsigned long debounceStart;  // Runtime: when condition first became true
 };
@@ -3022,7 +3031,13 @@ void checkSetpoints() {
             continue;            // Skip normal eval this tick
         }
 
-        if (now - setpoints[i].lastFired < SETPOINT_COOLDOWN) continue;
+        // NB: cooldown gate moved INSIDE the rising-edge branch below.
+        // Previously this hard-gated the whole eval, which also blocked
+        // the falling-edge re-arm path — so a vpin pulsing 0→1→0 inside
+        // SETPOINT_COOLDOWN never fired the LT,1 falling-edge action
+        // (Gate Close / Actuator Close). The cooldown only really
+        // protects against ringing on the rising side; falling-edge
+        // and hold-latch clearance should evaluate every tick.
 
         int rawValue = readSensorPin(setpoints[i].sensorPin);
         float scaled;
@@ -3037,6 +3052,8 @@ void checkSetpoints() {
         }
 
         if (condition && !setpoints[i].triggered && !setpoints[i].holdLatched) {
+            // Rising edge — debounce + cooldown both apply here.
+            if (now - setpoints[i].lastFired < SETPOINT_COOLDOWN) continue;
             // Debounce: condition must hold continuously for debounceMs
             if (setpoints[i].debounceMs > 0) {
                 if (setpoints[i].debounceStart == 0) {
@@ -3062,23 +3079,26 @@ void checkSetpoints() {
             if (setpoints[i].triggered && setpoints[i].holdMs == 0) {
                 // Falling edge — hysteresis check on scaled value.
                 //
-                // For integer thresholds (boolean-domain rules: vpin GE,1
-                // and LT,1 from the PLC compiler), skip the margin: a
-                // digital source can only be 0 or 1, so the value can
-                // NEVER cross "threshold ± margin" (e.g. for LT,1 the
-                // clear gate becomes value > 1.1 which V=1 never
-                // satisfies — leaves the setpoint stuck triggered after
-                // its first fire and "Gate Close" / equivalent
+                // For boolean-domain setpoints (installed via the binary
+                // PLC compiler — vpin GE,1 and LT,1, threshold = exactly
+                // 1.0), skip the margin entirely. A digital 0/1 source
+                // can never cross "threshold ± margin" — e.g. for LT,1
+                // with margin 0.1 the clear gate becomes value > 1.1
+                // which V=1 never satisfies, leaving the setpoint stuck
+                // triggered after its first fire ("Gate Close" / similar
                 // falling-edge MSG never re-fires).
                 //
-                // For non-integer thresholds (analog sensor rules), keep
-                // the 10%-minimum-0.1 margin to suppress chatter.
-                bool is_int_thresh =
-                    (setpoints[i].threshold == floorf(setpoints[i].threshold));
-                float margin = is_int_thresh
+                // For analog rules (installed via ASCII path or any
+                // non-binary-tag install — booleanDomain stays false),
+                // keep the 10%-minimum-0.1 margin to suppress chatter.
+                // Previous attempt used `threshold == floor(threshold)`
+                // which silently treated whole-number analog thresholds
+                // (e.g. 20.0°C) as boolean and broke chatter
+                // suppression on real sensors.
+                float margin = setpoints[i].booleanDomain
                     ? 0.0f
                     : fabsf(setpoints[i].threshold) * 0.1f;
-                if (!is_int_thresh && margin < 0.1f) margin = 0.1f;
+                if (!setpoints[i].booleanDomain && margin < 0.1f) margin = 0.1f;
                 bool clearCondition = false;
                 switch (setpoints[i].op) {
                     case 0: case 3: clearCondition = (scaled <  (setpoints[i].threshold - margin)); break;
@@ -4077,6 +4097,22 @@ String processScaleCommand(const String& args);
 String processTimerCommand(const String& args);
 void   saveBeaconRules();  // used by processBeaconBinary on REPLACE
 
+// Mark the SETPOINT slot just installed via a binary PLC tag as
+// boolean-domain. The runtime in checkSetpoints uses this to skip
+// the analog hysteresis margin — see comment on SetpointRule.
+// `vpin` + `op` uniquely identify the slot (same key processSetpointCommand
+// uses for its replace-if-exists lookup).
+static void markSetpointBoolean(uint8_t vpin, uint8_t op) {
+    for (int i = 0; i < MAX_SETPOINTS; i++) {
+        if (setpoints[i].active &&
+            setpoints[i].sensorPin == vpin &&
+            setpoints[i].op == op) {
+            setpoints[i].booleanDomain = true;
+            return;
+        }
+    }
+}
+
 static inline uint16_t binRd16LE(const uint8_t* p) {
     return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
 }
@@ -4224,6 +4260,8 @@ String processPlcBinary(const uint8_t* data, size_t len) {
                 const char* sp = (tag == 0x60) ? "GE" : "LT";
                 resp = processSetpointCommand(
                     String(vpin) + "," + sp + ",1,MSG," + msg);
+                if (!resp.startsWith("ERR,"))
+                    markSetpointBoolean(vpin, (tag == 0x60) ? 3 : 1);
                 break;
             }
             case 0x62: case 0x63: {  // SETPOINT PULSE hi/lo
@@ -4236,6 +4274,8 @@ String processPlcBinary(const uint8_t* data, size_t len) {
                 resp = processSetpointCommand(
                     String(vpin) + "," + sp + ",1,PULSE," +
                     String(pin) + "," + String(ms));
+                if (!resp.startsWith("ERR,"))
+                    markSetpointBoolean(vpin, (tag == 0x62) ? 3 : 1);
                 break;
             }
             case 0x64: {  // SETPOINT RELAY hi
@@ -4251,6 +4291,8 @@ String processPlcBinary(const uint8_t* data, size_t len) {
                 resp = processSetpointCommand(
                     String(vpin) + ",GE,1," + tbuf + "," +
                     String(pin) + "," + String(act));
+                if (!resp.startsWith("ERR,"))
+                    markSetpointBoolean(vpin, 3);
                 break;
             }
             default:
@@ -4924,11 +4966,17 @@ void handleCmd(const String& from, const String& cmdBody) {
             resp = processPlcBinary(binBuf, (size_t)decoded);
         }
         mesh.cmdsExecuted++;
-        String mid = mesh.generateMsgID();
-        String hex = mesh.encryptMsg(resp);
-        String payload = String(mesh.localID) + "," + from + "," + mid + "," +
-                         String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
-        mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+        // Skip the mesh transmit for LOCAL — `strtol("LOCAL")` returns 0,
+        // which is a valid mesh address; previously this was sending
+        // every reply to node 0x0000. BLE alone is the right channel
+        // for local-originated commands.
+        if (from != "LOCAL") {
+            String mid = mesh.generateMsgID();
+            String hex = mesh.encryptMsg(resp);
+            String payload = String(mesh.localID) + "," + from + "," + mid + "," +
+                             String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+            mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+        }
         bleSend(resp);
     }
     else if (action == "BB") {
@@ -4952,11 +5000,15 @@ void handleCmd(const String& from, const String& cmdBody) {
             resp = processBeaconBinary(binBuf, (size_t)decoded, from);
         }
         mesh.cmdsExecuted++;
-        String mid = mesh.generateMsgID();
-        String hex = mesh.encryptMsg(resp);
-        String payload = String(mesh.localID) + "," + from + "," + mid + "," +
-                         String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
-        mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+        // See B handler above — skip mesh transmit when from=="LOCAL"
+        // (strtol returns 0, would broadcast the reply to dest 0x0000).
+        if (from != "LOCAL") {
+            String mid = mesh.generateMsgID();
+            String hex = mesh.encryptMsg(resp);
+            String payload = String(mesh.localID) + "," + from + "," + mid + "," +
+                             String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+            mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+        }
         bleSend(resp);
     }
     else if (action == "BEACON") {
