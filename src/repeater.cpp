@@ -1455,6 +1455,13 @@ struct SetpointRule {
     // its first fire. Defaults false; ASCII installs and analog setpoints
     // never set it.
     bool booleanDomain;
+    // Per-setpoint cooldown override. 0 = use SETPOINT_COOLDOWN default
+    // (10 s). Lets the gateway pass the rule's GUI "Min action gap"
+    // setting down to firmware so a user who explicitly chose a 2 s gap
+    // gets 2 s not the 10 s hard-coded default. uint16 caps at 65 s
+    // which matches typical user-facing semantics; longer than that is
+    // a HOLD config anyway.
+    uint16_t cooldownMs;
     unsigned long lastFired;
     unsigned long debounceStart;  // Runtime: when condition first became true
 };
@@ -2695,13 +2702,15 @@ String processSetpointCommand(const String& args) {
     uint16_t holdMs = 0;
     uint8_t leavePin = 0;
     uint16_t leavePulseMs = 0;
+    uint16_t cooldownMs = 0;  // 0 = use SETPOINT_COOLDOWN default
     int scalePos = rest.indexOf(",SCALE,");
     int debouncePos = rest.indexOf(",DEBOUNCE,");
     int holdPos = rest.indexOf(",HOLD,");
     int leavePos = rest.indexOf(",LEAVE,");
+    int cooldownPos = rest.indexOf(",COOLDOWN,");
     String actionPart = rest;  // Will be trimmed below
 
-    if (scalePos >= 0 || debouncePos >= 0 || holdPos >= 0 || leavePos >= 0) {
+    if (scalePos >= 0 || debouncePos >= 0 || holdPos >= 0 || leavePos >= 0 || cooldownPos >= 0) {
         // Find where suffixes start (whichever comes first). Sentinel is
         // the string length so the comparisons below always pick a real
         // position when at least one suffix is present.
@@ -2710,6 +2719,7 @@ String processSetpointCommand(const String& args) {
         if (debouncePos >= 0 && debouncePos < suffixStart) suffixStart = debouncePos;
         if (holdPos     >= 0 && holdPos     < suffixStart) suffixStart = holdPos;
         if (leavePos    >= 0 && leavePos    < suffixStart) suffixStart = leavePos;
+        if (cooldownPos >= 0 && cooldownPos < suffixStart) suffixStart = cooldownPos;
         actionPart = rest.substring(0, suffixStart);
         String suffixes = rest.substring(suffixStart);
 
@@ -2734,6 +2744,12 @@ String processSetpointCommand(const String& args) {
             int hEnd = suffixes.indexOf(',', hIdx);
             holdMs = (hEnd > hIdx) ? suffixes.substring(hIdx, hEnd).toInt()
                                    : suffixes.substring(hIdx).toInt();
+        }
+        if (cooldownPos >= 0) {
+            int cIdx = suffixes.indexOf("COOLDOWN,") + 9;
+            int cEnd = suffixes.indexOf(',', cIdx);
+            cooldownMs = (cEnd > cIdx) ? suffixes.substring(cIdx, cEnd).toInt()
+                                       : suffixes.substring(cIdx).toInt();
         }
         if (leavePos >= 0) {
             // Only LEAVE,PULSE,<pin>,<ms> is supported today.
@@ -2807,6 +2823,7 @@ String processSetpointCommand(const String& args) {
     setpoints[slot].holdMs = holdMs;
     setpoints[slot].leavePin = leavePin;
     setpoints[slot].leavePulseMs = leavePulseMs;
+    setpoints[slot].cooldownMs = cooldownMs;
 
     const char* ops[] = {"GT", "LT", "EQ", "GE", "LE", "NE"};
     String resp = "OK,SETPOINT," + String(sensorPin) + "," + String(ops[op]) + "," + String(threshold, 2);
@@ -3086,7 +3103,13 @@ void checkSetpoints() {
 
         if (condition && !setpoints[i].triggered && !setpoints[i].holdLatched) {
             // Rising edge — debounce + cooldown both apply here.
-            if (now - setpoints[i].lastFired < SETPOINT_COOLDOWN) continue;
+            // Per-setpoint cooldown override beats the hard-coded
+            // default. Compiler passes rule.action_gap (in ms) via
+            // the ASCII ",COOLDOWN,<ms>" suffix and the binary tag
+            // payload below; 0 means "use default".
+            unsigned long cooldown = setpoints[i].cooldownMs > 0
+                ? setpoints[i].cooldownMs : SETPOINT_COOLDOWN;
+            if (now - setpoints[i].lastFired < cooldown) continue;
             // Debounce: condition must hold continuously for debounceMs
             if (setpoints[i].debounceMs > 0) {
                 if (setpoints[i].debounceStart == 0) {
@@ -6503,13 +6526,26 @@ void loadBeaconRules() {
 // cost of tying the on-disk layout to the C++ struct layout
 // (already true for BeaconRule). On struct changes, bump the
 // magic byte to force a fresh-init.
-#define EEPROM_PLC_BASE        2048
-#define EEPROM_PLC_MAGIC_ADDR  EEPROM_PLC_BASE
-#define EEPROM_PLC_MAGIC_VAL   0xAB
-
-// Cached offsets — computed once at boot from sizeof() so any
-// struct change auto-shifts the downstream regions. Initialised
-// in loadPlcTables() before the first read so save can reuse them.
+#define EEPROM_PLC_BASE         2048
+#define EEPROM_PLC_MAGIC_ADDR   EEPROM_PLC_BASE
+#define EEPROM_PLC_MAGIC_VAL    0xAB
+// Layout version. Bump whenever ANY of the persisted struct layouts
+// change (added a field, reordered, changed a type) so old EEPROM
+// blobs are treated as fresh-init rather than read with the wrong
+// offsets / type sizes. Versions:
+//   1 — initial layout (SETPOINT/LOGIC/COUNTER/LATCH/SCALE/TIMER)
+//   2 — SetpointRule gained `cooldownMs` (per-rule action_gap override)
+#define EEPROM_PLC_LAYOUT_VER   2
+// Header layout starting at EEPROM_PLC_BASE:
+//   0       magic    (1 B)
+//   1       version  (1 B)
+//   2..7    table sizes: [setpoints, logicRules, counters,
+//                         latchRules, scaleRules, timers] × 1 B each
+//                         — only the LOW byte of each sizeof() so a
+//                         silent struct-size change between firmware
+//                         builds is detected as a mismatch and the
+//                         blob discarded rather than miss-decoded.
+#define EEPROM_PLC_HEADER_LEN   8
 static int eeprom_plc_setpoint_addr = 0;
 static int eeprom_plc_logic_addr    = 0;
 static int eeprom_plc_counter_addr  = 0;
@@ -6520,7 +6556,7 @@ static int eeprom_plc_end_addr      = 0;
 
 static void plcOffsetsInit() {
     if (eeprom_plc_setpoint_addr) return;  // already computed
-    eeprom_plc_setpoint_addr = EEPROM_PLC_MAGIC_ADDR + 1;
+    eeprom_plc_setpoint_addr = EEPROM_PLC_BASE + EEPROM_PLC_HEADER_LEN;
     eeprom_plc_logic_addr    = eeprom_plc_setpoint_addr + sizeof(setpoints);
     eeprom_plc_counter_addr  = eeprom_plc_logic_addr    + sizeof(logicRules);
     eeprom_plc_latch_addr    = eeprom_plc_counter_addr  + sizeof(counters);
@@ -6538,7 +6574,18 @@ void savePlcTables() {
         debugPrint("PLC: persist SKIPPED — tables exceed EEPROM_SIZE");
         return;
     }
-    EEPROM.write(EEPROM_PLC_MAGIC_ADDR, EEPROM_PLC_MAGIC_VAL);
+    // Header: magic + layout version + per-table sizeof low byte.
+    // The size bytes detect a silent struct-size change between two
+    // builds at the same EEPROM_PLC_LAYOUT_VER (e.g. compiler padding
+    // changed) and treat as fresh-init rather than miss-decode.
+    EEPROM.write(EEPROM_PLC_BASE + 0, EEPROM_PLC_MAGIC_VAL);
+    EEPROM.write(EEPROM_PLC_BASE + 1, EEPROM_PLC_LAYOUT_VER);
+    EEPROM.write(EEPROM_PLC_BASE + 2, (uint8_t)(sizeof(setpoints)   & 0xFF));
+    EEPROM.write(EEPROM_PLC_BASE + 3, (uint8_t)(sizeof(logicRules)  & 0xFF));
+    EEPROM.write(EEPROM_PLC_BASE + 4, (uint8_t)(sizeof(counters)    & 0xFF));
+    EEPROM.write(EEPROM_PLC_BASE + 5, (uint8_t)(sizeof(latchRules)  & 0xFF));
+    EEPROM.write(EEPROM_PLC_BASE + 6, (uint8_t)(sizeof(scaleRules)  & 0xFF));
+    EEPROM.write(EEPROM_PLC_BASE + 7, (uint8_t)(sizeof(timers)      & 0xFF));
     EEPROM.put(eeprom_plc_setpoint_addr, setpoints);
     EEPROM.put(eeprom_plc_logic_addr,    logicRules);
     EEPROM.put(eeprom_plc_counter_addr,  counters);
@@ -6554,11 +6601,40 @@ void loadPlcTables() {
         debugPrint("PLC: persist DISABLED — tables exceed EEPROM_SIZE");
         return;
     }
-    uint8_t magic = EEPROM.read(EEPROM_PLC_MAGIC_ADDR);
+    uint8_t magic   = EEPROM.read(EEPROM_PLC_BASE + 0);
+    uint8_t version = EEPROM.read(EEPROM_PLC_BASE + 1);
     if (magic != EEPROM_PLC_MAGIC_VAL) {
         // Fresh EEPROM, or a previous firmware version that didn't
         // persist PLC tables. Either way: leave the in-RAM defaults
         // (all `active = false`) and write a clean magic on next save.
+        return;
+    }
+    if (version != EEPROM_PLC_LAYOUT_VER) {
+        // Layout changed since the blob was written (struct fields
+        // added / reordered / typed differently). Reading with the
+        // current struct layout would scramble the rules — safer to
+        // discard and let the user redeploy. Next save writes the
+        // new version byte.
+        debugPrint("PLC: EEPROM blob version mismatch — discarding");
+        return;
+    }
+    // Per-table size sanity check. Catches the case where a struct
+    // layout was changed (e.g. compiler padding shifted by an
+    // alignment change) but the layout version wasn't bumped. Cheap
+    // safety net against silent corruption.
+    uint8_t s_sp = EEPROM.read(EEPROM_PLC_BASE + 2);
+    uint8_t s_lg = EEPROM.read(EEPROM_PLC_BASE + 3);
+    uint8_t s_co = EEPROM.read(EEPROM_PLC_BASE + 4);
+    uint8_t s_la = EEPROM.read(EEPROM_PLC_BASE + 5);
+    uint8_t s_sc = EEPROM.read(EEPROM_PLC_BASE + 6);
+    uint8_t s_tm = EEPROM.read(EEPROM_PLC_BASE + 7);
+    if (s_sp != (uint8_t)(sizeof(setpoints)   & 0xFF) ||
+        s_lg != (uint8_t)(sizeof(logicRules)  & 0xFF) ||
+        s_co != (uint8_t)(sizeof(counters)    & 0xFF) ||
+        s_la != (uint8_t)(sizeof(latchRules)  & 0xFF) ||
+        s_sc != (uint8_t)(sizeof(scaleRules)  & 0xFF) ||
+        s_tm != (uint8_t)(sizeof(timers)      & 0xFF)) {
+        debugPrint("PLC: EEPROM struct-size mismatch — discarding");
         return;
     }
     EEPROM.get(eeprom_plc_setpoint_addr, setpoints);
