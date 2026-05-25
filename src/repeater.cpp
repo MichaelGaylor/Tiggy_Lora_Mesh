@@ -4945,6 +4945,35 @@ void handleCmd(const String& from, const String& cmdBody) {
     String action = (c1 > 0) ? cmdBody.substring(0, c1) : cmdBody;
     String rest   = (c1 > 0) ? cmdBody.substring(c1 + 1) : "";
 
+    // CMD,RSP,...  → reply to a previous CMD,GET/SET/PULSE from us.
+    // CMD,BEACONEVT,... → broadcast event from notifyBeaconEvent on
+    //                     another node (BEACON,LIST reply, BEACON,
+    //                     TRIGGERED edge events).
+    // Neither is a command DIRECTED AT us — they're traffic FROM
+    // another node that the MeshCore dispatch routed here only because
+    // the body happens to start with "CMD,". Without this pass-through
+    // they were getting silently consumed: action="RSP" / "BEACONEVT"
+    // has no handler below, return falls off the end, response never
+    // reaches the gateway's USB serial, GUI shows "no response" for
+    // every CMD,GET / BEACON,LIST. Emit them as an RX line so the
+    // gateway's GUI sees them the same way it sees any other remote-
+    // node reply (which goes through handleMessage's bleSend RX, line
+    // — matched here for consistency).
+    if (action == "RSP") {
+        // Keep the CMD, prefix so existing CMD,RSP parsers still
+        // recognise the payload shape.
+        bleSend("RX," + from + ",CMD," + cmdBody);
+        return;
+    }
+    if (action == "BEACONEVT") {
+        // Strip the wrapper so the inner event (BEACONS,NONE /
+        // BEACONS,N / BEACON,RULE,... / BEACON,TRIGGERED,...) appears
+        // as a plain RX line — same shape the GUI already parses for
+        // those tags coming over local BLE serial.
+        bleSend("RX," + from + "," + rest);
+        return;
+    }
+
     if (action == "SET") {
         int c2 = rest.indexOf(',');
         if (c2 < 0) return;
