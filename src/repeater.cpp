@@ -18,6 +18,11 @@
 #include <Wire.h>
 #include <EEPROM.h>
 #include <RadioLib.h>
+// VL53L0X / VL53L1X laser time-of-flight distance sensors. Pololu's
+// libraries are smaller than Adafruit's (~5KB vs ~30KB) and have a
+// cleaner API for our use case (one-shot read from a service loop).
+#include <VL53L0X.h>
+#include <VL53L1X.h>
 // BLE stack: NimBLE-Arduino (replaces bluedroid). NimBLEDevice.h pulls in
 // the server, service, characteristic, scan, advertised-device APIs all
 // from one header. Security and 2902 descriptors are handled by methods
@@ -409,6 +414,630 @@ PlcStats plcStats;
 
 inline void plcResetStats() {
     plcStats = PlcStats();
+}
+
+// ─── Peripheral devices ────────────────────────────────────────────
+// Standard Arduino-style sensors (DHT11/22, HC-SR04 ultrasonic, DS18B20,
+// generic I2C, SSD1306 OLED) get a small device table here. Each entry
+// is serviced from the main loop at its natural cadence and writes its
+// reading into one or more vpins (scratch by default). The PLC
+// primitives read those vpins like any other source — no special-case
+// logic for "did this come from a sensor or a Compare". This makes the
+// firmware a real platform: the user wires sensors in the GUI and the
+// firmware figures out how to talk to them.
+#define MAX_DEVICES 8
+#define DEVICE_OLED_FMT_LEN 64
+enum DeviceType : uint8_t {
+    DEV_NONE       = 0,
+    DEV_DHT11      = 1,
+    DEV_DHT22      = 2,
+    DEV_HCSR04     = 3,
+    DEV_DS18B20    = 4,
+    DEV_I2C_READ   = 5,
+    DEV_OLED       = 6,
+    // Tier 2 — canned I2C wrappers for the most-asked sensors.
+    DEV_BME280     = 7,   // temp + pressure + humidity
+    DEV_SHT31      = 8,   // high-accuracy temp + humidity
+    DEV_INA226     = 9,   // bus voltage + current (shunt-based)
+    DEV_MCP9808    = 10,  // ±0.25°C precision temperature
+    // Tier 3 — laser time-of-flight distance sensors
+    DEV_VL53L0X    = 11,  // ~30-1200mm, default addr 0x29
+    DEV_VL53L1X    = 12,  // ~40-4000mm, default addr 0x29 (long mode)
+};
+struct Device {
+    bool      active;
+    uint8_t   type;          // DeviceType
+    uint8_t   pin1;          // primary pin (DATA, TRIG, ONEWIRE bus, …)
+    uint8_t   pin2;          // secondary (ECHO for ultrasonic; unused otherwise)
+    uint8_t   i2cAddr;       // I2C address for DEV_I2C_READ and DEV_OLED
+    uint8_t   i2cReg;        // register byte for DEV_I2C_READ
+    uint8_t   readBytes;     // 1 or 2 for DEV_I2C_READ
+    uint8_t   outVpin[4];    // up to 4 output vpins (DHT: temp+humid, I2C: 1)
+    // Per-device extra config — INA226 uses cfgA for shunt resistance
+    // in milliohms (e.g. 100 for a 0.1Ω shunt). Unused for other types.
+    int16_t   cfgA;
+    uint16_t  intervalMs;    // service interval
+    uint32_t  lastServiceMs; // when this device last ran
+    // OLED-only: template string referencing vpins as {Vnnn}. Statically
+    // sized so the table stays POD; truncated by encoder.
+    char      oledFmt[DEVICE_OLED_FMT_LEN + 1];
+};
+Device devices[MAX_DEVICES];
+
+// ─── VL53L0X / VL53L1X driver singletons ─────────────────────────
+// Each ToF sensor type has its own library instance + init flag.
+// We use the default I2C address (0x29) for both, so a node can
+// host at most one of each. Multi-sensor support would need XSHUT-
+// pin re-addressing — out of scope for v1; users who need multiple
+// ToF sensors can use the generic I2C block instead.
+//
+// initTried prevents retrying init on every service call after a
+// hardware failure (no sensor connected, bad wiring, etc.) — saves
+// 50ms per cycle of useless I2C timeouts and stops the logs filling
+// with the same retry message.
+static VL53L0X vl53l0x_drv;
+static bool    vl53l0x_initOK  = false;
+static bool    vl53l0x_initTried = false;
+static VL53L1X vl53l1x_drv;
+static bool    vl53l1x_initOK  = false;
+static bool    vl53l1x_initTried = false;
+
+static void vl53ResetState() {
+    vl53l0x_initOK = vl53l0x_initTried = false;
+    vl53l1x_initOK = vl53l1x_initTried = false;
+}
+
+bool hasActiveOledDevice() {
+    for (int i = 0; i < MAX_DEVICES; i++) {
+        if (devices[i].active && devices[i].type == DEV_OLED) return true;
+    }
+    return false;
+}
+
+// Forward decl — lastOledRefresh lives down with the timing globals;
+// this lets clearAllDevices() force a system-default redraw when the
+// last OLED block goes away.
+extern unsigned long lastOledRefresh;
+
+void clearAllDevices() {
+    bool hadOled = hasActiveOledDevice();
+    for (int i = 0; i < MAX_DEVICES; i++) {
+        devices[i].active = false;
+        devices[i].oledFmt[0] = '\0';
+    }
+    // If an OLED block was running, revert to system-default OLED
+    // content (node ID, battery, etc.) by zeroing the refresh timer so
+    // updateOLED() fires on its next call instead of waiting 5s.
+    if (hadOled) {
+        lastOledRefresh = 0;
+    }
+    // Reset ToF sensor init state — next deploy that includes a
+    // VL53L0X/L1X will re-init from scratch (necessary because the
+    // user may have re-wired or power-cycled the sensor).
+    vl53ResetState();
+}
+
+// Find free or matching-key device slot. For most devices the "key" is
+// (type, pin1) so re-deploying the same DHT on the same pin replaces
+// rather than fills a new slot. For I2C devices the key is (type, addr).
+int allocDeviceSlot(uint8_t type, uint8_t pin1, uint8_t i2cAddr) {
+    for (int i = 0; i < MAX_DEVICES; i++) {
+        if (!devices[i].active) continue;
+        if (devices[i].type != type) continue;
+        if (type == DEV_I2C_READ || type == DEV_OLED) {
+            if (devices[i].i2cAddr == i2cAddr) return i;
+        } else if (devices[i].pin1 == pin1) {
+            return i;
+        }
+    }
+    for (int i = 0; i < MAX_DEVICES; i++) if (!devices[i].active) return i;
+    return -1;
+}
+
+// ─── DHT11 / DHT22 minimal driver ────────────────────────────────
+// Single-wire timing protocol — host pulls low ≥18ms, releases, sensor
+// drives 80µs low + 80µs high handshake, then 40 data bits (each: 50µs
+// low + 26-70µs high; long high = 1, short high = 0). No library
+// dependency — ~50 lines. DHT22 uses the same protocol with different
+// scaling (signed 0.1°C and 0.1%, vs DHT11's integer °C and %).
+static bool dhtRead(uint8_t pin, bool isDht22, float* outTempC, float* outHumPct) {
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, LOW);
+    delay(isDht22 ? 1 : 18);  // DHT22 needs at least 1ms, DHT11 needs 18ms
+    digitalWrite(pin, HIGH);
+    delayMicroseconds(40);
+    pinMode(pin, INPUT_PULLUP);
+
+    // Wait for sensor low handshake (max ~85µs).
+    uint32_t t0 = micros();
+    while (digitalRead(pin) == HIGH) { if (micros() - t0 > 100) return false; }
+    t0 = micros();
+    while (digitalRead(pin) == LOW)  { if (micros() - t0 > 100) return false; }
+    t0 = micros();
+    while (digitalRead(pin) == HIGH) { if (micros() - t0 > 100) return false; }
+
+    uint8_t data[5] = {0,0,0,0,0};
+    for (int i = 0; i < 40; i++) {
+        // Wait through the 50µs low pulse that prefixes each bit.
+        t0 = micros();
+        while (digitalRead(pin) == LOW)  { if (micros() - t0 > 80) return false; }
+        // High duration encodes the bit. ~26µs = 0, ~70µs = 1. Threshold at 40µs.
+        uint32_t tHi = micros();
+        while (digitalRead(pin) == HIGH) { if (micros() - tHi > 100) return false; }
+        if (micros() - tHi > 40) data[i / 8] |= (uint8_t)(1 << (7 - (i % 8)));
+    }
+    // Checksum: low byte of (RH_int + RH_dec + T_int + T_dec).
+    if (((data[0] + data[1] + data[2] + data[3]) & 0xFF) != data[4]) return false;
+
+    if (isDht22) {
+        uint16_t rh  = ((uint16_t)data[0] << 8) | data[1];
+        int16_t  tC  = ((int16_t) (data[2] & 0x7F) << 8) | data[3];
+        if (data[2] & 0x80) tC = -tC;
+        *outHumPct = (float)rh / 10.0f;
+        *outTempC  = (float)tC / 10.0f;
+    } else {
+        *outHumPct = (float)data[0];
+        *outTempC  = (float)data[2];
+    }
+    return true;
+}
+
+// ─── HC-SR04 ultrasonic ──────────────────────────────────────────
+// 10µs HIGH pulse on TRIG, then time the HIGH on ECHO. Distance =
+// echoUs / 58 cm (speed of sound ~340 m/s round trip). Returns -1 on
+// timeout (out of range or sensor disconnected).
+static int hcsr04ReadCm(uint8_t trigPin, uint8_t echoPin) {
+    pinMode(trigPin, OUTPUT);
+    pinMode(echoPin, INPUT);
+    digitalWrite(trigPin, LOW);
+    delayMicroseconds(2);
+    digitalWrite(trigPin, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(trigPin, LOW);
+    // pulseIn returns 0 on timeout. 30000µs timeout = ~5m range cap.
+    unsigned long us = pulseIn(echoPin, HIGH, 30000UL);
+    if (us == 0) return -1;
+    return (int)(us / 58);
+}
+
+// ─── DS18B20 OneWire minimal driver ──────────────────────────────
+// Implements just enough to broadcast a "convert + read scratchpad" to
+// every DS18B20 on the bus and return the first one's temperature.
+// Saves pulling in OneWire + DallasTemperature (~10KB) for one feature.
+static bool oneWireReset(uint8_t pin) {
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, LOW);
+    delayMicroseconds(480);
+    pinMode(pin, INPUT_PULLUP);
+    delayMicroseconds(70);
+    bool present = (digitalRead(pin) == LOW);
+    delayMicroseconds(410);
+    return present;
+}
+static void oneWireWriteBit(uint8_t pin, bool bit) {
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, LOW);
+    delayMicroseconds(bit ? 6 : 60);
+    pinMode(pin, INPUT_PULLUP);
+    delayMicroseconds(bit ? 64 : 10);
+}
+static bool oneWireReadBit(uint8_t pin) {
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, LOW);
+    delayMicroseconds(6);
+    pinMode(pin, INPUT_PULLUP);
+    delayMicroseconds(9);
+    bool b = (digitalRead(pin) != 0);
+    delayMicroseconds(55);
+    return b;
+}
+static void oneWireWriteByte(uint8_t pin, uint8_t v) {
+    for (int i = 0; i < 8; i++) { oneWireWriteBit(pin, v & 1); v >>= 1; }
+}
+static uint8_t oneWireReadByte(uint8_t pin) {
+    uint8_t v = 0;
+    for (int i = 0; i < 8; i++) if (oneWireReadBit(pin)) v |= (1 << i);
+    return v;
+}
+
+// Returns temp °C × 10 (so the int fits in a uint16 vpin with 0.1°C
+// resolution). INT16_MIN on error.
+static int16_t ds18b20ReadTempC10(uint8_t pin) {
+    if (!oneWireReset(pin)) return INT16_MIN;
+    oneWireWriteByte(pin, 0xCC);  // SKIP ROM (broadcast to all devices)
+    oneWireWriteByte(pin, 0x44);  // CONVERT T
+    // Wait up to 750ms for 12-bit conversion. We use a blocking poll —
+    // the firmware's main loop already tolerates 100ms blocking calls.
+    uint32_t t0 = millis();
+    while (millis() - t0 < 800) {
+        if (oneWireReadBit(pin)) break;  // conversion done when bus reads 1
+    }
+    if (!oneWireReset(pin)) return INT16_MIN;
+    oneWireWriteByte(pin, 0xCC);  // SKIP ROM
+    oneWireWriteByte(pin, 0xBE);  // READ SCRATCHPAD
+    uint8_t lo = oneWireReadByte(pin);
+    uint8_t hi = oneWireReadByte(pin);
+    int16_t raw = (int16_t)((hi << 8) | lo);
+    // Raw is in 1/16°C steps (DS18B20 default 12-bit). Convert to ×10°C.
+    return (int16_t)((int32_t)raw * 10 / 16);
+}
+
+// ─── I2C helpers (Tier 2) ────────────────────────────────────────
+// Tiny wrappers used by all the canned I2C wrappers below. Each returns
+// false on bus error so the caller can leave the previous vpin value
+// in place instead of writing garbage. They use the standard Wire bus
+// configured for OLED elsewhere — sharing one bus between sensors and
+// the optional OLED is fine; the addresses don't collide.
+static bool i2cWrite8(uint8_t addr, uint8_t reg, uint8_t val) {
+    Wire.beginTransmission(addr);
+    Wire.write(reg);
+    Wire.write(val);
+    return Wire.endTransmission() == 0;
+}
+static bool i2cWrite16(uint8_t addr, uint8_t reg, uint16_t val) {
+    Wire.beginTransmission(addr);
+    Wire.write(reg);
+    Wire.write((uint8_t)(val >> 8));
+    Wire.write((uint8_t)(val & 0xFF));
+    return Wire.endTransmission() == 0;
+}
+static bool i2cReadN(uint8_t addr, uint8_t reg, uint8_t* buf, size_t n) {
+    Wire.beginTransmission(addr);
+    Wire.write(reg);
+    if (Wire.endTransmission(false) != 0) return false;
+    size_t got = Wire.requestFrom((int)addr, (int)n);
+    if (got < n) return false;
+    for (size_t i = 0; i < n; i++) buf[i] = Wire.read();
+    return true;
+}
+
+// ─── SHT31 driver (high-accuracy temp+humidity, addr 0x44/0x45) ──
+// Single-shot high-repeatability conversion: write 0x2400, wait ~15ms,
+// read 6 bytes (temp_hi temp_lo crc hum_hi hum_lo crc). We skip CRC
+// validation — a corrupted byte just produces an obviously-wrong value
+// the user will spot on the canvas, and CRC8 in 30 lines isn't worth
+// the code size for a sanity net.
+// Returns temp °C×10 and humidity %×10 via out params, or false on bus
+// error. -45°C..+130°C ×10 fits in int16_t; humidity 0..1000 in uint16.
+static bool sht31Read(uint8_t addr, int16_t* tempC10, uint16_t* humPct10) {
+    Wire.beginTransmission(addr);
+    Wire.write(0x24);
+    Wire.write(0x00);
+    if (Wire.endTransmission() != 0) return false;
+    delay(16);  // SHT31 high-rep conversion is ~15ms
+    uint8_t b[6];
+    Wire.requestFrom((int)addr, 6);
+    if (Wire.available() < 6) return false;
+    for (int i = 0; i < 6; i++) b[i] = Wire.read();
+    uint16_t rawT = ((uint16_t)b[0] << 8) | b[1];
+    uint16_t rawH = ((uint16_t)b[3] << 8) | b[4];
+    // Datasheet conversion (×10 scaled to fit uint16):
+    //   T_°C = -45 + 175 × rawT / 65535
+    //   RH_% =   0 + 100 × rawH / 65535
+    *tempC10  = (int16_t)((int32_t)175 * rawT / 65535 - 450) * 10 / 10;
+    // Better precision: scale to ×10 first, then divide.
+    *tempC10  = (int16_t)((int32_t)1750 * rawT / 65535 - 4500);
+    *humPct10 = (uint16_t)((int32_t)1000 * rawH / 65535);
+    return true;
+}
+
+// ─── MCP9808 driver (±0.25°C precision temp, addr 0x18..0x1F) ────
+// Just 2 bytes from register 0x05 (T_AMBIENT). Top 3 bits are flags
+// (alert/limit), low 13 bits are sign-extended 12.4 fixed-point °C.
+// Returns temp °C×10, or false on bus error. Range -40..+125°C.
+static bool mcp9808Read(uint8_t addr, int16_t* tempC10) {
+    uint8_t b[2];
+    if (!i2cReadN(addr, 0x05, b, 2)) return false;
+    int16_t raw = ((int16_t)(b[0] & 0x1F) << 8) | b[1];  // 13 bits
+    if (b[0] & 0x10) raw -= 0x2000;                       // sign extend
+    // raw is in 1/16°C steps. Convert to ×10°C:  raw * 10 / 16.
+    *tempC10 = (int16_t)((int32_t)raw * 10 / 16);
+    return true;
+}
+
+// ─── INA226 driver (bus voltage + current, addr 0x40..0x4F) ──────
+// Configures the calibration register on every read so the user can
+// hot-swap shunt resistors without rebooting. Then reads bus voltage
+// from reg 0x02 (LSB 1.25mV) and current from reg 0x04. cfgA is the
+// shunt resistance in milliohms — typical values 100 (0.1Ω, fits up
+// to ~20A) or 1 (0.001Ω, very high current shunt). Returns vMv (bus
+// voltage in millivolts) and iMa (current in milliamps).
+//
+// Calibration formula (per Texas Instruments INA226 datasheet):
+//   Current_LSB (A) = max_expected_current / 2^15
+//   CAL = 0.00512 / (Current_LSB × Rshunt)
+// We pick Current_LSB = 1 mA (so the raw current reg = mA directly)
+// → CAL = 5120 / Rshunt_mΩ
+static bool ina226Init(uint8_t addr, int16_t shuntMOhm) {
+    if (shuntMOhm <= 0) shuntMOhm = 100;  // default 0.1Ω
+    uint16_t cal = (uint16_t)(5120 / (uint32_t)shuntMOhm);
+    return i2cWrite16(addr, 0x05, cal);
+}
+static bool ina226Read(uint8_t addr, uint16_t* vMv, int16_t* iMa) {
+    uint8_t b[2];
+    if (!i2cReadN(addr, 0x02, b, 2)) return false;     // BUS_VOLTAGE
+    uint16_t rawV = ((uint16_t)b[0] << 8) | b[1];
+    // Bus voltage LSB = 1.25 mV.  rawV × 1.25 → mV
+    *vMv = (uint16_t)(((uint32_t)rawV * 5) / 4);
+    if (!i2cReadN(addr, 0x04, b, 2)) return false;     // CURRENT
+    int16_t rawI = (int16_t)(((uint16_t)b[0] << 8) | b[1]);
+    *iMa = rawI;  // Current_LSB chosen as 1 mA → raw == mA
+    return true;
+}
+
+// ─── BME280 driver (temp + pressure + humidity, addr 0x76/0x77) ──
+// Reads calibration coefficients fresh on every cycle. They could be
+// cached but the I2C reads are cheap (~3ms total) and stateless code
+// is half the size — no per-device cache struct to manage. Bosch's
+// integer compensation routines from the datasheet appendix produce
+// ×100 °C, Pa Q24.8, ×1024 %RH. We rescale to fit uint16 vpins:
+//   temp:     °C × 10  (e.g. 23.4°C = 234, signed)
+//   pressure: hPa × 10 (e.g. 1013.2 hPa = 10132, fits 9000–11000)
+//   humidity: % × 10   (0..1000)
+struct BmeCal {
+    uint16_t T1; int16_t T2, T3;
+    uint16_t P1; int16_t P2,P3,P4,P5,P6,P7,P8,P9;
+    uint8_t  H1; int16_t H2; uint8_t H3; int16_t H4, H5; int8_t H6;
+};
+static bool bme280ReadCal(uint8_t addr, BmeCal& c) {
+    uint8_t b[26];
+    if (!i2cReadN(addr, 0x88, b, 26)) return false;
+    c.T1 = (uint16_t)(b[0]  | (b[1]  << 8));
+    c.T2 = (int16_t) (b[2]  | (b[3]  << 8));
+    c.T3 = (int16_t) (b[4]  | (b[5]  << 8));
+    c.P1 = (uint16_t)(b[6]  | (b[7]  << 8));
+    c.P2 = (int16_t) (b[8]  | (b[9]  << 8));
+    c.P3 = (int16_t) (b[10] | (b[11] << 8));
+    c.P4 = (int16_t) (b[12] | (b[13] << 8));
+    c.P5 = (int16_t) (b[14] | (b[15] << 8));
+    c.P6 = (int16_t) (b[16] | (b[17] << 8));
+    c.P7 = (int16_t) (b[18] | (b[19] << 8));
+    c.P8 = (int16_t) (b[20] | (b[21] << 8));
+    c.P9 = (int16_t) (b[22] | (b[23] << 8));
+    c.H1 = b[25];
+    uint8_t h[7];
+    if (!i2cReadN(addr, 0xE1, h, 7)) return false;
+    c.H2 = (int16_t)(h[0] | (h[1] << 8));
+    c.H3 = h[2];
+    c.H4 = (int16_t)(((int16_t)h[3] << 4) | (h[4] & 0x0F));
+    c.H5 = (int16_t)(((int16_t)h[5] << 4) | (h[4] >> 4));
+    c.H6 = (int8_t)h[6];
+    return true;
+}
+static bool bme280Read(uint8_t addr, int16_t* tempC10, uint16_t* hPa10,
+                       uint16_t* humPct10) {
+    BmeCal cal;
+    if (!bme280ReadCal(addr, cal)) return false;
+    // Configure: humidity oversample x1, temp+press oversample x1, forced mode.
+    i2cWrite8(addr, 0xF2, 0x01);   // ctrl_hum
+    i2cWrite8(addr, 0xF4, 0x25);   // ctrl_meas (osrs_t=1, osrs_p=1, mode=forced)
+    delay(10);                     // wait for measurement
+    uint8_t b[8];
+    if (!i2cReadN(addr, 0xF7, b, 8)) return false;
+    int32_t adc_P = ((int32_t)b[0] << 12) | ((int32_t)b[1] << 4) | (b[2] >> 4);
+    int32_t adc_T = ((int32_t)b[3] << 12) | ((int32_t)b[4] << 4) | (b[5] >> 4);
+    int32_t adc_H = ((int32_t)b[6] <<  8) |  (int32_t)b[7];
+
+    // ─ Temperature (Bosch datasheet reference, int32) ─
+    int32_t var1, var2, t_fine, T;
+    var1 = ((((adc_T >> 3) - ((int32_t)cal.T1 << 1))) * ((int32_t)cal.T2)) >> 11;
+    var2 = (((((adc_T >> 4) - ((int32_t)cal.T1)) *
+             ((adc_T >> 4) - ((int32_t)cal.T1))) >> 12) * ((int32_t)cal.T3)) >> 14;
+    t_fine = var1 + var2;
+    T = (t_fine * 5 + 128) >> 8;   // °C × 100
+    *tempC10 = (int16_t)(T / 10);
+
+    // ─ Pressure (Bosch reference, int64 — works fine on ESP32-S3) ─
+    int64_t pv1, pv2, p;
+    pv1 = ((int64_t)t_fine) - 128000;
+    pv2 = pv1 * pv1 * (int64_t)cal.P6;
+    pv2 = pv2 + ((pv1 * (int64_t)cal.P5) << 17);
+    pv2 = pv2 + (((int64_t)cal.P4) << 35);
+    pv1 = ((pv1 * pv1 * (int64_t)cal.P3) >> 8) + ((pv1 * (int64_t)cal.P2) << 12);
+    pv1 = ((((int64_t)1) << 47) + pv1) * ((int64_t)cal.P1) >> 33;
+    if (pv1 == 0) { *hPa10 = 0; }
+    else {
+        p = 1048576 - adc_P;
+        p = (((p << 31) - pv2) * 3125) / pv1;
+        pv1 = (((int64_t)cal.P9) * (p >> 13) * (p >> 13)) >> 25;
+        pv2 = (((int64_t)cal.P8) * p) >> 19;
+        p = ((p + pv1 + pv2) >> 8) + (((int64_t)cal.P7) << 4);
+        // p is Pa in Q24.8. Convert to hPa × 10: p / 256 / 10 = p / 2560.
+        *hPa10 = (uint16_t)(p / 2560);
+    }
+
+    // ─ Humidity (Bosch reference, int32) ─
+    int32_t v_x1_u32r = (t_fine - ((int32_t)76800));
+    v_x1_u32r = (((((adc_H << 14) - (((int32_t)cal.H4) << 20) -
+                    (((int32_t)cal.H5) * v_x1_u32r)) + ((int32_t)16384)) >> 15) *
+                 (((((((v_x1_u32r * ((int32_t)cal.H6)) >> 10) *
+                      (((v_x1_u32r * ((int32_t)cal.H3)) >> 11) + ((int32_t)32768))) >> 10) +
+                    ((int32_t)2097152)) * ((int32_t)cal.H2) + 8192) >> 14));
+    v_x1_u32r = (v_x1_u32r - (((((v_x1_u32r >> 15) * (v_x1_u32r >> 15)) >> 7) *
+                                ((int32_t)cal.H1)) >> 4));
+    v_x1_u32r = (v_x1_u32r < 0) ? 0 : v_x1_u32r;
+    v_x1_u32r = (v_x1_u32r > 419430400) ? 419430400 : v_x1_u32r;
+    uint32_t humQ22 = (uint32_t)(v_x1_u32r >> 12);   // %RH × 1024
+    *humPct10 = (uint16_t)((humQ22 * 10) / 1024);
+    return true;
+}
+
+// ─── Device service loop ─────────────────────────────────────────
+// Called from the main loop every tick. Each active device runs at its
+// own cadence (intervalMs since lastServiceMs). Reads land in the
+// configured vpins via setVpinValue, which means they integrate with
+// the PLC primitives' scratch/storage dispatch automatically.
+void serviceDevices() {
+    uint32_t now = millis();
+    for (int i = 0; i < MAX_DEVICES; i++) {
+        Device& d = devices[i];
+        if (!d.active) continue;
+        if (d.intervalMs && (now - d.lastServiceMs) < d.intervalMs) continue;
+        d.lastServiceMs = now;
+        switch (d.type) {
+            case DEV_DHT11:
+            case DEV_DHT22: {
+                float t = 0, h = 0;
+                if (dhtRead(d.pin1, d.type == DEV_DHT22, &t, &h)) {
+                    if (d.outVpin[0]) setVpinValue(d.outVpin[0], (uint16_t)(t * 10));  // °C×10
+                    if (d.outVpin[1]) setVpinValue(d.outVpin[1], (uint16_t)(h * 10));  // %×10
+                }
+                break;
+            }
+            case DEV_HCSR04: {
+                int cm = hcsr04ReadCm(d.pin1, d.pin2);
+                if (cm >= 0 && d.outVpin[0]) setVpinValue(d.outVpin[0], (uint16_t)cm);
+                break;
+            }
+            case DEV_DS18B20: {
+                int16_t tC10 = ds18b20ReadTempC10(d.pin1);
+                if (tC10 != INT16_MIN && d.outVpin[0]) {
+                    // Store as unsigned — caller does its own signed
+                    // interpretation if needed. Negative temps wrap to
+                    // high uint16 values which downstream Compare blocks
+                    // can still discriminate against.
+                    setVpinValue(d.outVpin[0], (uint16_t)tC10);
+                }
+                break;
+            }
+            case DEV_I2C_READ: {
+                Wire.beginTransmission(d.i2cAddr);
+                Wire.write(d.i2cReg);
+                if (Wire.endTransmission(false) != 0) break;
+                uint8_t n = (d.readBytes == 2) ? 2 : 1;
+                Wire.requestFrom((int)d.i2cAddr, (int)n);
+                if (Wire.available() < n) break;
+                uint16_t v = Wire.read();
+                if (n == 2) v = (v << 8) | Wire.read();
+                if (d.outVpin[0]) setVpinValue(d.outVpin[0], v);
+                break;
+            }
+            case DEV_BME280: {
+                int16_t  tC10  = 0;
+                uint16_t hPa10 = 0;
+                uint16_t hum10 = 0;
+                if (bme280Read(d.i2cAddr, &tC10, &hPa10, &hum10)) {
+                    if (d.outVpin[0]) setVpinValue(d.outVpin[0], (uint16_t)tC10);
+                    if (d.outVpin[1]) setVpinValue(d.outVpin[1], hPa10);
+                    if (d.outVpin[2]) setVpinValue(d.outVpin[2], hum10);
+                }
+                break;
+            }
+            case DEV_SHT31: {
+                int16_t  tC10  = 0;
+                uint16_t hum10 = 0;
+                if (sht31Read(d.i2cAddr, &tC10, &hum10)) {
+                    if (d.outVpin[0]) setVpinValue(d.outVpin[0], (uint16_t)tC10);
+                    if (d.outVpin[1]) setVpinValue(d.outVpin[1], hum10);
+                }
+                break;
+            }
+            case DEV_INA226: {
+                // Cheap re-init on each cycle — keeps the firmware
+                // stateless and lets the user hot-swap shunts.
+                ina226Init(d.i2cAddr, d.cfgA);
+                uint16_t vMv = 0;
+                int16_t  iMa = 0;
+                if (ina226Read(d.i2cAddr, &vMv, &iMa)) {
+                    if (d.outVpin[0]) setVpinValue(d.outVpin[0], vMv);
+                    if (d.outVpin[1]) setVpinValue(d.outVpin[1], (uint16_t)iMa);
+                }
+                break;
+            }
+            case DEV_MCP9808: {
+                int16_t tC10 = 0;
+                if (mcp9808Read(d.i2cAddr, &tC10)) {
+                    if (d.outVpin[0]) setVpinValue(d.outVpin[0], (uint16_t)tC10);
+                }
+                break;
+            }
+            case DEV_VL53L0X: {
+                // Lazy init on first service call. setBus() lets the
+                // library know our existing Wire instance — saves
+                // another Wire.begin() elsewhere. If sensor isn't
+                // physically present, init returns false and we never
+                // retry (initTried gate) to avoid log spam.
+                if (!vl53l0x_initTried) {
+                    vl53l0x_initTried = true;
+                    vl53l0x_drv.setBus(&Wire);
+                    vl53l0x_drv.setTimeout(500);
+                    if (vl53l0x_drv.init()) {
+                        // 50ms timing budget → ~20Hz max, good middle
+                        // ground between accuracy and update rate.
+                        vl53l0x_drv.setMeasurementTimingBudget(50000);
+                        vl53l0x_initOK = true;
+                    }
+                }
+                if (!vl53l0x_initOK) break;
+                uint16_t mm = vl53l0x_drv.readRangeSingleMillimeters();
+                // Library writes 65535 + sets timeout flag on read
+                // failure. Don't propagate that as a real reading —
+                // leave the vpin holding its last valid value.
+                if (!vl53l0x_drv.timeoutOccurred() && mm < 8190) {
+                    if (d.outVpin[0]) setVpinValue(d.outVpin[0], mm);
+                }
+                break;
+            }
+            case DEV_VL53L1X: {
+                if (!vl53l1x_initTried) {
+                    vl53l1x_initTried = true;
+                    vl53l1x_drv.setBus(&Wire);
+                    vl53l1x_drv.setTimeout(500);
+                    if (vl53l1x_drv.init()) {
+                        // Long-distance mode (~4m range) + 50ms TB —
+                        // typical use is "is something in the room",
+                        // so prioritise range over precision.
+                        vl53l1x_drv.setDistanceMode(VL53L1X::Long);
+                        vl53l1x_drv.setMeasurementTimingBudget(50000);
+                        vl53l1x_drv.startContinuous(50);  // 50ms interval
+                        vl53l1x_initOK = true;
+                    }
+                }
+                if (!vl53l1x_initOK) break;
+                if (vl53l1x_drv.dataReady()) {
+                    uint16_t mm = vl53l1x_drv.read(false);
+                    if (mm > 0 && mm < 8000) {
+                        if (d.outVpin[0]) setVpinValue(d.outVpin[0], mm);
+                    }
+                }
+                break;
+            }
+            case DEV_OLED: {
+                if (!oledAvailable) break;
+                // Substitute {Vnnn} placeholders with current vpin values
+                // and render. Format string is null-terminated, max
+                // DEVICE_OLED_FMT_LEN chars. Up to 4 lines via \n.
+                char rendered[DEVICE_OLED_FMT_LEN * 2 + 1];
+                size_t r = 0;
+                const char* p = d.oledFmt;
+                while (*p && r < sizeof(rendered) - 1) {
+                    if (p[0] == '{' && p[1] == 'V') {
+                        // Parse {Vnnn} — find closing brace.
+                        const char* close = strchr(p, '}');
+                        if (close && (close - p) <= 6) {
+                            int vp = atoi(p + 2);
+                            uint16_t v = getVpinValue(vp);
+                            int wrote = snprintf(rendered + r,
+                                                 sizeof(rendered) - r,
+                                                 "%u", (unsigned)v);
+                            if (wrote > 0) r += (size_t)wrote;
+                            p = close + 1;
+                            continue;
+                        }
+                    }
+                    rendered[r++] = *p++;
+                }
+                rendered[r] = '\0';
+                oled.clearDisplay();
+                oled.setTextSize(1);
+                oled.setTextColor(SSD1306_WHITE);
+                oled.setCursor(0, 0);
+                oled.print(rendered);
+                oled.display();
+                break;
+            }
+        }
+    }
 }
 
 // Append VIRTUAL_PINS (defined per-board or globally in Pins.h, default
@@ -817,6 +1446,22 @@ struct SetpointRule {
     // before the rule can fire again. Without this, a steady-state
     // above-threshold sensor re-fires every (HOLD + COOLDOWN) ms forever.
     bool holdLatched;
+    // Boolean-domain flag: set true when the SETPOINT was installed via
+    // the binary PLC compiler with the well-known boolean form (vpin
+    // with op=GE,1 or op=LT,1 — see processPlcBinary tags 0x60-0x63).
+    // The runtime uses this to skip the analog hysteresis margin —
+    // digital sources don't chatter, AND a margin around threshold=1
+    // creates a dead zone that prevents LT,1 from ever re-arming after
+    // its first fire. Defaults false; ASCII installs and analog setpoints
+    // never set it.
+    bool booleanDomain;
+    // Per-setpoint cooldown override. 0 = use SETPOINT_COOLDOWN default
+    // (10 s). Lets the gateway pass the rule's GUI "Min action gap"
+    // setting down to firmware so a user who explicitly chose a 2 s gap
+    // gets 2 s not the 10 s hard-coded default. uint16 caps at 65 s
+    // which matches typical user-facing semantics; longer than that is
+    // a HOLD config anyway.
+    uint16_t cooldownMs;
     unsigned long lastFired;
     unsigned long debounceStart;  // Runtime: when condition first became true
 };
@@ -1033,6 +1678,19 @@ void notifyBeaconEvent(const String& event, bool meshBroadcast = false) {
     }
 }
 
+// Return a pointer to the embedded "leave" message within r.message[] for
+// MSG-action beacons, or nullptr if no leave message was configured. We
+// pack the leave text into the same 32-byte buffer as the enter text,
+// separated by the enter text's null terminator, to avoid bumping the
+// EEPROM stride (which would invalidate every existing beacon record).
+static const char* beaconLeaveMessage(const BeaconRule& r) {
+    if (r.actionType != 1) return nullptr;
+    size_t enterLen = strnlen(r.message, sizeof(r.message));
+    if (enterLen + 1 >= sizeof(r.message)) return nullptr;
+    if (r.message[enterLen + 1] == '\0') return nullptr;
+    return r.message + enterLen + 1;
+}
+
 void executeBeaconAction(BeaconRule& r) {
     if (r.actionType == 0) {
         // Relay action — local or remote
@@ -1166,7 +1824,35 @@ void checkBeaconReverts() {
     unsigned long now = millis();
     for (int i = 0; i < MAX_BEACON_RULES; i++) {
         BeaconRule& r = beaconRules[i];
-        if (!r.active || !r.triggered || r.revertMs == 0) continue;
+        // MSG-action rules don't have a revertMs (no relay to flip back), so
+        // the original loop body would skip them with the `r.revertMs == 0`
+        // guard. They have their own leave path below — handle them first.
+        if (!r.active || !r.triggered) continue;
+        if (r.actionType == 1) {
+            // Once the beacon has been gone for cooldownMs:
+            //   - if a leave message is embedded in r.message[], broadcast
+            //     it once on the mesh and reset triggered so a fresh enter
+            //     broadcast can fire on re-entry.
+            //   - if no leave message, just rearm (existing behaviour).
+            unsigned long grace = r.cooldownMs > 0 ? r.cooldownMs : 10000;
+            if (now - r.lastSeen > grace) {
+                const char* leaveMsg = beaconLeaveMessage(r);
+                if (leaveMsg) {
+                    String mid = mesh.generateMsgID();
+                    String hex = mesh.encryptMsg("MSG," + String(leaveMsg));
+                    String payload = String(mesh.localID) + ",FFFF," + mid + "," +
+                                     String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+                    mesh.transmitPacket(0xFFFF, payload);
+                    debugPrint("BEACON: " + String(r.name) + " -> LEAVE broadcast: " + String(leaveMsg));
+                    notifyBeaconEvent("BEACON,LEAVE," + String(r.name) + ",MSG," + String(leaveMsg), true);
+                } else {
+                    debugPrint("BEACON: " + String(r.name) + " -> MSG rearmed (no leave configured)");
+                }
+                r.triggered = false;
+            }
+            continue;
+        }
+        if (r.revertMs == 0) continue;
         if (r.actionType == 2) {
             // Phase 2/3: PULSE — pin is auto-cleared by checkPulseTimers().
             // Once the beacon has been gone for cooldownMs (default 10s):
@@ -1442,16 +2128,30 @@ RTC_DATA_ATTR uint32_t rtcLowBattFlag = 0;
 #endif
 
 // Runtime values — start at compile-time defaults, overridden from EEPROM.
-float    battDivider     = BAT_DIVIDER;
-uint16_t battLowMv       = BAT_LOW_MV;
-uint16_t battRecoverMv   = BAT_RECOVER_MV;
-bool     battCfgIsCustom = false;
+// BATT_HIBERNATE_DEFAULT in Pins.h lets a board ship with the low-volt
+// auto-shutdown disabled (e.g. bench/lab boards, or solar-powered nodes
+// where the user wants to keep transmitting until the LDO browns out
+// naturally rather than the firmware cutting it off early).
+#ifndef BATT_HIBERNATE_DEFAULT
+  #define BATT_HIBERNATE_DEFAULT 1   // 1 = hibernate on low battery; 0 = stay running
+#endif
+float    battDivider           = BAT_DIVIDER;
+uint16_t battLowMv             = BAT_LOW_MV;
+uint16_t battRecoverMv         = BAT_RECOVER_MV;
+bool     battHibernateEnabled  = (BATT_HIBERNATE_DEFAULT != 0);
+bool     battCfgIsCustom       = false;
 
+// Struct version bumped to invalidate any old (4-field) EEPROM record
+// when the firmware boots a new build for the first time. Old records
+// trip the magic check and the firmware falls back to Pins.h defaults
+// — same path as a fresh install. No silent corruption from reading
+// an undersized blob into the larger struct.
 struct __attribute__((packed)) BattCfgEEPROM {
     uint16_t magic;
     float    divider;
     uint16_t lowMv;
     uint16_t recoverMv;
+    uint8_t  hibernateEnabled;   // 0/1; new in v2 of the record
 };
 
 void loadBattCfg() {
@@ -1462,15 +2162,17 @@ void loadBattCfg() {
         && e.divider >= 0.5f && e.divider <= 50.0f
         && e.lowMv >= 1000 && e.lowMv <= 60000
         && e.recoverMv > e.lowMv && e.recoverMv <= 60000) {
-        battDivider     = e.divider;
-        battLowMv       = e.lowMv;
-        battRecoverMv   = e.recoverMv;
-        battCfgIsCustom = true;
+        battDivider           = e.divider;
+        battLowMv             = e.lowMv;
+        battRecoverMv         = e.recoverMv;
+        battHibernateEnabled  = (e.hibernateEnabled != 0);
+        battCfgIsCustom       = true;
     }
 }
 
 void saveBattCfg(float divider, uint16_t lowMv, uint16_t recoverMv) {
-    BattCfgEEPROM e = { EEPROM_BATTCFG_MAGIC, divider, lowMv, recoverMv };
+    BattCfgEEPROM e = { EEPROM_BATTCFG_MAGIC, divider, lowMv, recoverMv,
+                        (uint8_t)(battHibernateEnabled ? 1 : 0) };
     EEPROM.put(EEPROM_BATTCFG_ADDR, e);
     EEPROM.commit();
     battDivider     = divider;
@@ -1479,14 +2181,23 @@ void saveBattCfg(float divider, uint16_t lowMv, uint16_t recoverMv) {
     battCfgIsCustom = true;
 }
 
+void saveBattHibernateFlag(bool enabled) {
+    // Persist just the flag without touching the divider/threshold
+    // fields. Re-uses saveBattCfg's struct-write path so the magic
+    // and sister fields stay valid.
+    battHibernateEnabled = enabled;
+    saveBattCfg(battDivider, battLowMv, battRecoverMv);
+}
+
 void resetBattCfg() {
-    BattCfgEEPROM e = { 0, 0.0f, 0, 0 };
+    BattCfgEEPROM e = { 0, 0.0f, 0, 0, 0 };
     EEPROM.put(EEPROM_BATTCFG_ADDR, e);
     EEPROM.commit();
-    battDivider     = BAT_DIVIDER;
-    battLowMv       = BAT_LOW_MV;
-    battRecoverMv   = BAT_RECOVER_MV;
-    battCfgIsCustom = false;
+    battDivider           = BAT_DIVIDER;
+    battLowMv             = BAT_LOW_MV;
+    battRecoverMv         = BAT_RECOVER_MV;
+    battHibernateEnabled  = (BATT_HIBERNATE_DEFAULT != 0);
+    battCfgIsCustom       = false;
 }
 
 // Returns battery voltage in millivolts, or -1 if no battery monitoring.
@@ -1544,6 +2255,15 @@ void enterLowBatteryShutdown(int mv) {
 }
 
 void checkBatteryAndShutdown() {
+    // Caller can disable auto-shutdown entirely via the BATT_HIBERNATE
+    // OFF command (or by setting BATT_HIBERNATE_DEFAULT=0 in Pins.h).
+    // Useful for: bench/lab nodes on a power supply, solar-powered
+    // nodes where the user prefers a brown-out reset over an early
+    // firmware-driven sleep, and any deployment where you'd rather
+    // see a noisy "low battery" reading on the dashboard than have
+    // the node disappear for BATT_SLEEP_INTERVAL_S at a time.
+    if (!battHibernateEnabled) return;
+
     // Grace period: never auto-shutdown for the first BATT_BOOT_GRACE_MS after
     // boot. Gives the operator time to BATT_DEBUG / BATT_CFG / SOLAR OFF over
     // serial without the chip resetting under their fingers.
@@ -1780,10 +2500,21 @@ void setupGPIO() {
 // SECTION: Timer / Setpoint / Auto-Poll Handlers
 // ═══════════════════════════════════════════════════════════════
 
+// EEPROM persistence for PLC primitives. Forward-declared here so the
+// timer / setpoint / counter / logic / latch / scale handlers below
+// can call savePlcTables() after each successful ADD or CLEAR. Defined
+// after loadBeaconRules (around line 6470) alongside the existing
+// EEPROM helpers — putting the call sites first because most of the
+// PLC processing lives here and chasing fwd-decl warnings is noisier
+// than putting the impl with the other EEPROM code.
+void savePlcTables();
+void loadPlcTables();
+
 // Core timer logic — returns response string, used by both mesh and BLE paths
 String processTimerCommand(const String& args) {
     if (args == "CLEAR") {
         for (int i = 0; i < MAX_TIMERS; i++) timers[i].active = false;
+        savePlcTables();
         return "OK,TIMER,CLEAR";
     }
     if (args == "LIST") {
@@ -1840,6 +2571,7 @@ String processTimerCommand(const String& args) {
         timers[slot].onAction = (action == "ON");
         timers[slot].nextAt = millis() + (unsigned long)seconds * 1000UL;
         timers[slot].phase = 0;
+        savePlcTables();
         return "OK,TIMER," + String(pin) + "," + action + "," + String(seconds);
     }
     else if (action == "PULSE") {
@@ -1864,6 +2596,7 @@ String processTimerCommand(const String& args) {
         timers[slot].repeats = repeats;
         timers[slot].remaining = (repeats > 0) ? repeats : 0;
         timers[slot].nextAt = millis() + (unsigned long)onSec * 1000UL;
+        savePlcTables();
         return "OK,TIMER," + String(pin) + ",PULSE," + String(onSec) + "," + String(offSec) + "," + String(repeats);
     }
 
@@ -1893,6 +2626,7 @@ void handleTimerBle(const String& args) {
 String processSetpointCommand(const String& args) {
     if (args == "CLEAR") {
         for (int i = 0; i < MAX_SETPOINTS; i++) setpoints[i].active = false;
+        savePlcTables();
         return "OK,SETPOINT,CLEAR";
     }
     if (args == "LIST") {
@@ -1968,13 +2702,15 @@ String processSetpointCommand(const String& args) {
     uint16_t holdMs = 0;
     uint8_t leavePin = 0;
     uint16_t leavePulseMs = 0;
+    uint16_t cooldownMs = 0;  // 0 = use SETPOINT_COOLDOWN default
     int scalePos = rest.indexOf(",SCALE,");
     int debouncePos = rest.indexOf(",DEBOUNCE,");
     int holdPos = rest.indexOf(",HOLD,");
     int leavePos = rest.indexOf(",LEAVE,");
+    int cooldownPos = rest.indexOf(",COOLDOWN,");
     String actionPart = rest;  // Will be trimmed below
 
-    if (scalePos >= 0 || debouncePos >= 0 || holdPos >= 0 || leavePos >= 0) {
+    if (scalePos >= 0 || debouncePos >= 0 || holdPos >= 0 || leavePos >= 0 || cooldownPos >= 0) {
         // Find where suffixes start (whichever comes first). Sentinel is
         // the string length so the comparisons below always pick a real
         // position when at least one suffix is present.
@@ -1983,6 +2719,7 @@ String processSetpointCommand(const String& args) {
         if (debouncePos >= 0 && debouncePos < suffixStart) suffixStart = debouncePos;
         if (holdPos     >= 0 && holdPos     < suffixStart) suffixStart = holdPos;
         if (leavePos    >= 0 && leavePos    < suffixStart) suffixStart = leavePos;
+        if (cooldownPos >= 0 && cooldownPos < suffixStart) suffixStart = cooldownPos;
         actionPart = rest.substring(0, suffixStart);
         String suffixes = rest.substring(suffixStart);
 
@@ -2008,6 +2745,12 @@ String processSetpointCommand(const String& args) {
             holdMs = (hEnd > hIdx) ? suffixes.substring(hIdx, hEnd).toInt()
                                    : suffixes.substring(hIdx).toInt();
         }
+        if (cooldownPos >= 0) {
+            int cIdx = suffixes.indexOf("COOLDOWN,") + 9;
+            int cEnd = suffixes.indexOf(',', cIdx);
+            cooldownMs = (cEnd > cIdx) ? suffixes.substring(cIdx, cEnd).toInt()
+                                       : suffixes.substring(cIdx).toInt();
+        }
         if (leavePos >= 0) {
             // Only LEAVE,PULSE,<pin>,<ms> is supported today.
             int lIdx = suffixes.indexOf("LEAVE,PULSE,");
@@ -2029,17 +2772,35 @@ String processSetpointCommand(const String& args) {
         }
     }
 
-    // Replace any existing setpoint on the same (sensorPin, op) tuple before
-    // falling back to the first free slot. Without this, sending the same
-    // SETPOINT twice (e.g. user re-deploys the rule after editing the
-    // threshold) silently consumes a second slot and eventually returns
-    // ERR,SETPOINT,FULL — matching the replace semantics that COUNTER /
-    // LOGIC / LATCH / SCALE / TIMER already implement on their key vpin.
+    // Replace any existing setpoint on the same (sensorPin, op,
+    // actionType) tuple before falling back to the first free slot.
+    //
+    // The PLC compiler legitimately emits MULTIPLE setpoints on the
+    // same (sensorPin, op) pair when one block has both a PULSE
+    // action (Actuator Open/Close) and another has a MSG action
+    // (Broadcast) wired to the same vpin transition — e.g.:
+    //   SETPOINT,200,GE,1,PULSE,<openPin>,5000   (gate motor open)
+    //   SETPOINT,200,GE,1,MSG,Gate Open          (broadcast)
+    // These must live in SEPARATE slots; the (sensorPin, op)-only
+    // replace key used to overwrite the PULSE with the MSG (or
+    // vice-versa depending on install order), silently dropping
+    // half the actions. The user saw "Gate Open" broadcasts fine
+    // but the actuator pin never pulsed — verify-by-poll caught it
+    // as a 2/4 mismatch and rolled back the whole rule.
+    //
+    // Include actionType in the dedupe key (decode from actionPart
+    // prefix) so PULSE/MSG/RELAY coexist. The within-action-type
+    // replace semantics still apply — re-deploying the same rule
+    // updates fields in place rather than allocating a new slot.
+    uint8_t newActionType =
+        actionPart.startsWith("MSG,")   ? 1 :
+        actionPart.startsWith("PULSE,") ? 2 : 0;  // 0 = RELAY (default)
     int slot = -1;
     for (int i = 0; i < MAX_SETPOINTS; i++) {
         if (setpoints[i].active &&
             setpoints[i].sensorPin == sensorPin &&
-            setpoints[i].op        == op) {
+            setpoints[i].op        == op &&
+            setpoints[i].actionType == newActionType) {
             slot = i;
             break;
         }
@@ -2062,6 +2823,7 @@ String processSetpointCommand(const String& args) {
     setpoints[slot].holdMs = holdMs;
     setpoints[slot].leavePin = leavePin;
     setpoints[slot].leavePulseMs = leavePulseMs;
+    setpoints[slot].cooldownMs = cooldownMs;
 
     const char* ops[] = {"GT", "LT", "EQ", "GE", "LE", "NE"};
     String resp = "OK,SETPOINT," + String(sensorPin) + "," + String(ops[op]) + "," + String(threshold, 2);
@@ -2128,6 +2890,7 @@ String processSetpointCommand(const String& args) {
         resp += ",HOLD," + String(holdMs);
     if (leavePin > 0 && leavePulseMs > 0)
         resp += ",LEAVE,PULSE," + String(leavePin) + "," + String(leavePulseMs);
+    savePlcTables();
     return resp;
 }
 
@@ -2318,7 +3081,13 @@ void checkSetpoints() {
             continue;            // Skip normal eval this tick
         }
 
-        if (now - setpoints[i].lastFired < SETPOINT_COOLDOWN) continue;
+        // NB: cooldown gate moved INSIDE the rising-edge branch below.
+        // Previously this hard-gated the whole eval, which also blocked
+        // the falling-edge re-arm path — so a vpin pulsing 0→1→0 inside
+        // SETPOINT_COOLDOWN never fired the LT,1 falling-edge action
+        // (Gate Close / Actuator Close). The cooldown only really
+        // protects against ringing on the rising side; falling-edge
+        // and hold-latch clearance should evaluate every tick.
 
         int rawValue = readSensorPin(setpoints[i].sensorPin);
         float scaled;
@@ -2333,6 +3102,14 @@ void checkSetpoints() {
         }
 
         if (condition && !setpoints[i].triggered && !setpoints[i].holdLatched) {
+            // Rising edge — debounce + cooldown both apply here.
+            // Per-setpoint cooldown override beats the hard-coded
+            // default. Compiler passes rule.action_gap (in ms) via
+            // the ASCII ",COOLDOWN,<ms>" suffix and the binary tag
+            // payload below; 0 means "use default".
+            unsigned long cooldown = setpoints[i].cooldownMs > 0
+                ? setpoints[i].cooldownMs : SETPOINT_COOLDOWN;
+            if (now - setpoints[i].lastFired < cooldown) continue;
             // Debounce: condition must hold continuously for debounceMs
             if (setpoints[i].debounceMs > 0) {
                 if (setpoints[i].debounceStart == 0) {
@@ -2356,13 +3133,32 @@ void checkSetpoints() {
             // a transient drop below threshold during the hold window would
             // double-fire the revert.
             if (setpoints[i].triggered && setpoints[i].holdMs == 0) {
-                // Falling edge — hysteresis check on scaled value
-                float margin = fabsf(setpoints[i].threshold) * 0.1f;
-                if (margin < 0.1f) margin = 0.1f;
+                // Falling edge — hysteresis check on scaled value.
+                //
+                // For boolean-domain setpoints (installed via the binary
+                // PLC compiler — vpin GE,1 and LT,1, threshold = exactly
+                // 1.0), skip the margin entirely. A digital 0/1 source
+                // can never cross "threshold ± margin" — e.g. for LT,1
+                // with margin 0.1 the clear gate becomes value > 1.1
+                // which V=1 never satisfies, leaving the setpoint stuck
+                // triggered after its first fire ("Gate Close" / similar
+                // falling-edge MSG never re-fires).
+                //
+                // For analog rules (installed via ASCII path or any
+                // non-binary-tag install — booleanDomain stays false),
+                // keep the 10%-minimum-0.1 margin to suppress chatter.
+                // Previous attempt used `threshold == floor(threshold)`
+                // which silently treated whole-number analog thresholds
+                // (e.g. 20.0°C) as boolean and broke chatter
+                // suppression on real sensors.
+                float margin = setpoints[i].booleanDomain
+                    ? 0.0f
+                    : fabsf(setpoints[i].threshold) * 0.1f;
+                if (!setpoints[i].booleanDomain && margin < 0.1f) margin = 0.1f;
                 bool clearCondition = false;
                 switch (setpoints[i].op) {
-                    case 0: case 3: clearCondition = (scaled < (setpoints[i].threshold - margin)); break;
-                    case 1: case 4: clearCondition = (scaled > (setpoints[i].threshold + margin)); break;
+                    case 0: case 3: clearCondition = (scaled <  (setpoints[i].threshold - margin)); break;
+                    case 1: case 4: clearCondition = (scaled >= (setpoints[i].threshold + margin)); break;
                     case 2: clearCondition = (fabsf(scaled - setpoints[i].threshold) >= 0.001f); break;
                     case 5: clearCondition = (fabsf(scaled - setpoints[i].threshold) < 0.001f); break;
                     default: clearCondition = true;
@@ -2468,6 +3264,7 @@ String processCounterCommand(const String& args) {
 
     if (first == "CLEAR") {
         for (int i = 0; i < MAX_COUNTERS; i++) counters[i].active = false;
+        savePlcTables();
         return "OK,COUNTER,CLEAR";
     }
 
@@ -2496,6 +3293,7 @@ String processCounterCommand(const String& args) {
         for (int i = 0; i < MAX_COUNTERS; i++) {
             if (counters[i].active && counters[i].targetVpin == vpin) {
                 counters[i].active = false;
+                savePlcTables();
                 return "OK,COUNTER,DELETE," + String(vpin);
             }
         }
@@ -2556,6 +3354,7 @@ String processCounterCommand(const String& args) {
         counters[slot].presetPin   = (uint8_t)psPin;
         counters[slot].resetPin    = (uint8_t)rsPin;
         counters[slot].presetValue = (uint16_t)preset;
+        savePlcTables();
         return "OK,COUNTER,ADD," + String(vpin) + "," + modeStr +
                "," + String(upPin) + "," + String(dnPin) + "," +
                String(psPin) + "," + String(rsPin) + "," + String(preset);
@@ -2652,6 +3451,7 @@ String processLogicCommand(const String& args) {
 
     if (first == "CLEAR") {
         for (int i = 0; i < MAX_LOGIC_RULES; i++) logicRules[i].active = false;
+        savePlcTables();
         return "OK,LOGIC,CLEAR";
     }
     if (first == "LIST") {
@@ -2675,6 +3475,7 @@ String processLogicCommand(const String& args) {
         for (int i = 0; i < MAX_LOGIC_RULES; i++) {
             if (logicRules[i].active && logicRules[i].outputVpin == vpin) {
                 logicRules[i].active = false;
+                savePlcTables();
                 return "OK,LOGIC,DELETE," + String(vpin);
             }
         }
@@ -2750,6 +3551,7 @@ String processLogicCommand(const String& args) {
         logicRules[slot].input1Thresh = (uint16_t)vals[1];
         logicRules[slot].input2Pin    = (uint8_t)vals[2];
         logicRules[slot].input2Thresh = (uint16_t)vals[3];
+        savePlcTables();
         return "OK,LOGIC,ADD," + String(vpin) + "," + opStr +
                "," + String(vals[0]) + "," + String(vals[1]) +
                "," + String(vals[2]) + "," + String(vals[3]);
@@ -2809,6 +3611,7 @@ String processLatchCommand(const String& args) {
 
     if (first == "CLEAR") {
         for (int i = 0; i < MAX_LATCH_RULES; i++) latchRules[i].active = false;
+        savePlcTables();
         return "OK,LATCH,CLEAR";
     }
     if (first == "LIST") {
@@ -2830,6 +3633,7 @@ String processLatchCommand(const String& args) {
         for (int i = 0; i < MAX_LATCH_RULES; i++) {
             if (latchRules[i].active && latchRules[i].outputVpin == vpin) {
                 latchRules[i].active = false;
+                savePlcTables();
                 return "OK,LATCH,DELETE," + String(vpin);
             }
         }
@@ -2872,6 +3676,7 @@ String processLatchCommand(const String& args) {
         latchRules[slot].setThresh   = (uint16_t)vals[2];
         latchRules[slot].resetPin    = (uint8_t)vals[3];
         latchRules[slot].resetThresh = (uint16_t)vals[4];
+        savePlcTables();
         return "OK,LATCH,ADD," + String(vpin) + "," +
                String(vals[1]) + "," + String(vals[2]) + "," +
                String(vals[3]) + "," + String(vals[4]);
@@ -2926,6 +3731,7 @@ String processScaleCommand(const String& args) {
 
     if (first == "CLEAR") {
         for (int i = 0; i < MAX_SCALE_RULES; i++) scaleRules[i].active = false;
+        savePlcTables();
         return "OK,SCALE,CLEAR";
     }
     if (first == "LIST") {
@@ -2948,6 +3754,7 @@ String processScaleCommand(const String& args) {
         for (int i = 0; i < MAX_SCALE_RULES; i++) {
             if (scaleRules[i].active && scaleRules[i].outputVpin == vpin) {
                 scaleRules[i].active = false;
+                savePlcTables();
                 return "OK,SCALE,DELETE," + String(vpin);
             }
         }
@@ -2990,6 +3797,7 @@ String processScaleCommand(const String& args) {
         scaleRules[slot].inputPin   = (uint8_t)inPin;
         scaleRules[slot].factor     = factor;
         scaleRules[slot].offset     = (int16_t)offset;
+        savePlcTables();
         return "OK,SCALE,ADD," + String(vpin) + "," + String(inPin) +
                "," + String(factor, 3) + "," + String(offset);
     }
@@ -3117,6 +3925,7 @@ String processPlcCommand(const String& args) {
         processTimerCommand("CLEAR");
         clearAllStorageVpins();
         clearAllScratchVpins();
+        clearAllDevices();
         plcResetStats();
         return "OK,PLC,CLEAR";
     }
@@ -3149,6 +3958,7 @@ String processPlcCommand(const String& args) {
         processTimerCommand("CLEAR");
         clearAllStorageVpins();
         clearAllScratchVpins();
+        clearAllDevices();
         plcResetStats();
     }
 
@@ -3343,6 +4153,17 @@ int b64decode(const char* in, size_t inLen, uint8_t* out, size_t outCap) {
 //   0x63  SETPOINT PULSE lo <vpin:1> <pin:1> <ms:2>
 //   0x64  SETPOINT RELAY hi <vpin:1> <target:2 hex-as-u16> <pin:1> <act:1>
 //
+//   _CD variants — identical to the corresponding base tag but with
+//   an extra 2 B cooldown_ms suffix. Used when the rule's
+//   "Min action gap" differs from the firmware's hardcoded 10 s
+//   default. Lets the user's GUI setting take effect without
+//   forcing the deploy onto the unreliable ASCII multi-packet path.
+//   0x65  SETPOINT MSG hi   + cooldown   <vpin:1> <msglen:1> <msg:N> <cd:2>
+//   0x66  SETPOINT MSG lo   + cooldown   <vpin:1> <msglen:1> <msg:N> <cd:2>
+//   0x67  SETPOINT PULSE hi + cooldown   <vpin:1> <pin:1> <ms:2> <cd:2>
+//   0x68  SETPOINT PULSE lo + cooldown   <vpin:1> <pin:1> <ms:2> <cd:2>
+//   0x69  SETPOINT RELAY hi + cooldown   <vpin:1> <target:2> <pin:1> <act:1> <cd:2>
+//
 // Returns "OK,PLC,DEPLOY,<count>" on success, "ERR,PLC,..." on failure.
 
 // Forward decls — the binary parser dispatches to the same ADD handlers
@@ -3353,6 +4174,29 @@ String processLogicCommand(const String& args);
 String processLatchCommand(const String& args);
 String processScaleCommand(const String& args);
 String processTimerCommand(const String& args);
+void   saveBeaconRules();  // used by processBeaconBinary on REPLACE
+
+// Mark every SETPOINT slot matching (vpin, op) as boolean-domain.
+// The runtime in checkSetpoints uses this to skip the analog
+// hysteresis margin — see comment on SetpointRule.
+//
+// `(vpin, op)` is NOT a unique slot key any more — after the
+// actionType-aware dedupe (commit 4cfd921), one Open-on-GE-1-PULSE
+// and one Broadcast-on-GE-1-MSG can coexist in two slots sharing
+// the same (vpin, op). Marking only the FIRST match left the MSG
+// slot with booleanDomain=false → margin=0.1 → LT,1 never cleared
+// after V=1 → "Gate Close" stuck. Mark ALL matching slots: every
+// binary-tagged setpoint is boolean-domain by construction
+// (threshold = exactly 1.0).
+static void markSetpointBoolean(uint8_t vpin, uint8_t op) {
+    for (int i = 0; i < MAX_SETPOINTS; i++) {
+        if (setpoints[i].active &&
+            setpoints[i].sensorPin == vpin &&
+            setpoints[i].op == op) {
+            setpoints[i].booleanDomain = true;
+        }
+    }
+}
 
 static inline uint16_t binRd16LE(const uint8_t* p) {
     return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
@@ -3381,6 +4225,7 @@ String processPlcBinary(const uint8_t* data, size_t len) {
         processTimerCommand("CLEAR");
         clearAllStorageVpins();
         clearAllScratchVpins();
+        clearAllDevices();
         plcResetStats();
     }
 
@@ -3500,6 +4345,8 @@ String processPlcBinary(const uint8_t* data, size_t len) {
                 const char* sp = (tag == 0x60) ? "GE" : "LT";
                 resp = processSetpointCommand(
                     String(vpin) + "," + sp + ",1,MSG," + msg);
+                if (!resp.startsWith("ERR,"))
+                    markSetpointBoolean(vpin, (tag == 0x60) ? 3 : 1);
                 break;
             }
             case 0x62: case 0x63: {  // SETPOINT PULSE hi/lo
@@ -3512,6 +4359,8 @@ String processPlcBinary(const uint8_t* data, size_t len) {
                 resp = processSetpointCommand(
                     String(vpin) + "," + sp + ",1,PULSE," +
                     String(pin) + "," + String(ms));
+                if (!resp.startsWith("ERR,"))
+                    markSetpointBoolean(vpin, (tag == 0x62) ? 3 : 1);
                 break;
             }
             case 0x64: {  // SETPOINT RELAY hi
@@ -3527,6 +4376,64 @@ String processPlcBinary(const uint8_t* data, size_t len) {
                 resp = processSetpointCommand(
                     String(vpin) + ",GE,1," + tbuf + "," +
                     String(pin) + "," + String(act));
+                if (!resp.startsWith("ERR,"))
+                    markSetpointBoolean(vpin, 3);
+                break;
+            }
+            case 0x65: case 0x66: {  // SETPOINT MSG hi/lo + cooldown
+                if (off + 2 > len) return "ERR,PLC,BIN,MSGTRUNC";
+                uint8_t vpin   = data[off];
+                uint8_t msgLen = data[off + 1];
+                if (off + 2 + msgLen + 2 > len) return "ERR,PLC,BIN,MSGTRUNC";
+                if (msgLen > SETPOINT_MSG_LEN) return "ERR,PLC,BIN,MSGTOOLONG";
+                for (uint8_t i = 0; i < msgLen; i++)
+                    if (data[off + 2 + i] == ',') return "ERR,PLC,BIN,MSGCOMMA";
+                String msg;
+                msg.reserve(msgLen);
+                for (uint8_t i = 0; i < msgLen; i++)
+                    msg += (char)data[off + 2 + i];
+                uint16_t cooldown = binRd16LE(data + off + 2 + msgLen);
+                off += 2 + msgLen + 2;
+                const char* sp = (tag == 0x65) ? "GE" : "LT";
+                resp = processSetpointCommand(
+                    String(vpin) + "," + sp + ",1,MSG," + msg +
+                    ",COOLDOWN," + String(cooldown));
+                if (!resp.startsWith("ERR,"))
+                    markSetpointBoolean(vpin, (tag == 0x65) ? 3 : 1);
+                break;
+            }
+            case 0x67: case 0x68: {  // SETPOINT PULSE hi/lo + cooldown
+                if (off + 6 > len) return "ERR,PLC,BIN,PULSETRUNC";
+                uint8_t  vpin = data[off];
+                uint8_t  pin  = data[off + 1];
+                uint16_t ms   = binRd16LE(data + off + 2);
+                uint16_t cooldown = binRd16LE(data + off + 4);
+                off += 6;
+                const char* sp = (tag == 0x67) ? "GE" : "LT";
+                resp = processSetpointCommand(
+                    String(vpin) + "," + sp + ",1,PULSE," +
+                    String(pin) + "," + String(ms) +
+                    ",COOLDOWN," + String(cooldown));
+                if (!resp.startsWith("ERR,"))
+                    markSetpointBoolean(vpin, (tag == 0x67) ? 3 : 1);
+                break;
+            }
+            case 0x69: {  // SETPOINT RELAY hi + cooldown
+                if (off + 7 > len) return "ERR,PLC,BIN,RELAYTRUNC";
+                uint8_t  vpin   = data[off];
+                uint16_t target = binRd16LE(data + off + 1);
+                uint8_t  pin    = data[off + 3];
+                uint8_t  act    = data[off + 4];
+                uint16_t cooldown = binRd16LE(data + off + 5);
+                off += 7;
+                char tbuf[8];
+                snprintf(tbuf, sizeof(tbuf), "%04X", target);
+                resp = processSetpointCommand(
+                    String(vpin) + ",GE,1," + tbuf + "," +
+                    String(pin) + "," + String(act) +
+                    ",COOLDOWN," + String(cooldown));
+                if (!resp.startsWith("ERR,"))
+                    markSetpointBoolean(vpin, 3);
                 break;
             }
             default:
@@ -3539,6 +4446,433 @@ String processPlcBinary(const uint8_t* data, size_t len) {
         count++;
     }
     return "OK,PLC,DEPLOY," + String(count);
+}
+
+// ─── Binary BEACON,ADD deploy ────────────────────────────────────
+// Parallel to processPlcBinary but for BEACON,ADD records. Cut down
+// from the ASCII path because BEACON,ADD with a leave-message was
+// pushing 250 B plaintext (over the 249 B LoRa frame budget) once the
+// MAC + name + cooldown + enter/leave fields were all on the wire.
+// Binary fits the same record in ~45 B, leaving plenty of headroom
+// for future fields and multi-beacon deploys in a single packet.
+//
+// Wire verb: CMD,BB,<base64>    (BB = "Beacon Binary")
+//
+// Layout (all values little-endian unless noted):
+//   header  1B  magic = 0x02
+//           1B  flags  (bit 0: 1 = call BEACON,CLEAR first, 0 = append)
+//           1B  record count
+//   body    N × records, each:
+//           1B  tag (only 0x70 currently)
+//
+//   0x70  BEACON_ADD
+//           1B   id_type        0 = MAC (6 B), 1 = UUID (16 B)
+//           6/16 id              binary MAC or UUID
+//           1B   name_len
+//           N    name bytes
+//           1B   rssi           int8, e.g. -70 → 0xBA
+//           1B   action         0 = RELAY, 1 = MSG, 2 = PULSE
+//           2B   cooldown_ms    uint16 LE
+//           [action-specific tail]
+//             RELAY:
+//               1B  pin
+//               1B  state
+//               2B  target_node    uint16 LE (0 = local)
+//               2B  revert_ms      0 = no revert
+//             MSG:
+//               1B  enter_len
+//               N   enter_msg
+//               1B  leave_len      0 = no leave message
+//               N   leave_msg
+//             PULSE:
+//               1B  pin
+//               2B  duration_ms
+//               1B  leave_rssi     int8, 0 = no leave action
+//               1B  leave_pin      0 = no leave action
+//               2B  leave_pulse_ms 0 = no leave action
+//
+// For each record we re-build the ASCII BEACON,ADD form and dispatch
+// to processBeaconCommand so all validation (slot allocation, EEPROM
+// save, pin checks) lives in one place. The per-record reply
+// (OK,BEACON,ADD,<slot>,<name> or ERR,BEACON,...) is emitted via the
+// existing bleSend / notifyBeaconEvent path so the GUI's existing
+// pending-deploy tracking just works.
+//
+// Returns "OK,BCN,DEPLOY,<count>" on success or "ERR,BCN,BIN,..." on
+// a malformed packet. Per-record ERRs from processBeaconCommand abort
+// the whole deploy with the record index attached.
+static String _binHexBytes(const uint8_t* p, size_t n, char sep) {
+    String s;
+    char buf[4];
+    for (size_t i = 0; i < n; i++) {
+        snprintf(buf, sizeof(buf), "%02X", p[i]);
+        s += buf;
+        if (sep && i + 1 < n) s += sep;
+    }
+    return s;
+}
+
+String processBeaconBinary(const uint8_t* data, size_t len, const String& from) {
+    if (len < 3 || data[0] != 0x02) return "ERR,BCN,BIN,BADMAGIC";
+    uint8_t flags    = data[1];
+    uint8_t expected = data[2];
+    size_t  off      = 3;
+
+    if (flags & 0x01) {
+        // REPLACE — wipe existing beacon rules first so the deploy is
+        // atomic from the user's perspective.
+        for (int i = 0; i < MAX_BEACON_RULES; i++) beaconRules[i].active = false;
+        saveBeaconRules();
+    }
+
+    int count = 0;
+    while (off < len && count < expected) {
+        uint8_t tag = data[off++];
+        if (tag != 0x70) {
+            return "ERR,BCN,BIN,BADTAG," + String(tag, HEX);
+        }
+        // Header up to action_type for length-sanity check.
+        if (off + 1 > len) return "ERR,BCN,BIN,TRUNC,IDTYPE";
+        uint8_t idType = data[off++];
+        size_t  idLen  = (idType == 0) ? 6 : 16;
+        if (off + idLen > len) return "ERR,BCN,BIN,TRUNC,ID";
+        String idStr = (idType == 0)
+            ? _binHexBytes(data + off, 6, ':')   // MAC: AA:BB:CC:DD:EE:FF
+            : _binHexBytes(data + off, 16, 0);   // UUID hex; reformatted below
+        if (idType == 1) {
+            // 8-4-4-4-12 UUID format with dashes.
+            idStr = idStr.substring(0, 8)  + "-" + idStr.substring(8, 12) + "-" +
+                    idStr.substring(12, 16) + "-" + idStr.substring(16, 20) + "-" +
+                    idStr.substring(20);
+        }
+        off += idLen;
+
+        if (off + 1 > len) return "ERR,BCN,BIN,TRUNC,NAMELEN";
+        uint8_t nameLen = data[off++];
+        if (off + nameLen > len) return "ERR,BCN,BIN,TRUNC,NAME";
+        String name; name.reserve(nameLen);
+        for (uint8_t i = 0; i < nameLen; i++) {
+            char c = (char)data[off + i];
+            if (c == ',') return "ERR,BCN,BIN,NAMECOMMA";
+            name += c;
+        }
+        off += nameLen;
+
+        if (off + 4 > len) return "ERR,BCN,BIN,TRUNC,HDR";
+        int8_t   rssi       = (int8_t)data[off];
+        uint8_t  action     = data[off + 1];
+        uint16_t cooldownMs = binRd16LE(data + off + 2);
+        off += 4;
+
+        String args = "ADD," + idStr + "," + name + "," + String((int)rssi) + ",";
+        if (action == 0) {
+            // RELAY
+            if (off + 6 > len) return "ERR,BCN,BIN,TRUNC,RELAY";
+            uint8_t  pin       = data[off];
+            uint8_t  state     = data[off + 1];
+            uint16_t target    = binRd16LE(data + off + 2);
+            uint16_t revertMs  = binRd16LE(data + off + 4);
+            off += 6;
+            args += "RELAY,";
+            if (target) {
+                char tbuf[8];
+                snprintf(tbuf, sizeof(tbuf), "%04X", target);
+                args += String(tbuf) + ",";
+            }
+            args += String(pin) + "," + String(state) + "," + String(cooldownMs);
+            if (revertMs > 0) args += ",REVERT," + String(revertMs);
+        } else if (action == 1) {
+            // MSG — enter text, optional leave text. ASCII path uses
+            // ",LEAVE,<leave>" suffix; the firmware already understands it.
+            if (off + 1 > len) return "ERR,BCN,BIN,TRUNC,MSGENTERLEN";
+            uint8_t enterLen = data[off++];
+            if (off + enterLen > len) return "ERR,BCN,BIN,TRUNC,MSGENTER";
+            String enterMsg; enterMsg.reserve(enterLen);
+            for (uint8_t i = 0; i < enterLen; i++) enterMsg += (char)data[off + i];
+            off += enterLen;
+            if (off + 1 > len) return "ERR,BCN,BIN,TRUNC,MSGLEAVELEN";
+            uint8_t leaveLen = data[off++];
+            if (off + leaveLen > len) return "ERR,BCN,BIN,TRUNC,MSGLEAVE";
+            String leaveMsg; leaveMsg.reserve(leaveLen);
+            for (uint8_t i = 0; i < leaveLen; i++) leaveMsg += (char)data[off + i];
+            off += leaveLen;
+            args += "MSG," + enterMsg + "," + String(cooldownMs);
+            if (leaveLen > 0) args += ",LEAVE," + leaveMsg;
+        } else if (action == 2) {
+            // PULSE — optional asymmetric LEAVE.
+            if (off + 7 > len) return "ERR,BCN,BIN,TRUNC,PULSE";
+            uint8_t  pin           = data[off];
+            uint16_t durMs         = binRd16LE(data + off + 1);
+            int8_t   leaveRssi     = (int8_t)data[off + 3];
+            uint8_t  leavePin      = data[off + 4];
+            uint16_t leavePulseMs  = binRd16LE(data + off + 5);
+            off += 7;
+            args += "PULSE," + String(pin) + "," + String(durMs) + "," + String(cooldownMs);
+            if (leavePin > 0 && leavePulseMs > 0) {
+                args += ",LEAVE," + String((int)leaveRssi) + "," +
+                        String(leavePin) + "," + String(leavePulseMs);
+            }
+        } else {
+            return "ERR,BCN,BIN,BADACTION," + String(action);
+        }
+
+        String resp = processBeaconCommand(args);
+        // Per-record reply: emit to BLE always, and broadcast over mesh
+        // when the deploy came in remotely (the gateway tracks each
+        // OK,BEACON,ADD,<slot>,<name> against its own pending list).
+        // Add a small spacing between records so back-to-back records
+        // don't TX-storm — matches the inter-frame delay BEACON,LIST
+        // already uses (line ~4783) for the same reason. Without this,
+        // a 6-beacon BB deploy fires 7 LoRa frames in immediate
+        // succession and channel-busy collisions drop replies.
+        notifyBeaconEvent(resp, from != "LOCAL");
+        if (resp.startsWith("ERR,")) {
+            return "ERR,BCN,BIN,DEPLOY," + String(count) + "," + resp;
+        }
+        count++;
+        if (from != "LOCAL") delay(50);
+    }
+    return "OK,BCN,DEPLOY," + String(count);
+}
+
+// ─── DEVICE,* command handler ────────────────────────────────────
+// Parallel to processPlcCommand. The GUI emits DEVICE,ADD,... lines
+// for each peripheral block on a rule. PLC,CLEAR / PLC,DEPLOY,R also
+// call clearAllDevices() so re-deploys are atomic.
+//
+//   DEVICE,CLEAR                                 wipe all peripherals
+//   DEVICE,LIST                                  enumerate active devices
+//   DEVICE,ADD,DHT11,<pin>,<vT>,<vH>             temp×10 → vT, humid×10 → vH
+//   DEVICE,ADD,DHT22,<pin>,<vT>,<vH>             same with DHT22 scaling
+//   DEVICE,ADD,HCSR04,<trig>,<echo>,<vCm>        distance cm → vCm
+//   DEVICE,ADD,DS18B20,<pin>,<vT>                temp×10 °C → vT
+//   DEVICE,ADD,I2C,<addr>,<reg>,<bytes>,<vOut>   raw read, 1 or 2 bytes
+//   DEVICE,ADD,OLED,<base64_format>,<vp1>,...    OLED display block
+//                                                  format string base64'd
+//                                                  to escape commas
+String processDeviceCommand(const String& args) {
+    String act = args;
+    int comma = act.indexOf(',');
+    String first = (comma >= 0) ? act.substring(0, comma) : act;
+    String rest  = (comma >= 0) ? act.substring(comma + 1) : "";
+    first.toUpperCase();
+
+    if (first == "CLEAR") {
+        clearAllDevices();
+        return "OK,DEVICE,CLEAR";
+    }
+
+    if (first == "LIST") {
+        String resp = "DEVICES";
+        int count = 0;
+        const char* names[] = {"NONE","DHT11","DHT22","HCSR04","DS18B20","I2C","OLED",
+                               "BME280","SHT31","INA226","MCP9808",
+                               "VL53L0X","VL53L1X"};
+        for (int i = 0; i < MAX_DEVICES; i++) {
+            if (!devices[i].active) continue;
+            count++;
+            uint8_t t = devices[i].type;
+            const char* tn = (t < sizeof(names)/sizeof(names[0])) ? names[t] : "?";
+            resp += String(",") + tn + ":";
+            if (t == DEV_HCSR04) {
+                resp += "trig" + String(devices[i].pin1) + "/echo" + String(devices[i].pin2);
+            } else if (t == DEV_I2C_READ || t == DEV_OLED) {
+                resp += "0x" + String(devices[i].i2cAddr, HEX);
+            } else {
+                resp += "p" + String(devices[i].pin1);
+            }
+            resp += "->v" + String(devices[i].outVpin[0]);
+            if (devices[i].outVpin[1]) resp += "+v" + String(devices[i].outVpin[1]);
+        }
+        if (count == 0) resp += ",NONE";
+        return resp;
+    }
+
+    if (first != "ADD") return "ERR,DEVICE,UNKNOWN";
+
+    // ADD,<type>,<args>
+    int c1 = rest.indexOf(',');
+    if (c1 < 0) return "ERR,DEVICE,FORMAT";
+    String typeStr = rest.substring(0, c1); typeStr.toUpperCase();
+    String tail    = rest.substring(c1 + 1);
+
+    uint8_t type = DEV_NONE;
+    if      (typeStr == "DHT11")   type = DEV_DHT11;
+    else if (typeStr == "DHT22")   type = DEV_DHT22;
+    else if (typeStr == "HCSR04")  type = DEV_HCSR04;
+    else if (typeStr == "DS18B20") type = DEV_DS18B20;
+    else if (typeStr == "I2C")     type = DEV_I2C_READ;
+    else if (typeStr == "OLED")    type = DEV_OLED;
+    else if (typeStr == "BME280")  type = DEV_BME280;
+    else if (typeStr == "SHT31")   type = DEV_SHT31;
+    else if (typeStr == "INA226")  type = DEV_INA226;
+    else if (typeStr == "MCP9808") type = DEV_MCP9808;
+    else if (typeStr == "VL53L0X") type = DEV_VL53L0X;
+    else if (typeStr == "VL53L1X") type = DEV_VL53L1X;
+    else return "ERR,DEVICE,BADTYPE";
+
+    // Per-type parsing — each branch reads its args off tail and
+    // populates a temporary Device record, then claims a slot.
+    Device tmp = {};
+    tmp.type = type;
+    tmp.active = true;
+    tmp.lastServiceMs = 0;
+    tmp.oledFmt[0] = '\0';
+
+    auto nextTok = [&](String& src) -> String {
+        int p = src.indexOf(',');
+        String t = (p >= 0) ? src.substring(0, p) : src;
+        src = (p >= 0) ? src.substring(p + 1) : String("");
+        return t;
+    };
+
+    if (type == DEV_DHT11 || type == DEV_DHT22) {
+        // <pin>,<vT>,<vH>
+        String spin = nextTok(tail);
+        String svT  = nextTok(tail);
+        String svH  = nextTok(tail);
+        if (svT.length() == 0) return "ERR,DEVICE,FORMAT";
+        tmp.pin1 = (uint8_t)spin.toInt();
+        tmp.outVpin[0] = (uint8_t)svT.toInt();
+        tmp.outVpin[1] = (uint8_t)svH.toInt();
+        tmp.intervalMs = 2000;  // DHT11/22 need ≥1s between reads
+        if (!isPinConfigurable(tmp.pin1)) return "ERR,DEVICE,BADPIN";
+    } else if (type == DEV_HCSR04) {
+        // <trig>,<echo>,<vCm>
+        String strig = nextTok(tail);
+        String secho = nextTok(tail);
+        String svCm  = nextTok(tail);
+        if (svCm.length() == 0) return "ERR,DEVICE,FORMAT";
+        tmp.pin1 = (uint8_t)strig.toInt();
+        tmp.pin2 = (uint8_t)secho.toInt();
+        tmp.outVpin[0] = (uint8_t)svCm.toInt();
+        tmp.intervalMs = 200;   // 5Hz ultrasonic ping rate
+        if (!isPinConfigurable(tmp.pin1) || !isPinConfigurable(tmp.pin2))
+            return "ERR,DEVICE,BADPIN";
+    } else if (type == DEV_DS18B20) {
+        // <pin>,<vT>
+        String spin = nextTok(tail);
+        String svT  = nextTok(tail);
+        if (svT.length() == 0) return "ERR,DEVICE,FORMAT";
+        tmp.pin1 = (uint8_t)spin.toInt();
+        tmp.outVpin[0] = (uint8_t)svT.toInt();
+        tmp.intervalMs = 2000;
+        if (!isPinConfigurable(tmp.pin1)) return "ERR,DEVICE,BADPIN";
+    } else if (type == DEV_I2C_READ) {
+        // <addr>,<reg>,<bytes>,<vOut>
+        String saddr = nextTok(tail);
+        String sreg  = nextTok(tail);
+        String slen  = nextTok(tail);
+        String svout = nextTok(tail);
+        if (svout.length() == 0) return "ERR,DEVICE,FORMAT";
+        long a = saddr.startsWith("0x") ? strtol(saddr.c_str()+2, nullptr, 16)
+                                        : saddr.toInt();
+        long r = sreg.startsWith("0x")  ? strtol(sreg.c_str()+2,  nullptr, 16)
+                                        : sreg.toInt();
+        tmp.i2cAddr  = (uint8_t)a;
+        tmp.i2cReg   = (uint8_t)r;
+        tmp.readBytes = (uint8_t)slen.toInt();
+        if (tmp.readBytes != 1 && tmp.readBytes != 2) return "ERR,DEVICE,BADBYTES";
+        tmp.outVpin[0] = (uint8_t)svout.toInt();
+        tmp.intervalMs = 250;   // 4Hz I2C sample rate (plenty for env sensors)
+    } else if (type == DEV_OLED) {
+        // <base64_format>,<vp1>[,<vp2>...]
+        // Format is base64'd because it may contain commas/spaces/etc.
+        String b64 = nextTok(tail);
+        uint8_t decoded[DEVICE_OLED_FMT_LEN + 2];
+        int n = b64decode(b64.c_str(), b64.length(), decoded, sizeof(decoded));
+        if (n < 0) return "ERR,DEVICE,B64";
+        if (n > DEVICE_OLED_FMT_LEN) n = DEVICE_OLED_FMT_LEN;
+        for (int i = 0; i < n; i++) tmp.oledFmt[i] = (char)decoded[i];
+        tmp.oledFmt[n] = '\0';
+        // Up to 4 referenced vpins. Optional — the format string already
+        // knows {Vnnn} so this list is for status/debug only.
+        for (int i = 0; i < 4 && tail.length() > 0; i++) {
+            tmp.outVpin[i] = (uint8_t)nextTok(tail).toInt();
+        }
+        tmp.intervalMs = 500;   // 2Hz refresh — plenty for human reading
+    } else if (type == DEV_BME280) {
+        // <addr>,<vT>,<vP>,<vH>   addr accepts 0x76 / 0x77 / decimal
+        String saddr = nextTok(tail);
+        String svT   = nextTok(tail);
+        String svP   = nextTok(tail);
+        String svH   = nextTok(tail);
+        if (svH.length() == 0) return "ERR,DEVICE,FORMAT";
+        long a = saddr.startsWith("0x") ? strtol(saddr.c_str()+2, nullptr, 16)
+                                        : saddr.toInt();
+        tmp.i2cAddr = (uint8_t)a;
+        tmp.outVpin[0] = (uint8_t)svT.toInt();
+        tmp.outVpin[1] = (uint8_t)svP.toInt();
+        tmp.outVpin[2] = (uint8_t)svH.toInt();
+        tmp.intervalMs = 2000;  // BME280 forced-mode cycle suits ~0.5Hz
+    } else if (type == DEV_SHT31) {
+        // <addr>,<vT>,<vH>   addr accepts 0x44 / 0x45 / decimal
+        String saddr = nextTok(tail);
+        String svT   = nextTok(tail);
+        String svH   = nextTok(tail);
+        if (svH.length() == 0) return "ERR,DEVICE,FORMAT";
+        long a = saddr.startsWith("0x") ? strtol(saddr.c_str()+2, nullptr, 16)
+                                        : saddr.toInt();
+        tmp.i2cAddr = (uint8_t)a;
+        tmp.outVpin[0] = (uint8_t)svT.toInt();
+        tmp.outVpin[1] = (uint8_t)svH.toInt();
+        tmp.intervalMs = 1000;
+    } else if (type == DEV_INA226) {
+        // <addr>,<shunt_mOhm>,<vBusMv>,<iMa>
+        String saddr  = nextTok(tail);
+        String sshunt = nextTok(tail);
+        String svBus  = nextTok(tail);
+        String svI    = nextTok(tail);
+        if (svI.length() == 0) return "ERR,DEVICE,FORMAT";
+        long a = saddr.startsWith("0x") ? strtol(saddr.c_str()+2, nullptr, 16)
+                                        : saddr.toInt();
+        tmp.i2cAddr = (uint8_t)a;
+        tmp.cfgA    = (int16_t)sshunt.toInt();
+        if (tmp.cfgA <= 0) tmp.cfgA = 100;  // sensible default: 0.1Ω
+        tmp.outVpin[0] = (uint8_t)svBus.toInt();
+        tmp.outVpin[1] = (uint8_t)svI.toInt();
+        tmp.intervalMs = 500;   // 2Hz current monitoring
+    } else if (type == DEV_MCP9808) {
+        // <addr>,<vT>   addr accepts 0x18..0x1F
+        String saddr = nextTok(tail);
+        String svT   = nextTok(tail);
+        if (svT.length() == 0) return "ERR,DEVICE,FORMAT";
+        long a = saddr.startsWith("0x") ? strtol(saddr.c_str()+2, nullptr, 16)
+                                        : saddr.toInt();
+        tmp.i2cAddr = (uint8_t)a;
+        tmp.outVpin[0] = (uint8_t)svT.toInt();
+        tmp.intervalMs = 1000;
+    } else if (type == DEV_VL53L0X || type == DEV_VL53L1X) {
+        // <vDistMm>   no address config (default 0x29; multi-sensor
+        // support needs XSHUT pin handling which v1 doesn't do).
+        String svDist = nextTok(tail);
+        if (svDist.length() == 0) return "ERR,DEVICE,FORMAT";
+        tmp.i2cAddr = 0x29;  // canonical ToF address
+        tmp.outVpin[0] = (uint8_t)svDist.toInt();
+        // VL53L0X: single-shot in service, allow 200ms between reads.
+        // VL53L1X: continuous mode, library buffers — service polls
+        // dataReady() so polling at 100ms is fine, no extra work.
+        tmp.intervalMs = (type == DEV_VL53L0X) ? 200 : 100;
+    }
+
+    // Claim slot — replace-by-key on (type, pin1/addr) so re-deploys
+    // overwrite instead of running out of slots.
+    int slot = allocDeviceSlot(type, tmp.pin1, tmp.i2cAddr);
+    if (slot < 0) return "ERR,DEVICE,FULL";
+    devices[slot] = tmp;
+    return String("OK,DEVICE,ADD,") + typeStr;
+}
+
+void handleDeviceBle(const String& args) { bleSend(processDeviceCommand(args)); }
+void handleDeviceCmd(const String& args, const String& from) {
+    String resp = processDeviceCommand(args);
+    mesh.cmdsExecuted++;
+    String mid = mesh.generateMsgID();
+    String hex = mesh.encryptMsg(resp);
+    String payload = String(mesh.localID) + "," + from + "," + mid + "," +
+                     String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+    mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+    bleSend(resp);
 }
 
 // Build the binary SDATA payload for sensorPins[start..end).
@@ -3619,7 +4953,17 @@ void handleCmd(const String& from, const String& cmdBody) {
         if (!isPinConfigurable(pin)) return;
         setupDigitalOutput(pin);
         setDigital(pin, val);
-        refreshDeadman(pin, val);  // Start/refresh dead-man's switch
+        // Deadman is a safety latch for HARDWARE OUTPUT relays — if
+        // comms drop, revert the pin to its safe state so a stuck
+        // gate / heater / etc. doesn't hold a dangerous output.
+        // Storage vpins (200-231) are PLC logical state, not hardware
+        // outputs — reverting them silently confuses the setpoint
+        // runtime AND triggers spurious transitions ("Gate Close"
+        // appearing 30s after a "Gate Open" toggle even though the
+        // user didn't click anything). Skip deadman for storage vpins.
+        if (!isStorageVpin(pin)) {
+            refreshDeadman(pin, val);  // Start/refresh dead-man's switch
+        }
         mesh.cmdsExecuted++;
         // Send response back over mesh
         String mid = mesh.generateMsgID();
@@ -3757,6 +5101,9 @@ void handleCmd(const String& from, const String& cmdBody) {
     else if (action == "PLC") {
         handlePlcCmd(rest, from);
     }
+    else if (action == "DEVICE") {
+        handleDeviceCmd(rest, from);
+    }
     else if (action == "B") {
         // Binary PLC deploy: rest is the base64-encoded binary blob. We
         // decode here (decoupled from the mesh-layer encryption that
@@ -3778,11 +5125,49 @@ void handleCmd(const String& from, const String& cmdBody) {
             resp = processPlcBinary(binBuf, (size_t)decoded);
         }
         mesh.cmdsExecuted++;
-        String mid = mesh.generateMsgID();
-        String hex = mesh.encryptMsg(resp);
-        String payload = String(mesh.localID) + "," + from + "," + mid + "," +
-                         String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
-        mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+        // Skip the mesh transmit for LOCAL — `strtol("LOCAL")` returns 0,
+        // which is a valid mesh address; previously this was sending
+        // every reply to node 0x0000. BLE alone is the right channel
+        // for local-originated commands.
+        if (from != "LOCAL") {
+            String mid = mesh.generateMsgID();
+            String hex = mesh.encryptMsg(resp);
+            String payload = String(mesh.localID) + "," + from + "," + mid + "," +
+                             String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+            mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+        }
+        bleSend(resp);
+    }
+    else if (action == "BB") {
+        // Binary BEACON deploy. Same wire pattern as "B" but the binary
+        // blob is dispatched to processBeaconBinary instead of
+        // processPlcBinary — see that function for the layout. We needed
+        // a separate verb (not just another tag inside "B,") because the
+        // per-record reply from BEACON,ADD is "OK,BEACON,ADD,<slot>,
+        // <name>" which is what the GUI's pending-deploy tracker is
+        // listening for. processBeaconBinary emits those per record via
+        // notifyBeaconEvent, then we send the summary "OK,BCN,DEPLOY,N"
+        // back over mesh/BLE just like the ASCII path's overall reply.
+        size_t b64len = rest.length();
+        const size_t MAX_BIN = 256;
+        uint8_t binBuf[MAX_BIN];
+        int decoded = b64decode(rest.c_str(), b64len, binBuf, MAX_BIN);
+        String resp;
+        if (decoded < 0) {
+            resp = "ERR,BCN,BIN,B64";
+        } else {
+            resp = processBeaconBinary(binBuf, (size_t)decoded, from);
+        }
+        mesh.cmdsExecuted++;
+        // See B handler above — skip mesh transmit when from=="LOCAL"
+        // (strtol returns 0, would broadcast the reply to dest 0x0000).
+        if (from != "LOCAL") {
+            String mid = mesh.generateMsgID();
+            String hex = mesh.encryptMsg(resp);
+            String payload = String(mesh.localID) + "," + from + "," + mid + "," +
+                             String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+            mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+        }
         bleSend(resp);
     }
     else if (action == "BEACON") {
@@ -4753,15 +6138,45 @@ void handleSerialConfig() {
     }
     else if (line == "BATT_CFG") {
 #if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
-        Serial.printf("BATT_CFG,div=%.3f,low=%d,recover=%d,source=%s\n",
+        Serial.printf("BATT_CFG,div=%.3f,low=%d,recover=%d,hibernate=%s,source=%s\n",
                       battDivider, (int)battLowMv, (int)battRecoverMv,
+                      battHibernateEnabled ? "ON" : "OFF",
                       battCfgIsCustom ? "EEPROM" : "default");
-        Serial.printf("Defaults (Pins.h): div=%.3f, low=%d, recover=%d\n",
-                      (float)BAT_DIVIDER, (int)BAT_LOW_MV, (int)BAT_RECOVER_MV);
+        Serial.printf("Defaults (Pins.h): div=%.3f, low=%d, recover=%d, hibernate=%s\n",
+                      (float)BAT_DIVIDER, (int)BAT_LOW_MV, (int)BAT_RECOVER_MV,
+                      (BATT_HIBERNATE_DEFAULT != 0) ? "ON" : "OFF");
         Serial.println("Set: BATT_CFG <divider> <low_mv> <recover_mv>");
+        Serial.println("Hibernate: BATT_HIBERNATE ON|OFF");
         Serial.println("Reset to defaults: BATT_CFG_RESET");
 #else
         Serial.println("BATT_CFG,N/A,no battery monitoring on this board");
+#endif
+    }
+    else if (line == "BATT_HIBERNATE") {
+        // Query current hibernate state. With no argument, just print
+        // the current value so the operator can confirm before changing it.
+        Serial.printf("BATT_HIBERNATE,%s,default=%s\n",
+                      battHibernateEnabled ? "ON" : "OFF",
+                      (BATT_HIBERNATE_DEFAULT != 0) ? "ON" : "OFF");
+    }
+    else if (line == "BATT_HIBERNATE ON" || line == "BATT_HIBERNATE OFF") {
+        // Toggle the low-voltage auto-shutdown. When OFF, the firmware
+        // ignores the LOW_MV threshold and stays running until the LDO
+        // browns out the chip naturally. Useful for bench testing, for
+        // solar nodes where you'd rather see a noisy reading than have
+        // the node disappear for an hour, and during commissioning when
+        // you need to keep the node alive while the panel is being wired.
+#if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
+        bool on = (line == "BATT_HIBERNATE ON");
+        saveBattHibernateFlag(on);
+        Serial.printf("OK: BATT_HIBERNATE %s (saved to EEPROM)\n",
+                      on ? "ON" : "OFF");
+        if (!on) {
+            Serial.println("WARN: low-voltage auto-shutdown disabled — "
+                           "battery will run until the LDO browns out.");
+        }
+#else
+        Serial.println("ERR: no battery monitoring on this board");
 #endif
     }
     else if (line.startsWith("BATT_CFG ")) {
@@ -4850,8 +6265,9 @@ void handleSerialConfig() {
         Serial.printf("  read: %d mV at pin → VBAT~%d mV\n",
                       rawMv, (int)(rawMv * battDivider));
   #endif
-        Serial.printf("  divider=%.3f  cut=%d  recover=%d\n",
-                      battDivider, (int)battLowMv, (int)battRecoverMv);
+        Serial.printf("  divider=%.3f  cut=%d  recover=%d  hibernate=%s\n",
+                      battDivider, (int)battLowMv, (int)battRecoverMv,
+                      battHibernateEnabled ? "ON" : "OFF");
 #else
         Serial.println("BATT_DEBUG: no battery monitoring on this board");
 #endif
@@ -5155,6 +6571,181 @@ void loadBeaconRules() {
     }
 }
 
+// ─── PLC primitive persistence ──────────────────────────────────
+// Without this, every reboot or reflash silently wipes every
+// deployed PLC rule on the node — the gateway-side GUI still shows
+// "deployed: confirmed" while the firmware tables are empty. User
+// has to remember to Undeploy + Deploy after every power cycle.
+// Beacon rules already persist (saveBeaconRules / loadBeaconRules)
+// so this just brings the PLC tables to parity.
+//
+// EEPROM layout (after the existing regions ending around 1700):
+//   2048      1 B magic byte (0xAB = "this is a valid PLC blob")
+//   2049+        SetpointRule[MAX_SETPOINTS]
+//   ...           LogicRule[MAX_LOGIC_RULES]
+//   ...           CounterRule[MAX_COUNTERS]
+//   ...           LatchRule[MAX_LATCH_RULES]
+//   ...           ScaleRule[MAX_SCALE_RULES]
+//   ...           RelayTimer[MAX_TIMERS]
+//
+// Each table is dumped/restored as a flat struct array via
+// EEPROM.put / EEPROM.get — keeps the save code small at the
+// cost of tying the on-disk layout to the C++ struct layout
+// (already true for BeaconRule). On struct changes, bump the
+// magic byte to force a fresh-init.
+#define EEPROM_PLC_BASE         2048
+#define EEPROM_PLC_MAGIC_ADDR   EEPROM_PLC_BASE
+#define EEPROM_PLC_MAGIC_VAL    0xAB
+// Layout version. Bump whenever ANY of the persisted struct layouts
+// change (added a field, reordered, changed a type) so old EEPROM
+// blobs are treated as fresh-init rather than read with the wrong
+// offsets / type sizes. Versions:
+//   1 — initial layout (SETPOINT/LOGIC/COUNTER/LATCH/SCALE/TIMER)
+//   2 — SetpointRule gained `cooldownMs` (per-rule action_gap override)
+#define EEPROM_PLC_LAYOUT_VER   2
+// Header layout starting at EEPROM_PLC_BASE:
+//   0       magic    (1 B)
+//   1       version  (1 B)
+//   2..7    table sizes: [setpoints, logicRules, counters,
+//                         latchRules, scaleRules, timers] × 1 B each
+//                         — only the LOW byte of each sizeof() so a
+//                         silent struct-size change between firmware
+//                         builds is detected as a mismatch and the
+//                         blob discarded rather than miss-decoded.
+#define EEPROM_PLC_HEADER_LEN   8
+static int eeprom_plc_setpoint_addr = 0;
+static int eeprom_plc_logic_addr    = 0;
+static int eeprom_plc_counter_addr  = 0;
+static int eeprom_plc_latch_addr    = 0;
+static int eeprom_plc_scale_addr    = 0;
+static int eeprom_plc_timer_addr    = 0;
+static int eeprom_plc_end_addr      = 0;
+
+static void plcOffsetsInit() {
+    if (eeprom_plc_setpoint_addr) return;  // already computed
+    eeprom_plc_setpoint_addr = EEPROM_PLC_BASE + EEPROM_PLC_HEADER_LEN;
+    eeprom_plc_logic_addr    = eeprom_plc_setpoint_addr + sizeof(setpoints);
+    eeprom_plc_counter_addr  = eeprom_plc_logic_addr    + sizeof(logicRules);
+    eeprom_plc_latch_addr    = eeprom_plc_counter_addr  + sizeof(counters);
+    eeprom_plc_scale_addr    = eeprom_plc_latch_addr    + sizeof(latchRules);
+    eeprom_plc_timer_addr    = eeprom_plc_scale_addr    + sizeof(scaleRules);
+    eeprom_plc_end_addr      = eeprom_plc_timer_addr    + sizeof(timers);
+}
+
+void savePlcTables() {
+    plcOffsetsInit();
+    if (eeprom_plc_end_addr > EEPROM_SIZE) {
+        // Tables grew beyond the EEPROM region. Caller has no good
+        // recovery — emit a diag and skip save so we don't trash
+        // adjacent memory.
+        debugPrint("PLC: persist SKIPPED — tables exceed EEPROM_SIZE");
+        return;
+    }
+    // Header: magic + layout version + per-table sizeof low byte.
+    // The size bytes detect a silent struct-size change between two
+    // builds at the same EEPROM_PLC_LAYOUT_VER (e.g. compiler padding
+    // changed) and treat as fresh-init rather than miss-decode.
+    EEPROM.write(EEPROM_PLC_BASE + 0, EEPROM_PLC_MAGIC_VAL);
+    EEPROM.write(EEPROM_PLC_BASE + 1, EEPROM_PLC_LAYOUT_VER);
+    EEPROM.write(EEPROM_PLC_BASE + 2, (uint8_t)(sizeof(setpoints)   & 0xFF));
+    EEPROM.write(EEPROM_PLC_BASE + 3, (uint8_t)(sizeof(logicRules)  & 0xFF));
+    EEPROM.write(EEPROM_PLC_BASE + 4, (uint8_t)(sizeof(counters)    & 0xFF));
+    EEPROM.write(EEPROM_PLC_BASE + 5, (uint8_t)(sizeof(latchRules)  & 0xFF));
+    EEPROM.write(EEPROM_PLC_BASE + 6, (uint8_t)(sizeof(scaleRules)  & 0xFF));
+    EEPROM.write(EEPROM_PLC_BASE + 7, (uint8_t)(sizeof(timers)      & 0xFF));
+    EEPROM.put(eeprom_plc_setpoint_addr, setpoints);
+    EEPROM.put(eeprom_plc_logic_addr,    logicRules);
+    EEPROM.put(eeprom_plc_counter_addr,  counters);
+    EEPROM.put(eeprom_plc_latch_addr,    latchRules);
+    EEPROM.put(eeprom_plc_scale_addr,    scaleRules);
+    EEPROM.put(eeprom_plc_timer_addr,    timers);
+    EEPROM.commit();
+}
+
+void loadPlcTables() {
+    plcOffsetsInit();
+    if (eeprom_plc_end_addr > EEPROM_SIZE) {
+        debugPrint("PLC: persist DISABLED — tables exceed EEPROM_SIZE");
+        return;
+    }
+    uint8_t magic   = EEPROM.read(EEPROM_PLC_BASE + 0);
+    uint8_t version = EEPROM.read(EEPROM_PLC_BASE + 1);
+    if (magic != EEPROM_PLC_MAGIC_VAL) {
+        // Fresh EEPROM, or a previous firmware version that didn't
+        // persist PLC tables. Either way: leave the in-RAM defaults
+        // (all `active = false`) and write a clean magic on next save.
+        return;
+    }
+    if (version != EEPROM_PLC_LAYOUT_VER) {
+        // Layout changed since the blob was written (struct fields
+        // added / reordered / typed differently). Reading with the
+        // current struct layout would scramble the rules — safer to
+        // discard and let the user redeploy. Next save writes the
+        // new version byte.
+        debugPrint("PLC: EEPROM blob version mismatch — discarding");
+        return;
+    }
+    // Per-table size sanity check. Catches the case where a struct
+    // layout was changed (e.g. compiler padding shifted by an
+    // alignment change) but the layout version wasn't bumped. Cheap
+    // safety net against silent corruption.
+    uint8_t s_sp = EEPROM.read(EEPROM_PLC_BASE + 2);
+    uint8_t s_lg = EEPROM.read(EEPROM_PLC_BASE + 3);
+    uint8_t s_co = EEPROM.read(EEPROM_PLC_BASE + 4);
+    uint8_t s_la = EEPROM.read(EEPROM_PLC_BASE + 5);
+    uint8_t s_sc = EEPROM.read(EEPROM_PLC_BASE + 6);
+    uint8_t s_tm = EEPROM.read(EEPROM_PLC_BASE + 7);
+    if (s_sp != (uint8_t)(sizeof(setpoints)   & 0xFF) ||
+        s_lg != (uint8_t)(sizeof(logicRules)  & 0xFF) ||
+        s_co != (uint8_t)(sizeof(counters)    & 0xFF) ||
+        s_la != (uint8_t)(sizeof(latchRules)  & 0xFF) ||
+        s_sc != (uint8_t)(sizeof(scaleRules)  & 0xFF) ||
+        s_tm != (uint8_t)(sizeof(timers)      & 0xFF)) {
+        debugPrint("PLC: EEPROM struct-size mismatch — discarding");
+        return;
+    }
+    EEPROM.get(eeprom_plc_setpoint_addr, setpoints);
+    EEPROM.get(eeprom_plc_logic_addr,    logicRules);
+    EEPROM.get(eeprom_plc_counter_addr,  counters);
+    EEPROM.get(eeprom_plc_latch_addr,    latchRules);
+    EEPROM.get(eeprom_plc_scale_addr,    scaleRules);
+    EEPROM.get(eeprom_plc_timer_addr,    timers);
+    // Sanitise runtime-only state. Persisted structs contain BOTH the
+    // user's rule config (op, threshold, msgTrue, …) AND volatile
+    // runtime fields (triggered, lastFired, edge-detect lastUp, …)
+    // because we dump the whole struct. After load, reset the runtime
+    // fields so a mid-action reboot doesn't replay stale state.
+    for (int i = 0; i < MAX_SETPOINTS; i++) {
+        if (!setpoints[i].active) continue;
+        setpoints[i].triggered    = false;
+        setpoints[i].holdLatched  = false;
+        setpoints[i].lastFired    = 0;
+        setpoints[i].debounceStart = 0;
+    }
+    for (int i = 0; i < MAX_COUNTERS; i++) {
+        if (!counters[i].active) continue;
+        counters[i].lastUp     = 0;
+        counters[i].lastDown   = 0;
+        counters[i].lastPreset = 0;
+        counters[i].lastReset  = 0;
+    }
+    for (int i = 0; i < MAX_LATCH_RULES; i++) {
+        if (!latchRules[i].active) continue;
+        latchRules[i].lastSet   = 0;
+        latchRules[i].lastReset = 0;
+    }
+    // Logic / Scale primitives have no runtime-state fields in their
+    // struct — they re-evaluate from current inputs every tick.
+    // RelayTimer.phase / nextAt are runtime; reset so timers re-arm
+    // cleanly from phase 0 after reboot.
+    for (int i = 0; i < MAX_TIMERS; i++) {
+        if (!timers[i].active) continue;
+        timers[i].phase = 0;
+        timers[i].nextAt = 0;
+    }
+    debugPrint("PLC: loaded tables from EEPROM");
+}
+
 // Helper — serialise a single beacon rule by index. Used by both BEACON,GET
 // and (for backward compat) the old all-in-one BEACON,LIST format. Format
 // matches what BEACON,LIST used to emit for one entry, just standalone.
@@ -5176,6 +6767,10 @@ static String formatBeaconRule(int i) {
         resp += ":LEAVE" + String(beaconRules[i].leavePin) +
                 "@" + String(beaconRules[i].leaveRssi) + "dBm" +
                 ":" + String(beaconRules[i].leavePulseMs) + "ms";
+    if (beaconRules[i].actionType == 1) {
+        const char* lm = beaconLeaveMessage(beaconRules[i]);
+        if (lm) resp += ":LEAVE:" + String(lm);
+    }
     return resp;
 }
 
@@ -5247,9 +6842,60 @@ String processBeaconCommand(const String& args) {
         return "ERR,BEACON,BADINDEX";
     }
 
+    if (args.startsWith("SETLEAVE,")) {
+        // Attach a leave-message to an existing MSG-action beacon rule
+        // AFTER a successful BEACON,ADD. The split exists because a
+        // BEACON,ADD that carries both enter+leave text can blow the
+        // 249 B LoRa frame budget; old firmware (no binary BB verb)
+        // therefore needs this two-packet path:
+        //
+        //   1. BEACON,ADD,<id>,<name>,<rssi>,MSG,<enter>,<cooldown>
+        //   2. BEACON,SETLEAVE,<name>,<leave_text>
+        //
+        // Format: SETLEAVE,<name>,<leave_text>
+        // Lookup is by name (not slot) because the gateway knows the
+        // name it just sent — the slot number isn't known until the
+        // OK,BEACON,ADD,<slot>,<name> reply lands, but a name-based
+        // SETLEAVE can be enqueued back-to-back with the ADD without
+        // waiting for the round-trip. Returns OK,BEACON,SETLEAVE,
+        // <slot>,<name> on success so the gateway's pending tracker
+        // can resolve it the same way it does OK,BEACON,ADD.
+        String rest = args.substring(9);
+        int c1 = rest.indexOf(',');
+        if (c1 < 0) return "ERR,BEACON,SETLEAVE,FORMAT";
+        String nameStr  = rest.substring(0, c1);
+        String leaveMsg = rest.substring(c1 + 1);
+        int slot = -1;
+        for (int i = 0; i < MAX_BEACON_RULES; i++) {
+            if (!beaconRules[i].active) continue;
+            if (String(beaconRules[i].name) == nameStr) { slot = i; break; }
+        }
+        if (slot < 0) return "ERR,BEACON,SETLEAVE,NOTFOUND";
+        if (beaconRules[slot].actionType != 1)
+            return "ERR,BEACON,SETLEAVE,NOTMSG";
+        BeaconRule& r = beaconRules[slot];
+        // Re-pack the leave text after the enter text's null terminator
+        // — same embedded layout the ASCII LEAVE clause and the binary
+        // BB verb both use. Truncate cleanly if the combined length
+        // would overflow the 32-byte buffer.
+        size_t enterLen = strnlen(r.message, sizeof(r.message));
+        if (enterLen + 1 >= sizeof(r.message) - 1) {
+            return "ERR,BEACON,SETLEAVE,NOROOM";
+        }
+        size_t avail = sizeof(r.message) - (enterLen + 1) - 1;
+        // Zero out the leave region first so a shorter new leave-msg
+        // doesn't leave stale bytes from a previous SETLEAVE behind.
+        memset(r.message + enterLen + 1, 0,
+               sizeof(r.message) - (enterLen + 1));
+        strncpy(r.message + enterLen + 1, leaveMsg.c_str(), avail);
+        r.message[sizeof(r.message) - 1] = '\0';
+        saveBeaconRules();
+        return "OK,BEACON,SETLEAVE," + String(slot) + "," + nameStr;
+    }
+
     if (args.startsWith("ADD,")) {
         // BEACON,ADD,<uuid_or_mac>,<name>,<rssi>,RELAY,<pin>,<state>[,<cooldown>][,REVERT,<ms>]
-        // BEACON,ADD,<uuid_or_mac>,<name>,<rssi>,MSG,<text>[,<cooldown>]
+        // BEACON,ADD,<uuid_or_mac>,<name>,<rssi>,MSG,<text>[,<cooldown_ms>][,LEAVE,<leave_text>]
         int slot = -1;
         for (int i = 0; i < MAX_BEACON_RULES; i++) {
             if (!beaconRules[i].active) { slot = i; break; }
@@ -5325,13 +6971,42 @@ String processBeaconCommand(const String& args) {
                 }
             }
         } else if (actionStr == "MSG") {
+            // Format: MSG,<text>[,<cooldown_ms>][,LEAVE,<leave_text>]
+            //
+            // Both messages share the existing 32-byte r.message[] buffer to
+            // avoid changing the EEPROM layout. Enter text goes at offset 0;
+            // a second null-terminated string immediately after holds the
+            // leave text (if any). Old firmware reading new records sees only
+            // the enter string and ignores the trailing bytes.
             r.actionType = 1;
-            int c5 = actionArgs.indexOf(',');
+            memset(r.message, 0, sizeof(r.message));
+
+            // Split off any optional ",LEAVE,<text>" suffix first so we can
+            // measure the enter+cooldown portion without it.
+            int leaveIdx = actionArgs.indexOf(",LEAVE,");
+            String head = (leaveIdx >= 0) ? actionArgs.substring(0, leaveIdx) : actionArgs;
+            String leaveMsg = (leaveIdx >= 0) ? actionArgs.substring(leaveIdx + 7) : String("");
+
+            int c5 = head.indexOf(',');
+            String enterMsg;
             if (c5 < 0) {
-                strncpy(r.message, actionArgs.c_str(), 31); r.message[31] = '\0';
+                enterMsg = head;
             } else {
-                strncpy(r.message, actionArgs.substring(0, c5).c_str(), 31); r.message[31] = '\0';
-                r.cooldownMs = actionArgs.substring(c5 + 1).toInt();
+                enterMsg = head.substring(0, c5);
+                r.cooldownMs = (uint16_t)head.substring(c5 + 1).toInt();
+            }
+            strncpy(r.message, enterMsg.c_str(), 31);
+            r.message[31] = '\0';
+
+            // Embed the leave text after the enter text's null terminator.
+            // Reserve one byte for the trailing null after the leave text.
+            if (leaveMsg.length() > 0) {
+                size_t enterLen = strlen(r.message);
+                if (enterLen + 1 < sizeof(r.message) - 1) {
+                    size_t avail = sizeof(r.message) - (enterLen + 1) - 1;
+                    strncpy(r.message + enterLen + 1, leaveMsg.c_str(), avail);
+                    r.message[sizeof(r.message) - 1] = '\0';
+                }
             }
         } else if (actionStr == "PULSE") {
             // Phase 2 base format:
@@ -5465,8 +7140,10 @@ void loadConfig() {
 
     // Pin config version check — if version doesn't match, reset to defaults
     // This catches old EEPROM with wrong pins (e.g., 19/20/33 on ESP32-S3)
-    #define PIN_CONFIG_VERSION 9  // v9: storage vpins 200-207 baked into DEFAULT_*_PINS,
-                                  //     MAX_*_CFG bumped 8/6 -> 16/16, EEPROM addr 410 -> 1700
+    #define PIN_CONFIG_VERSION 10 // v10: TiggyOpenMesh V1 sensor list += GPIO40 (J9
+                                  //      direct-connect for DHT22/DS18B20/HC-SR04);
+                                  //      v9: storage vpins 200-207 baked into DEFAULT_*_PINS,
+                                  //      MAX_*_CFG bumped 8/6 -> 16/16, EEPROM addr 410 -> 1700
     #define EEPROM_PIN_VER_ADDR 448  // After BLEPIN (443-446), safe gap
     uint8_t pinVer = EEPROM.read(EEPROM_PIN_VER_ADDR);
     if (pinVer != PIN_CONFIG_VERSION) {
@@ -5553,6 +7230,11 @@ void loadConfig() {
 
 void updateOLED() {
     if (!oledAvailable) return;
+    // If a Logic Builder OLED device is active it owns the screen.
+    // The block's serviceDevices() loop renders its own content, so
+    // suppress the system-default redraw to avoid both functions
+    // racing for the framebuffer (would cause visible flicker).
+    if (hasActiveOledDevice()) return;
     if (millis() - lastOledRefresh < 5000) return;
     lastOledRefresh = millis();
 
@@ -5689,6 +7371,11 @@ void setup() {
 
     loadConfig();
     loadBeaconRules();
+    // PLC tables (SETPOINT / LOGIC / COUNTER / LATCH / SCALE / TIMER).
+    // Without this, every reboot wiped every deployed PLC rule — gateway
+    // still thought the rule was confirmed but the firmware tables were
+    // empty. Beacon rules already persist; this brings PLC to parity.
+    loadPlcTables();
     // Storage vpin persistence: read the opt-in bitmap first, then load
     // values only for vpins the user has marked persistent. Non-persistent
     // vpins stay at 0 in RAM (and never hit EEPROM during this session).
@@ -5907,6 +7594,7 @@ void loop() {
         checkLogic();
         checkLatches();
         checkScales();
+        serviceDevices();
         plcStats.scanTicks++;
         readGPS();
         broadcastGPS();
