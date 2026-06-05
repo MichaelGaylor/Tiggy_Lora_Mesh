@@ -3165,16 +3165,41 @@ void checkSetpoints() {
                 }
                 if (clearCondition) {
                     setpoints[i].triggered = false;
-                    setpoints[i].lastFired = now;
-                    // MSG and PULSE both have meaningful falling-edge actions:
-                    //   MSG  → broadcast msgFalse
-                    //   PULSE → pulse the leavePin (if configured)
-                    // RELAY auto-reverts via fireSetpointAction's own logic
-                    // but only if explicitly called — today we don't, to
-                    // preserve historical behaviour for relay setpoints.
-                    if (setpoints[i].actionType == 1 || setpoints[i].actionType == 2) {
-                        if (fireSetpointAction(setpoints[i], rawValue, false))
-                            return;
+                    // Whether the falling edge will actually DO anything.
+                    // For MSG: only if msgFalse is configured. The PLC
+                    // compiler now splits a "Broadcast Msg" block into
+                    // two single-edge setpoints (GE,1 with msgTrue,
+                    // LT,1 with the other msg), so each setpoint's
+                    // msgFalse is empty by design — its falling edge
+                    // is a pure no-op. For PULSE: only if a leave
+                    // pulse is wired. RELAY currently doesn't reach
+                    // this path (the hold-timer path bypasses
+                    // checkSetpoints), so treat it as no effect.
+                    bool fallingHasEffect = false;
+                    if (setpoints[i].actionType == 1) {
+                        fallingHasEffect = (setpoints[i].msgFalse[0] != '\0');
+                    } else if (setpoints[i].actionType == 2) {
+                        fallingHasEffect = (setpoints[i].leavePin > 0 &&
+                                            setpoints[i].leavePulseMs > 0);
+                    }
+                    // Only update lastFired if the action actually fires.
+                    // Previously every falling edge bumped lastFired
+                    // even when fireSetpointAction returned early on an
+                    // empty msgFalse. That left the cooldown timer
+                    // freshly set by an unobservable edge, so the NEXT
+                    // opposite-direction toggle (the LT,1 setpoint's
+                    // rising edge that should fire "Gate Close") was
+                    // within cooldown and silently blocked. Confirmed
+                    // live on hardware: with V200 toggled 1→0→1 inside
+                    // the 10s cooldown, only the first rising-edge
+                    // broadcast ever fired; without this fix the
+                    // following V200=0 transition never broadcast.
+                    if (fallingHasEffect) {
+                        setpoints[i].lastFired = now;
+                        if (setpoints[i].actionType == 1 || setpoints[i].actionType == 2) {
+                            if (fireSetpointAction(setpoints[i], rawValue, false))
+                                return;
+                        }
                     }
                 }
             }
