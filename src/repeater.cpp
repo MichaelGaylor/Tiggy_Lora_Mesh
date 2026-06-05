@@ -2896,8 +2896,68 @@ String processSetpointCommand(const String& args) {
 
 // Handle SETPOINT command received over mesh (CMD,SETPOINT,...)
 void handleSetpointCmd(const String& args, const String& from) {
-    String resp = processSetpointCommand(args);
     mesh.cmdsExecuted++;
+    // LIST is special: with even a few setpoints the combined
+    // "SETPOINTS,…" reply blows past the 249-byte LoRa frame budget
+    // after AES-GCM + hex + mesh routing wrapper, and mesh.transmitPacket
+    // silently drops it (logs TX_DROP locally but the requester sees
+    // nothing). Confirmed live: 4 setpoints produces a 321-byte payload,
+    // dropped at MeshCore.cpp:314. Paginate like BEACON,LIST does —
+    // one setpoint per packet, count header + END marker, broadcast via
+    // notifyBeaconEvent so the gateway's existing BEACONEVT pass-through
+    // (handleCmd:RSP|BEACONEVT) emits each line as a plain RX,<from>,
+    // SETPOINT,RULE,… that the GUI already displays.
+    if (args == "LIST") {
+        int count = 0;
+        for (int i = 0; i < MAX_SETPOINTS; i++) if (setpoints[i].active) count++;
+        if (count == 0) {
+            bleSend("SETPOINTS,NONE");
+            if (from != "LOCAL") notifyBeaconEvent("SETPOINTS,NONE", true);
+            return;
+        }
+        String countMsg = "SETPOINTS," + String(count);
+        bleSend(countMsg);
+        if (from != "LOCAL") {
+            notifyBeaconEvent(countMsg, true);
+            delay(50);
+        }
+        const char* ops[] = {"GT", "LT", "EQ", "GE", "LE", "NE"};
+        for (int i = 0; i < MAX_SETPOINTS; i++) {
+            if (!setpoints[i].active) continue;
+            String line = "SETPOINT,RULE," + String(i) + "," +
+                          String(setpoints[i].sensorPin) + ":" +
+                          String(ops[setpoints[i].op]) + ":" +
+                          String(setpoints[i].threshold, 1) + "->";
+            if (setpoints[i].actionType == 1) {
+                line += "MSG:" + String(setpoints[i].msgTrue);
+                if (setpoints[i].msgFalse[0]) line += "/" + String(setpoints[i].msgFalse);
+            } else if (setpoints[i].actionType == 2) {
+                line += "PULSE:" + String(setpoints[i].relayPin) + ":" +
+                        String(setpoints[i].pulseMs) + "ms";
+                if (setpoints[i].leavePin > 0 && setpoints[i].leavePulseMs > 0) {
+                    line += "{leave:pin" + String(setpoints[i].leavePin) +
+                            "/" + String(setpoints[i].leavePulseMs) + "ms}";
+                }
+            } else {
+                line += String(setpoints[i].targetNode) + ":" +
+                        String(setpoints[i].relayPin) + ":" +
+                        String(setpoints[i].action);
+            }
+            bleSend(line);
+            if (from != "LOCAL") {
+                notifyBeaconEvent(line, true);
+                delay(50);
+            }
+        }
+        bleSend("SETPOINTS,END");
+        if (from != "LOCAL") notifyBeaconEvent("SETPOINTS,END", true);
+        return;
+    }
+    // All other SETPOINT commands (ADD, CLEAR, DELETE, …) produce short
+    // OK/ERR replies that fit in one frame — keep the original unicast
+    // path so the GUI's pending-deploy tracker keys off the same kind
+    // of reply it always has.
+    String resp = processSetpointCommand(args);
     String mid = mesh.generateMsgID();
     String hex = mesh.encryptMsg(resp);
     String payload = String(mesh.localID) + "," + from + "," + mid + "," +
