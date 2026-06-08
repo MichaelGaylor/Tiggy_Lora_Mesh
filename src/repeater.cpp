@@ -1152,14 +1152,22 @@ unsigned long nextAutoPollTime = 0;
 // Heartbeat-interval config override (runtime-tunable via HB_INTERVAL
 // serial command). Lets per-deployment override compile-time defaults
 // without rebuilding.
-// Layout: magic(2) + normalSec(2) + solarSec(2) = 6 bytes. Stored as
-// seconds (uint16_t, max 65535 = 18 h — plenty for HB cadence) to fit
-// the available 500-507 gap WITHOUT colliding with EEPROM_MAGIC_ADDR
-// at 508 (the master "EEPROM initialised" sentinel; overwriting it
-// would force a full EEPROM re-init on next boot). Magic is a value
-// distinct from EEPROM_BATTCFG_MAGIC so neither record can be
-// mistaken for the other if a future refactor moves addresses.
-#define EEPROM_HBCFG_ADDR   500
+// Layout: magic(2) + normalSec(2) + solarSec(2) = 6 bytes.
+//
+// ⚠️ Address 500 was a BUG: BattCfgEEPROM at 490 is 11 bytes packed
+// (uint16+float+uint16+uint16+uint8) and occupies bytes 490..500
+// INCLUSIVE — byte 500 is BattCfg.hibernateEnabled. The first HBCFG
+// layout at addr 500 stomped that byte every time HB_INTERVAL was
+// saved, silently flipping battery-hibernate ON in EEPROM. Moved to
+// addr 467, inside the 467..479 free gap between the AES key end
+// (450 + 17 bytes = byte 466 last) and NDLOC at 480. 6-byte struct
+// leaves 7 bytes of headroom for future fields. Nodes that ran the
+// buggy layout: loadHbCfg's magic check at the NEW address fails (old
+// data lives at 500 not 467) so HB cadence reverts to defaults — user
+// must re-issue HB_INTERVAL <ms> if they had a custom value. That's
+// the lesser harm; the alternative is leaving the battery-hibernate
+// corruption in place.
+#define EEPROM_HBCFG_ADDR   467
 #define EEPROM_HBCFG_MAGIC  0xBEAEu
 
 // Binary SDATA mode was an opt-in toggle but caused field issues
@@ -2189,7 +2197,17 @@ void loadBattCfg() {
         battDivider           = e.divider;
         battLowMv             = e.lowMv;
         battRecoverMv         = e.recoverMv;
-        battHibernateEnabled  = (e.hibernateEnabled != 0);
+        // hibernateEnabled must be 0 or 1. Anything else means the byte
+        // was stomped by the earlier HBCFG-addr-500 overlap bug (HBCFG
+        // magic-low = 0xAE clobbered this byte every time HB_INTERVAL
+        // saved). Fall back to the compile-time default rather than
+        // trusting garbage — the user can re-set BATT_HIBERNATE
+        // explicitly if they want a non-default value.
+        if (e.hibernateEnabled <= 1) {
+            battHibernateEnabled = (e.hibernateEnabled != 0);
+        } else {
+            battHibernateEnabled = (BATT_HIBERNATE_DEFAULT != 0);
+        }
         battCfgIsCustom       = true;
     }
 }
@@ -2240,7 +2258,8 @@ struct __attribute__((packed)) HbCfgEEPROM {
     uint16_t normalSec;   // override for HB_INTERVAL  (5..3600 valid)
     uint16_t solarSec;    // override for HB_INTERVAL_SOLAR (same range)
 };
-// 6 bytes total — fits 500-505. EEPROM_MAGIC_ADDR at 508 stays clear.
+// 6 bytes total — fits 467..472. AES key ends at byte 466, NDLOC
+// starts at 480, so 7 bytes of clear headroom remain at 473..479.
 
 bool hbCfgIsCustom = false;
 
