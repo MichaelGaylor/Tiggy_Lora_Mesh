@@ -1147,6 +1147,19 @@ unsigned long nextAutoPollTime = 0;
 #define EEPROM_BATTCFG_ADDR  490
 #define EEPROM_BATTCFG_MAGIC 0xBAEEu
 
+// Heartbeat-interval config override (runtime-tunable via HB_INTERVAL
+// serial command). Lets per-deployment override compile-time defaults
+// without rebuilding.
+// Layout: magic(2) + normalSec(2) + solarSec(2) = 6 bytes. Stored as
+// seconds (uint16_t, max 65535 = 18 h — plenty for HB cadence) to fit
+// the available 500-507 gap WITHOUT colliding with EEPROM_MAGIC_ADDR
+// at 508 (the master "EEPROM initialised" sentinel; overwriting it
+// would force a full EEPROM re-init on next boot). Magic is a value
+// distinct from EEPROM_BATTCFG_MAGIC so neither record can be
+// mistaken for the other if a future refactor moves addresses.
+#define EEPROM_HBCFG_ADDR   500
+#define EEPROM_HBCFG_MAGIC  0xBEAEu
+
 // Binary SDATA mode was an opt-in toggle but caused field issues
 // (gateway losing nodes after extended runtime). Disabled pending
 // root-cause. The buildAsciiSDATA helper below is kept as a clean
@@ -2207,6 +2220,77 @@ void resetBattCfg() {
     battRecoverMv         = BAT_RECOVER_MV;
     battHibernateEnabled  = (BATT_HIBERNATE_DEFAULT != 0);
     battCfgIsCustom       = false;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Heartbeat-interval config (EEPROM persistence + runtime override)
+// ═══════════════════════════════════════════════════════════════
+// Mirrors BattCfgEEPROM exactly. Compile-time defaults come from
+// HB_INTERVAL / HB_INTERVAL_SOLAR macros (which Pins.h can override
+// before MeshCore.h sees them). The HB_INTERVAL serial command writes
+// a record here so the override survives reboot without rebuilding.
+//
+// Validation: magic + range checks. Old firmware never wrote this
+// region, so it reads 0xFF... on first new-firmware boot, fails the
+// magic check, defaults apply, no corruption.
+struct __attribute__((packed)) HbCfgEEPROM {
+    uint16_t magic;       // EEPROM_HBCFG_MAGIC
+    uint16_t normalSec;   // override for HB_INTERVAL  (5..3600 valid)
+    uint16_t solarSec;    // override for HB_INTERVAL_SOLAR (same range)
+};
+// 6 bytes total — fits 500-505. EEPROM_MAGIC_ADDR at 508 stays clear.
+
+bool hbCfgIsCustom = false;
+
+void loadHbCfg() {
+    HbCfgEEPROM e;
+    EEPROM.get(EEPROM_HBCFG_ADDR, e);
+    // Magic gate + sane-range gate. Mirrors loadBattCfg's belt-and-braces
+    // approach: a magic-byte collision on garbage data still has to pass
+    // the range check before we use the values, so an old EEPROM that
+    // happened to have 0xBEAE in those bytes (vanishingly unlikely but
+    // possible) still rejects unless the seconds values also look
+    // plausible (5..3600 inclusive — 5 s minimum to avoid flooding,
+    // 1 h maximum so a node never goes silent for more than an hour).
+    if (e.magic == EEPROM_HBCFG_MAGIC
+        && e.normalSec >= 5 && e.normalSec <= 3600
+        && e.solarSec  >= 5 && e.solarSec  <= 3600) {
+        mesh.hbIntervalMs      = (unsigned long)e.normalSec * 1000UL;
+        mesh.hbIntervalSolarMs = (unsigned long)e.solarSec  * 1000UL;
+        hbCfgIsCustom = true;
+    }
+}
+
+void saveHbCfg(unsigned long normalMs, unsigned long solarMs) {
+    // Convert ms → seconds for the on-disk record (uint16_t to keep the
+    // record 6 bytes and clear of EEPROM_MAGIC_ADDR at 508). Clamp on
+    // the way in so an out-of-range caller can't silently truncate to
+    // garbage. Caller (the HB_INTERVAL serial parser) already validates
+    // range, so the clamps below are belt-and-braces.
+    uint16_t nSec = (uint16_t)((normalMs + 500UL) / 1000UL);
+    uint16_t sSec = (uint16_t)((solarMs  + 500UL) / 1000UL);
+    if (nSec < 5)    nSec = 5;
+    if (nSec > 3600) nSec = 3600;
+    if (sSec < 5)    sSec = 5;
+    if (sSec > 3600) sSec = 3600;
+    HbCfgEEPROM e = { EEPROM_HBCFG_MAGIC, nSec, sSec };
+    EEPROM.put(EEPROM_HBCFG_ADDR, e);
+    EEPROM.commit();
+    mesh.hbIntervalMs      = (unsigned long)nSec * 1000UL;
+    mesh.hbIntervalSolarMs = (unsigned long)sSec * 1000UL;
+    hbCfgIsCustom = true;
+}
+
+void resetHbCfg() {
+    // Wipe the magic so loadHbCfg falls back to defaults on next boot.
+    // Zero-init the whole struct so leftover bytes can't accidentally
+    // re-validate against a future magic value.
+    HbCfgEEPROM e = { 0, 0, 0 };
+    EEPROM.put(EEPROM_HBCFG_ADDR, e);
+    EEPROM.commit();
+    mesh.hbIntervalMs      = HB_INTERVAL;
+    mesh.hbIntervalSolarMs = HB_INTERVAL_SOLAR;
+    hbCfgIsCustom = false;
 }
 
 // Returns battery voltage in millivolts, or -1 if no battery monitoring.
@@ -6334,6 +6418,46 @@ void handleSerialConfig() {
         Serial.println("ERR: no battery monitoring on this board");
 #endif
     }
+    else if (line == "HB_INTERVAL") {
+        // Query — print current normal + solar values plus compile-time
+        // defaults so the operator can tell at a glance whether an EEPROM
+        // override is in effect.
+        Serial.printf("HB_INTERVAL,normal=%lums,solar=%lums,source=%s\n",
+                      mesh.hbIntervalMs, mesh.hbIntervalSolarMs,
+                      hbCfgIsCustom ? "EEPROM" : "default");
+        Serial.printf("Defaults (MeshCore.h/Pins.h): normal=%lums, solar=%lums\n",
+                      (unsigned long)HB_INTERVAL, (unsigned long)HB_INTERVAL_SOLAR);
+        Serial.println("Set:   HB_INTERVAL <normalMs> [solarMs]   range 5000..3600000");
+        Serial.println("Reset: HB_INTERVAL_RESET");
+    }
+    else if (line.startsWith("HB_INTERVAL ")) {
+        // Set — accept either "HB_INTERVAL <normal>" or
+        // "HB_INTERVAL <normal> <solar>". Leaves solar alone if a single
+        // value is given so an operator tuning normal-mode doesn't
+        // accidentally drop the solar-mode cadence.
+        String args = line.substring(12); args.trim();
+        long n = -1, s = -1;
+        int sp = args.indexOf(' ');
+        if (sp > 0) {
+            n = args.substring(0, sp).toInt();
+            s = args.substring(sp + 1).toInt();
+        } else {
+            n = args.toInt();
+            s = (long)mesh.hbIntervalSolarMs;  // keep current solar
+        }
+        if (n < 5000 || n > 3600000 || s < 5000 || s > 3600000) {
+            Serial.println("ERR: HB_INTERVAL out of range (5000..3600000 ms each)");
+        } else {
+            saveHbCfg((unsigned long)n, (unsigned long)s);
+            Serial.printf("OK: HB_INTERVAL normal=%ldms solar=%ldms (saved to EEPROM)\n",
+                          n, s);
+        }
+    }
+    else if (line == "HB_INTERVAL_RESET") {
+        resetHbCfg();
+        Serial.printf("OK: HB_INTERVAL reset to defaults (normal=%lums solar=%lums)\n",
+                      (unsigned long)HB_INTERVAL, (unsigned long)HB_INTERVAL_SOLAR);
+    }
     else if (line == "SBIN" || line.startsWith("SBIN ")) {
         // Binary SDATA mode disabled in firmware (caused gateway losing
         // nodes after extended runtime). Command kept as a no-op so any
@@ -7468,6 +7592,11 @@ void setup() {
     // EEPROM up early so the battery check honours any runtime override.
     EEPROM.begin(EEPROM_SIZE);
     loadBattCfg();
+    // Heartbeat interval override (HB_INTERVAL serial command). Writes
+    // mesh.hbIntervalMs / hbIntervalSolarMs from EEPROM if a valid
+    // record exists, otherwise leaves the inline-initialiser defaults
+    // (HB_INTERVAL / HB_INTERVAL_SOLAR macros) intact.
+    loadHbCfg();
     // Binary SDATA mode disabled — binarySDATA is now constexpr false.
 
     // ─── Early low-battery recovery check ──────────────────────
@@ -7691,10 +7820,14 @@ void loop() {
         handleBleAckRetry();
         mesh.processPendingForwards();
 
-        // Heartbeat (60s interval in solar mode to save TX power)
+        // Heartbeat (solar default 60s; runtime-overridable via
+        // HB_INTERVAL serial command — see mesh.hbIntervalSolarMs).
+        // Commit 2 will multiply by the adaptive backoff here; commit 1
+        // just substitutes the variable for the macro so the override
+        // takes effect.
         if (millis() > nextHeartbeatTime) {
             sendHeartbeatWithFlags();
-            nextHeartbeatTime = millis() + HB_INTERVAL_SOLAR + random(-5000, 5000);
+            nextHeartbeatTime = millis() + mesh.hbIntervalSolarMs + random(-5000, 5000);
             if (BOARD_LED >= 0) { digitalWrite(BOARD_LED, HIGH); delay(2); digitalWrite(BOARD_LED, LOW); }
         }
 
@@ -7774,10 +7907,14 @@ void loop() {
         radioStartListening();
     }
 
-    // 3. Heartbeat
+    // 3. Heartbeat (normal-mode default 30s; runtime-overridable via
+    // HB_INTERVAL serial command — see mesh.hbIntervalMs). Commit 2
+    // will multiply by the adaptive backoff here; commit 1 just
+    // substitutes the variable for the macro so the override takes
+    // effect.
     if (millis() > nextHeartbeatTime) {
         sendHeartbeatWithFlags();
-        nextHeartbeatTime = millis() + HB_INTERVAL + random(-2000, 2000);
+        nextHeartbeatTime = millis() + mesh.hbIntervalMs + random(-2000, 2000);
         if (BOARD_LED >= 0) { digitalWrite(BOARD_LED, HIGH); delay(10); digitalWrite(BOARD_LED, LOW); }
     }
 

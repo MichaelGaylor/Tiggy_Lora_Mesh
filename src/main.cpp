@@ -2364,10 +2364,14 @@ void loop() {
   handleAckRetry();
   mesh.processPendingForwards();
 
-  // Heartbeat
+  // Heartbeat — same runtime-variable as repeater.cpp so a T-Deck Plus
+  // honours the HB_INTERVAL serial override too. (mesh.hbIntervalMs is
+  // initialised from HB_INTERVAL by MeshCore.h; main.cpp doesn't call
+  // loadHbCfg yet because T-Deck Plus has its own EEPROM layout — only
+  // the compile-time / serial-runtime path is wired here for now.)
   if (millis() > nextHeartbeatTime) {
     mesh.sendHeartbeat();
-    nextHeartbeatTime = millis() + HB_INTERVAL + random(-2000, 2000);
+    nextHeartbeatTime = millis() + mesh.hbIntervalMs + random(-2000, 2000);
   }
 
   // Route cleanup (every 10s)

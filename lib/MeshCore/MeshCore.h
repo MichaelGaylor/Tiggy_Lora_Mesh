@@ -50,8 +50,19 @@
 #define ACK_TIMEOUT     8000
 #define MAX_RETRIES     5
 #define CFG_SWITCH_DELAY 2000  // ms delay after CFGGO before applying SF change
-#define HB_INTERVAL     30000UL
-#define HB_INTERVAL_SOLAR 60000UL // Solar mode: 60s heartbeat (saves power)
+// Heartbeat cadence — compile-time defaults. A board's Pins.h may
+// `#define HB_INTERVAL <ms>` before this header is included to override
+// per-board, and the runtime can override further via the HB_INTERVAL
+// serial command + EEPROM persistence (see HbCfgEEPROM in repeater.cpp).
+// Runtime values live in MeshCore::hbIntervalMs / hbIntervalSolarMs
+// below; these macros are only the fallback if neither Pins.h nor
+// EEPROM has supplied an override.
+#ifndef HB_INTERVAL
+  #define HB_INTERVAL     30000UL
+#endif
+#ifndef HB_INTERVAL_SOLAR
+  #define HB_INTERVAL_SOLAR 60000UL // Solar mode: 60s heartbeat (saves power)
+#endif
 #define STALE_TIMEOUT   120000UL  // 2min (was 60s) — less aggressive pruning
 #define ROUTE_TIMEOUT   120000UL
 
@@ -196,6 +207,15 @@ public:
     // semantics.
     uint32_t plcScans = 0;
     uint32_t plcFires = 0;
+
+    // Runtime heartbeat interval (ms). Initialised from the compile-time
+    // defaults via the inline initialisers below; the firmware reads
+    // an EEPROM override at boot (HbCfgEEPROM in repeater.cpp) and
+    // applies it here. The scheduling loop in repeater.cpp reads these
+    // each tick — that lets a serial HB_INTERVAL command take effect
+    // on the very next scheduled heartbeat without a reboot.
+    unsigned long hbIntervalMs      = HB_INTERVAL;
+    unsigned long hbIntervalSolarMs = HB_INTERVAL_SOLAR;
 
     // Runtime spreading factor (may differ from compile-time LORA_SF after a CFG change)
     uint8_t currentSF = LORA_SF;
