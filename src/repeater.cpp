@@ -1526,6 +1526,15 @@ void sendHeartbeatWithFlags() {
     // -1 on boards without monitoring, which signals "don't include" to the
     // heartbeat builder.
     mesh.batteryMv = (int16_t)readBatteryMv();
+    // Push current PLC runtime counters into the heartbeat builder. Gateway
+    // drives its WORKING indicator from these (heartbeat-based liveness)
+    // instead of polling STATUS,PLC every 7s — see plan note in
+    // there-seems-to-be-cryptic-shore.md. plcScans=0 AND plcFires=0
+    // omits the field entirely (node has no deployed PLC primitives).
+    mesh.plcScans = plcStats.scanTicks;
+    mesh.plcFires = plcStats.logicFires + plcStats.latchFires +
+                    plcStats.scaleFires + plcStats.counterFires +
+                    plcStats.timerFires + plcStats.setpointFires;
     mesh.sendHeartbeat();
 
     // In gateway mode, publish our own battery to serial — remote nodes

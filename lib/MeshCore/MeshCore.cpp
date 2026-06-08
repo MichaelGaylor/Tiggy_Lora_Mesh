@@ -664,5 +664,13 @@ void MeshCore::sendHeartbeat() {
     // Battery is tagged ("B<mv>") so its position doesn't break legacy
     // parsers that read boardCode/flags by index.
     if (batteryMv >= 0)  hb += ",B" + String((int)batteryMv);
+    // PLC runtime counters, tagged ",P<scans>:<fires>". Omitted when
+    // both are zero so the heartbeat from a node with no deployed PLC
+    // primitives stays the same length it always was. Lets the gateway
+    // drive its WORKING indicator from passively-received heartbeats
+    // instead of an active poll loop — see PLC,STATUS auto-poll removal
+    // on the gateway side.
+    if (plcScans > 0 || plcFires > 0)
+        hb += ",P" + String(plcScans) + ":" + String(plcFires);
     transmitPacket(0xFFFF, hb);
 }

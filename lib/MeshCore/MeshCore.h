@@ -186,6 +186,17 @@ public:
     // heartbeat as a tagged field "B<mv>".
     int16_t batteryMv = -1;
 
+    // PLC runtime counters — populated by the firmware just before each
+    // heartbeat from its plcStats struct (MeshCore stays oblivious to PLC
+    // internals). Appended as ",P<scans>:<fires>" when either is non-zero
+    // so the gateway can drive the "rule is alive / firing" WORKING
+    // indicator from the heartbeat instead of polling. Zero or missing
+    // tag = no deployed PLC primitives on this node; the gateway falls
+    // back to its previous "deployed = working until heartbeat stops"
+    // semantics.
+    uint32_t plcScans = 0;
+    uint32_t plcFires = 0;
+
     // Runtime spreading factor (may differ from compile-time LORA_SF after a CFG change)
     uint8_t currentSF = LORA_SF;
 
