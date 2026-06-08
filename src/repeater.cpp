@@ -7822,12 +7822,17 @@ void loop() {
 
         // Heartbeat (solar default 60s; runtime-overridable via
         // HB_INTERVAL serial command — see mesh.hbIntervalSolarMs).
-        // Commit 2 will multiply by the adaptive backoff here; commit 1
-        // just substitutes the variable for the macro so the override
-        // takes effect.
+        // Multiplied by the adaptive backoff so the cadence
+        // automatically stretches when the duty-cycle accumulator is
+        // approaching the local cap. 30-minute hard ceiling so the
+        // operator never loses visibility for longer than that
+        // regardless of how much the mesh is loaded.
         if (millis() > nextHeartbeatTime) {
             sendHeartbeatWithFlags();
-            nextHeartbeatTime = millis() + mesh.hbIntervalSolarMs + random(-5000, 5000);
+            unsigned long adj = mesh.hbIntervalSolarMs *
+                                (unsigned long)mesh.hbIntervalMultiplier();
+            if (adj > 1800000UL) adj = 1800000UL;   // 30 min ceiling
+            nextHeartbeatTime = millis() + adj + random(-5000, 5000);
             if (BOARD_LED >= 0) { digitalWrite(BOARD_LED, HIGH); delay(2); digitalWrite(BOARD_LED, LOW); }
         }
 
@@ -7908,13 +7913,17 @@ void loop() {
     }
 
     // 3. Heartbeat (normal-mode default 30s; runtime-overridable via
-    // HB_INTERVAL serial command — see mesh.hbIntervalMs). Commit 2
-    // will multiply by the adaptive backoff here; commit 1 just
-    // substitutes the variable for the macro so the override takes
-    // effect.
+    // HB_INTERVAL serial command — see mesh.hbIntervalMs). Multiplied
+    // by the adaptive backoff so the cadence automatically stretches
+    // when the duty-cycle accumulator is approaching the local cap.
+    // 30-minute hard ceiling so the operator never loses visibility
+    // for longer than that regardless of how much the mesh is loaded.
     if (millis() > nextHeartbeatTime) {
         sendHeartbeatWithFlags();
-        nextHeartbeatTime = millis() + mesh.hbIntervalMs + random(-2000, 2000);
+        unsigned long adj = mesh.hbIntervalMs *
+                            (unsigned long)mesh.hbIntervalMultiplier();
+        if (adj > 1800000UL) adj = 1800000UL;   // 30 min ceiling
+        nextHeartbeatTime = millis() + adj + random(-2000, 2000);
         if (BOARD_LED >= 0) { digitalWrite(BOARD_LED, HIGH); delay(10); digitalWrite(BOARD_LED, LOW); }
     }
 

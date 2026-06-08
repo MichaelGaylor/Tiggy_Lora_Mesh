@@ -657,6 +657,24 @@ void MeshCore::processPacket(const MeshPacket& pkt) {
 // Heartbeat
 // ═══════════════════════════════════════════════════════════════
 
+// Adaptive heartbeat backoff multiplier.
+//
+// Thresholds key off the LOCAL 7 % cap (252 s/hr) rather than the full
+// 10 % forward cap (360 s/hr). Crossing 252 s is when this node's own
+// heartbeats start getting silently dropped by canTransmit. We want
+// the multiplier to ramp up BEFORE that line so the node sheds load
+// itself rather than getting cut off. By 90 % of the local cap we're
+// at 8× — combined with the 30 min ceiling enforced at the caller,
+// the node still emits a heartbeat at least every 30 min even when
+// the mesh is saturated, so the operator never loses visibility.
+uint8_t MeshCore::hbIntervalMultiplier() {
+    unsigned long t = txTimeThisHour;
+    if (t < 126000UL) return 1;   // < 50 % of 252 s — plenty of headroom
+    if (t < 176000UL) return 2;   // 50-70 % — slow down
+    if (t < 227000UL) return 4;   // 70-90 % — slow more
+    return 8;                     // ≥ 90 % — maximum backoff
+}
+
 void MeshCore::sendHeartbeat() {
     String hb = "HB," + String(localID);
     if (boardCode[0]) hb += "," + String(boardCode);
@@ -672,5 +690,17 @@ void MeshCore::sendHeartbeat() {
     // on the gateway side.
     if (plcScans > 0 || plcFires > 0)
         hb += ",P" + String(plcScans) + ":" + String(plcFires);
+    // Effective current heartbeat interval in seconds, tagged ",H<sec>".
+    // Gateway uses this to size per-node offline detection: without it,
+    // a node that bumped its HB to 5 min would be false-flagged offline
+    // by the gateway's 120 s default. Reflects the live multiplier so
+    // the gateway sees the actual current cadence, not just the
+    // configured base. Capped at the same 30 min ceiling the scheduling
+    // loop enforces so the value is always meaningful.
+    unsigned long effMs = hbIntervalMs * (unsigned long)hbIntervalMultiplier();
+    if (effMs > 1800000UL) effMs = 1800000UL;
+    uint32_t effSec = (uint32_t)(effMs / 1000UL);
+    if (effSec == 0) effSec = 1;   // defensive — never emit ,H0
+    hb += ",H" + String(effSec);
     transmitPacket(0xFFFF, hb);
 }

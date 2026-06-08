@@ -217,6 +217,14 @@ public:
     unsigned long hbIntervalMs      = HB_INTERVAL;
     unsigned long hbIntervalSolarMs = HB_INTERVAL_SOLAR;
 
+    // Adaptive heartbeat backoff multiplier. Returns 1, 2, 4, or 8 based
+    // on how close txTimeThisHour is to the local 7 % cap (252 s). The
+    // scheduling loop multiplies the configured HB interval by this
+    // before computing the next-fire time, so under heavy mesh load the
+    // node automatically reduces its HB cadence and stops contributing
+    // to the cap blowing. Returns 1 (no backoff) on a quiet mesh.
+    uint8_t hbIntervalMultiplier();
+
     // Runtime spreading factor (may differ from compile-time LORA_SF after a CFG change)
     uint8_t currentSF = LORA_SF;
 
