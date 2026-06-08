@@ -711,12 +711,14 @@ static bool sht31Read(uint8_t addr, int16_t* tempC10, uint16_t* humPct10) {
     for (int i = 0; i < 6; i++) b[i] = Wire.read();
     uint16_t rawT = ((uint16_t)b[0] << 8) | b[1];
     uint16_t rawH = ((uint16_t)b[3] << 8) | b[4];
-    // Datasheet conversion (×10 scaled to fit uint16):
-    //   T_°C = -45 + 175 × rawT / 65535
-    //   RH_% =   0 + 100 × rawH / 65535
-    *tempC10  = (int16_t)((int32_t)175 * rawT / 65535 - 450) * 10 / 10;
-    // Better precision: scale to ×10 first, then divide.
-    *tempC10  = (int16_t)((int32_t)1750 * rawT / 65535 - 4500);
+    // Datasheet conversion, scaled ×10 to fit fixed-point int16:
+    //   T_°C       = -45  + 175  × rawT / 65535
+    //   T_°C × 10  = -450 + 1750 × rawT / 65535
+    //   RH_% × 10  =        1000 × rawH / 65535
+    // Previous code subtracted 4500 instead of 450 here — off-by-factor-
+    // of-10 bug that produced ~-385°C for a 20°C reading. Caught by
+    // the sensor-code audit before any customer install hit it.
+    *tempC10  = (int16_t)((int32_t)1750 * rawT / 65535 - 450);
     *humPct10 = (uint16_t)((int32_t)1000 * rawH / 65535);
     return true;
 }
