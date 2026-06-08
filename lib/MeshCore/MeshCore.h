@@ -50,8 +50,19 @@
 #define ACK_TIMEOUT     8000
 #define MAX_RETRIES     5
 #define CFG_SWITCH_DELAY 2000  // ms delay after CFGGO before applying SF change
-#define HB_INTERVAL     30000UL
-#define HB_INTERVAL_SOLAR 60000UL // Solar mode: 60s heartbeat (saves power)
+// Heartbeat cadence — compile-time defaults. A board's Pins.h may
+// `#define HB_INTERVAL <ms>` before this header is included to override
+// per-board, and the runtime can override further via the HB_INTERVAL
+// serial command + EEPROM persistence (see HbCfgEEPROM in repeater.cpp).
+// Runtime values live in MeshCore::hbIntervalMs / hbIntervalSolarMs
+// below; these macros are only the fallback if neither Pins.h nor
+// EEPROM has supplied an override.
+#ifndef HB_INTERVAL
+  #define HB_INTERVAL     30000UL
+#endif
+#ifndef HB_INTERVAL_SOLAR
+  #define HB_INTERVAL_SOLAR 60000UL // Solar mode: 60s heartbeat (saves power)
+#endif
 #define STALE_TIMEOUT   120000UL  // 2min (was 60s) — less aggressive pruning
 #define ROUTE_TIMEOUT   120000UL
 
@@ -185,6 +196,34 @@ public:
     // monitor; -1 means "not reporting"). Included in every outgoing
     // heartbeat as a tagged field "B<mv>".
     int16_t batteryMv = -1;
+
+    // PLC runtime counters — populated by the firmware just before each
+    // heartbeat from its plcStats struct (MeshCore stays oblivious to PLC
+    // internals). Appended as ",P<scans>:<fires>" when either is non-zero
+    // so the gateway can drive the "rule is alive / firing" WORKING
+    // indicator from the heartbeat instead of polling. Zero or missing
+    // tag = no deployed PLC primitives on this node; the gateway falls
+    // back to its previous "deployed = working until heartbeat stops"
+    // semantics.
+    uint32_t plcScans = 0;
+    uint32_t plcFires = 0;
+
+    // Runtime heartbeat interval (ms). Initialised from the compile-time
+    // defaults via the inline initialisers below; the firmware reads
+    // an EEPROM override at boot (HbCfgEEPROM in repeater.cpp) and
+    // applies it here. The scheduling loop in repeater.cpp reads these
+    // each tick — that lets a serial HB_INTERVAL command take effect
+    // on the very next scheduled heartbeat without a reboot.
+    unsigned long hbIntervalMs      = HB_INTERVAL;
+    unsigned long hbIntervalSolarMs = HB_INTERVAL_SOLAR;
+
+    // Adaptive heartbeat backoff multiplier. Returns 1, 2, 4, or 8 based
+    // on how close txTimeThisHour is to the local 7 % cap (252 s). The
+    // scheduling loop multiplies the configured HB interval by this
+    // before computing the next-fire time, so under heavy mesh load the
+    // node automatically reduces its HB cadence and stops contributing
+    // to the cap blowing. Returns 1 (no backoff) on a quiet mesh.
+    uint8_t hbIntervalMultiplier();
 
     // Runtime spreading factor (may differ from compile-time LORA_SF after a CFG change)
     uint8_t currentSF = LORA_SF;

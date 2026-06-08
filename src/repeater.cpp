@@ -711,12 +711,14 @@ static bool sht31Read(uint8_t addr, int16_t* tempC10, uint16_t* humPct10) {
     for (int i = 0; i < 6; i++) b[i] = Wire.read();
     uint16_t rawT = ((uint16_t)b[0] << 8) | b[1];
     uint16_t rawH = ((uint16_t)b[3] << 8) | b[4];
-    // Datasheet conversion (×10 scaled to fit uint16):
-    //   T_°C = -45 + 175 × rawT / 65535
-    //   RH_% =   0 + 100 × rawH / 65535
-    *tempC10  = (int16_t)((int32_t)175 * rawT / 65535 - 450) * 10 / 10;
-    // Better precision: scale to ×10 first, then divide.
-    *tempC10  = (int16_t)((int32_t)1750 * rawT / 65535 - 4500);
+    // Datasheet conversion, scaled ×10 to fit fixed-point int16:
+    //   T_°C       = -45  + 175  × rawT / 65535
+    //   T_°C × 10  = -450 + 1750 × rawT / 65535
+    //   RH_% × 10  =        1000 × rawH / 65535
+    // Previous code subtracted 4500 instead of 450 here — off-by-factor-
+    // of-10 bug that produced ~-385°C for a 20°C reading. Caught by
+    // the sensor-code audit before any customer install hit it.
+    *tempC10  = (int16_t)((int32_t)1750 * rawT / 65535 - 450);
     *humPct10 = (uint16_t)((int32_t)1000 * rawH / 65535);
     return true;
 }
@@ -1147,6 +1149,27 @@ unsigned long nextAutoPollTime = 0;
 #define EEPROM_BATTCFG_ADDR  490
 #define EEPROM_BATTCFG_MAGIC 0xBAEEu
 
+// Heartbeat-interval config override (runtime-tunable via HB_INTERVAL
+// serial command). Lets per-deployment override compile-time defaults
+// without rebuilding.
+// Layout: magic(2) + normalSec(2) + solarSec(2) = 6 bytes.
+//
+// ⚠️ Address 500 was a BUG: BattCfgEEPROM at 490 is 11 bytes packed
+// (uint16+float+uint16+uint16+uint8) and occupies bytes 490..500
+// INCLUSIVE — byte 500 is BattCfg.hibernateEnabled. The first HBCFG
+// layout at addr 500 stomped that byte every time HB_INTERVAL was
+// saved, silently flipping battery-hibernate ON in EEPROM. Moved to
+// addr 467, inside the 467..479 free gap between the AES key end
+// (450 + 17 bytes = byte 466 last) and NDLOC at 480. 6-byte struct
+// leaves 7 bytes of headroom for future fields. Nodes that ran the
+// buggy layout: loadHbCfg's magic check at the NEW address fails (old
+// data lives at 500 not 467) so HB cadence reverts to defaults — user
+// must re-issue HB_INTERVAL <ms> if they had a custom value. That's
+// the lesser harm; the alternative is leaving the battery-hibernate
+// corruption in place.
+#define EEPROM_HBCFG_ADDR   467
+#define EEPROM_HBCFG_MAGIC  0xBEAEu
+
 // Binary SDATA mode was an opt-in toggle but caused field issues
 // (gateway losing nodes after extended runtime). Disabled pending
 // root-cause. The buildAsciiSDATA helper below is kept as a clean
@@ -1526,6 +1549,15 @@ void sendHeartbeatWithFlags() {
     // -1 on boards without monitoring, which signals "don't include" to the
     // heartbeat builder.
     mesh.batteryMv = (int16_t)readBatteryMv();
+    // Push current PLC runtime counters into the heartbeat builder. Gateway
+    // drives its WORKING indicator from these (heartbeat-based liveness)
+    // instead of polling STATUS,PLC every 7s — see plan note in
+    // there-seems-to-be-cryptic-shore.md. plcScans=0 AND plcFires=0
+    // omits the field entirely (node has no deployed PLC primitives).
+    mesh.plcScans = plcStats.scanTicks;
+    mesh.plcFires = plcStats.logicFires + plcStats.latchFires +
+                    plcStats.scaleFires + plcStats.counterFires +
+                    plcStats.timerFires + plcStats.setpointFires;
     mesh.sendHeartbeat();
 
     // In gateway mode, publish our own battery to serial — remote nodes
@@ -2165,7 +2197,17 @@ void loadBattCfg() {
         battDivider           = e.divider;
         battLowMv             = e.lowMv;
         battRecoverMv         = e.recoverMv;
-        battHibernateEnabled  = (e.hibernateEnabled != 0);
+        // hibernateEnabled must be 0 or 1. Anything else means the byte
+        // was stomped by the earlier HBCFG-addr-500 overlap bug (HBCFG
+        // magic-low = 0xAE clobbered this byte every time HB_INTERVAL
+        // saved). Fall back to the compile-time default rather than
+        // trusting garbage — the user can re-set BATT_HIBERNATE
+        // explicitly if they want a non-default value.
+        if (e.hibernateEnabled <= 1) {
+            battHibernateEnabled = (e.hibernateEnabled != 0);
+        } else {
+            battHibernateEnabled = (BATT_HIBERNATE_DEFAULT != 0);
+        }
         battCfgIsCustom       = true;
     }
 }
@@ -2284,6 +2326,84 @@ inline void checkBatteryAndShutdown()   { }
 inline void loadBattCfg()               { }
 inline void resetBattCfg()              { }
 #endif
+
+// ═══════════════════════════════════════════════════════════════
+// Heartbeat-interval config (EEPROM persistence + runtime override)
+// ═══════════════════════════════════════════════════════════════
+// Lives OUTSIDE the battery #if block — heartbeat cadence is independent
+// of battery monitoring, so a board without an ADC (lora32, xiao-s3)
+// still needs the HB_INTERVAL serial command to work. Earlier layout
+// nested this inside the battery #if and silently broke the build on
+// boards without BOARD_BAT_ADC.
+//
+// Compile-time defaults come from HB_INTERVAL / HB_INTERVAL_SOLAR
+// macros (which Pins.h can override before MeshCore.h sees them). The
+// HB_INTERVAL serial command writes a record here so the override
+// survives reboot without rebuilding.
+//
+// Validation: magic + range checks. Old firmware never wrote this
+// region, so it reads 0xFF... on first new-firmware boot, fails the
+// magic check, defaults apply, no corruption.
+struct __attribute__((packed)) HbCfgEEPROM {
+    uint16_t magic;       // EEPROM_HBCFG_MAGIC
+    uint16_t normalSec;   // override for HB_INTERVAL  (5..3600 valid)
+    uint16_t solarSec;    // override for HB_INTERVAL_SOLAR (same range)
+};
+// 6 bytes total — fits 467..472. AES key ends at byte 466, NDLOC
+// starts at 480, so 7 bytes of clear headroom remain at 473..479.
+
+bool hbCfgIsCustom = false;
+
+void loadHbCfg() {
+    HbCfgEEPROM e;
+    EEPROM.get(EEPROM_HBCFG_ADDR, e);
+    // Magic gate + sane-range gate. Mirrors loadBattCfg's belt-and-braces
+    // approach: a magic-byte collision on garbage data still has to pass
+    // the range check before we use the values, so an old EEPROM that
+    // happened to have 0xBEAE in those bytes (vanishingly unlikely but
+    // possible) still rejects unless the seconds values also look
+    // plausible (5..3600 inclusive — 5 s minimum to avoid flooding,
+    // 1 h maximum so a node never goes silent for more than an hour).
+    if (e.magic == EEPROM_HBCFG_MAGIC
+        && e.normalSec >= 5 && e.normalSec <= 3600
+        && e.solarSec  >= 5 && e.solarSec  <= 3600) {
+        mesh.hbIntervalMs      = (unsigned long)e.normalSec * 1000UL;
+        mesh.hbIntervalSolarMs = (unsigned long)e.solarSec  * 1000UL;
+        hbCfgIsCustom = true;
+    }
+}
+
+void saveHbCfg(unsigned long normalMs, unsigned long solarMs) {
+    // Convert ms → seconds for the on-disk record (uint16_t to keep the
+    // record 6 bytes and clear of EEPROM_MAGIC_ADDR at 508). Clamp on
+    // the way in so an out-of-range caller can't silently truncate to
+    // garbage. Caller (the HB_INTERVAL serial parser) already validates
+    // range, so the clamps below are belt-and-braces.
+    uint16_t nSec = (uint16_t)((normalMs + 500UL) / 1000UL);
+    uint16_t sSec = (uint16_t)((solarMs  + 500UL) / 1000UL);
+    if (nSec < 5)    nSec = 5;
+    if (nSec > 3600) nSec = 3600;
+    if (sSec < 5)    sSec = 5;
+    if (sSec > 3600) sSec = 3600;
+    HbCfgEEPROM e = { EEPROM_HBCFG_MAGIC, nSec, sSec };
+    EEPROM.put(EEPROM_HBCFG_ADDR, e);
+    EEPROM.commit();
+    mesh.hbIntervalMs      = (unsigned long)nSec * 1000UL;
+    mesh.hbIntervalSolarMs = (unsigned long)sSec * 1000UL;
+    hbCfgIsCustom = true;
+}
+
+void resetHbCfg() {
+    // Wipe the magic so loadHbCfg falls back to defaults on next boot.
+    // Zero-init the whole struct so leftover bytes can't accidentally
+    // re-validate against a future magic value.
+    HbCfgEEPROM e = { 0, 0, 0 };
+    EEPROM.put(EEPROM_HBCFG_ADDR, e);
+    EEPROM.commit();
+    mesh.hbIntervalMs      = HB_INTERVAL;
+    mesh.hbIntervalSolarMs = HB_INTERVAL_SOLAR;
+    hbCfgIsCustom = false;
+}
 
 // ═══════════════════════════════════════════════════════════════
 // SECTION: Solar Mode (SX1262 boards only)
@@ -2896,8 +3016,68 @@ String processSetpointCommand(const String& args) {
 
 // Handle SETPOINT command received over mesh (CMD,SETPOINT,...)
 void handleSetpointCmd(const String& args, const String& from) {
-    String resp = processSetpointCommand(args);
     mesh.cmdsExecuted++;
+    // LIST is special: with even a few setpoints the combined
+    // "SETPOINTS,…" reply blows past the 249-byte LoRa frame budget
+    // after AES-GCM + hex + mesh routing wrapper, and mesh.transmitPacket
+    // silently drops it (logs TX_DROP locally but the requester sees
+    // nothing). Confirmed live: 4 setpoints produces a 321-byte payload,
+    // dropped at MeshCore.cpp:314. Paginate like BEACON,LIST does —
+    // one setpoint per packet, count header + END marker, broadcast via
+    // notifyBeaconEvent so the gateway's existing BEACONEVT pass-through
+    // (handleCmd:RSP|BEACONEVT) emits each line as a plain RX,<from>,
+    // SETPOINT,RULE,… that the GUI already displays.
+    if (args == "LIST") {
+        int count = 0;
+        for (int i = 0; i < MAX_SETPOINTS; i++) if (setpoints[i].active) count++;
+        if (count == 0) {
+            bleSend("SETPOINTS,NONE");
+            if (from != "LOCAL") notifyBeaconEvent("SETPOINTS,NONE", true);
+            return;
+        }
+        String countMsg = "SETPOINTS," + String(count);
+        bleSend(countMsg);
+        if (from != "LOCAL") {
+            notifyBeaconEvent(countMsg, true);
+            delay(50);
+        }
+        const char* ops[] = {"GT", "LT", "EQ", "GE", "LE", "NE"};
+        for (int i = 0; i < MAX_SETPOINTS; i++) {
+            if (!setpoints[i].active) continue;
+            String line = "SETPOINT,RULE," + String(i) + "," +
+                          String(setpoints[i].sensorPin) + ":" +
+                          String(ops[setpoints[i].op]) + ":" +
+                          String(setpoints[i].threshold, 1) + "->";
+            if (setpoints[i].actionType == 1) {
+                line += "MSG:" + String(setpoints[i].msgTrue);
+                if (setpoints[i].msgFalse[0]) line += "/" + String(setpoints[i].msgFalse);
+            } else if (setpoints[i].actionType == 2) {
+                line += "PULSE:" + String(setpoints[i].relayPin) + ":" +
+                        String(setpoints[i].pulseMs) + "ms";
+                if (setpoints[i].leavePin > 0 && setpoints[i].leavePulseMs > 0) {
+                    line += "{leave:pin" + String(setpoints[i].leavePin) +
+                            "/" + String(setpoints[i].leavePulseMs) + "ms}";
+                }
+            } else {
+                line += String(setpoints[i].targetNode) + ":" +
+                        String(setpoints[i].relayPin) + ":" +
+                        String(setpoints[i].action);
+            }
+            bleSend(line);
+            if (from != "LOCAL") {
+                notifyBeaconEvent(line, true);
+                delay(50);
+            }
+        }
+        bleSend("SETPOINTS,END");
+        if (from != "LOCAL") notifyBeaconEvent("SETPOINTS,END", true);
+        return;
+    }
+    // All other SETPOINT commands (ADD, CLEAR, DELETE, …) produce short
+    // OK/ERR replies that fit in one frame — keep the original unicast
+    // path so the GUI's pending-deploy tracker keys off the same kind
+    // of reply it always has.
+    String resp = processSetpointCommand(args);
     String mid = mesh.generateMsgID();
     String hex = mesh.encryptMsg(resp);
     String payload = String(mesh.localID) + "," + from + "," + mid + "," +
@@ -3165,16 +3345,41 @@ void checkSetpoints() {
                 }
                 if (clearCondition) {
                     setpoints[i].triggered = false;
-                    setpoints[i].lastFired = now;
-                    // MSG and PULSE both have meaningful falling-edge actions:
-                    //   MSG  → broadcast msgFalse
-                    //   PULSE → pulse the leavePin (if configured)
-                    // RELAY auto-reverts via fireSetpointAction's own logic
-                    // but only if explicitly called — today we don't, to
-                    // preserve historical behaviour for relay setpoints.
-                    if (setpoints[i].actionType == 1 || setpoints[i].actionType == 2) {
-                        if (fireSetpointAction(setpoints[i], rawValue, false))
-                            return;
+                    // Whether the falling edge will actually DO anything.
+                    // For MSG: only if msgFalse is configured. The PLC
+                    // compiler now splits a "Broadcast Msg" block into
+                    // two single-edge setpoints (GE,1 with msgTrue,
+                    // LT,1 with the other msg), so each setpoint's
+                    // msgFalse is empty by design — its falling edge
+                    // is a pure no-op. For PULSE: only if a leave
+                    // pulse is wired. RELAY currently doesn't reach
+                    // this path (the hold-timer path bypasses
+                    // checkSetpoints), so treat it as no effect.
+                    bool fallingHasEffect = false;
+                    if (setpoints[i].actionType == 1) {
+                        fallingHasEffect = (setpoints[i].msgFalse[0] != '\0');
+                    } else if (setpoints[i].actionType == 2) {
+                        fallingHasEffect = (setpoints[i].leavePin > 0 &&
+                                            setpoints[i].leavePulseMs > 0);
+                    }
+                    // Only update lastFired if the action actually fires.
+                    // Previously every falling edge bumped lastFired
+                    // even when fireSetpointAction returned early on an
+                    // empty msgFalse. That left the cooldown timer
+                    // freshly set by an unobservable edge, so the NEXT
+                    // opposite-direction toggle (the LT,1 setpoint's
+                    // rising edge that should fire "Gate Close") was
+                    // within cooldown and silently blocked. Confirmed
+                    // live on hardware: with V200 toggled 1→0→1 inside
+                    // the 10s cooldown, only the first rising-edge
+                    // broadcast ever fired; without this fix the
+                    // following V200=0 transition never broadcast.
+                    if (fallingHasEffect) {
+                        setpoints[i].lastFired = now;
+                        if (setpoints[i].actionType == 1 || setpoints[i].actionType == 2) {
+                            if (fireSetpointAction(setpoints[i], rawValue, false))
+                                return;
+                        }
                     }
                 }
             }
@@ -4945,6 +5150,35 @@ void handleCmd(const String& from, const String& cmdBody) {
     String action = (c1 > 0) ? cmdBody.substring(0, c1) : cmdBody;
     String rest   = (c1 > 0) ? cmdBody.substring(c1 + 1) : "";
 
+    // CMD,RSP,...  → reply to a previous CMD,GET/SET/PULSE from us.
+    // CMD,BEACONEVT,... → broadcast event from notifyBeaconEvent on
+    //                     another node (BEACON,LIST reply, BEACON,
+    //                     TRIGGERED edge events).
+    // Neither is a command DIRECTED AT us — they're traffic FROM
+    // another node that the MeshCore dispatch routed here only because
+    // the body happens to start with "CMD,". Without this pass-through
+    // they were getting silently consumed: action="RSP" / "BEACONEVT"
+    // has no handler below, return falls off the end, response never
+    // reaches the gateway's USB serial, GUI shows "no response" for
+    // every CMD,GET / BEACON,LIST. Emit them as an RX line so the
+    // gateway's GUI sees them the same way it sees any other remote-
+    // node reply (which goes through handleMessage's bleSend RX, line
+    // — matched here for consistency).
+    if (action == "RSP") {
+        // Keep the CMD, prefix so existing CMD,RSP parsers still
+        // recognise the payload shape.
+        bleSend("RX," + from + ",CMD," + cmdBody);
+        return;
+    }
+    if (action == "BEACONEVT") {
+        // Strip the wrapper so the inner event (BEACONS,NONE /
+        // BEACONS,N / BEACON,RULE,... / BEACON,TRIGGERED,...) appears
+        // as a plain RX line — same shape the GUI already parses for
+        // those tags coming over local BLE serial.
+        bleSend("RX," + from + "," + rest);
+        return;
+    }
+
     if (action == "SET") {
         int c2 = rest.indexOf(',');
         if (c2 < 0) return;
@@ -6155,9 +6389,13 @@ void handleSerialConfig() {
     else if (line == "BATT_HIBERNATE") {
         // Query current hibernate state. With no argument, just print
         // the current value so the operator can confirm before changing it.
+#if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
         Serial.printf("BATT_HIBERNATE,%s,default=%s\n",
                       battHibernateEnabled ? "ON" : "OFF",
                       (BATT_HIBERNATE_DEFAULT != 0) ? "ON" : "OFF");
+#else
+        Serial.println("BATT_HIBERNATE,N/A,no battery monitoring on this board");
+#endif
     }
     else if (line == "BATT_HIBERNATE ON" || line == "BATT_HIBERNATE OFF") {
         // Toggle the low-voltage auto-shutdown. When OFF, the firmware
@@ -6210,6 +6448,46 @@ void handleSerialConfig() {
 #else
         Serial.println("ERR: no battery monitoring on this board");
 #endif
+    }
+    else if (line == "HB_INTERVAL") {
+        // Query — print current normal + solar values plus compile-time
+        // defaults so the operator can tell at a glance whether an EEPROM
+        // override is in effect.
+        Serial.printf("HB_INTERVAL,normal=%lums,solar=%lums,source=%s\n",
+                      mesh.hbIntervalMs, mesh.hbIntervalSolarMs,
+                      hbCfgIsCustom ? "EEPROM" : "default");
+        Serial.printf("Defaults (MeshCore.h/Pins.h): normal=%lums, solar=%lums\n",
+                      (unsigned long)HB_INTERVAL, (unsigned long)HB_INTERVAL_SOLAR);
+        Serial.println("Set:   HB_INTERVAL <normalMs> [solarMs]   range 5000..3600000");
+        Serial.println("Reset: HB_INTERVAL_RESET");
+    }
+    else if (line.startsWith("HB_INTERVAL ")) {
+        // Set — accept either "HB_INTERVAL <normal>" or
+        // "HB_INTERVAL <normal> <solar>". Leaves solar alone if a single
+        // value is given so an operator tuning normal-mode doesn't
+        // accidentally drop the solar-mode cadence.
+        String args = line.substring(12); args.trim();
+        long n = -1, s = -1;
+        int sp = args.indexOf(' ');
+        if (sp > 0) {
+            n = args.substring(0, sp).toInt();
+            s = args.substring(sp + 1).toInt();
+        } else {
+            n = args.toInt();
+            s = (long)mesh.hbIntervalSolarMs;  // keep current solar
+        }
+        if (n < 5000 || n > 3600000 || s < 5000 || s > 3600000) {
+            Serial.println("ERR: HB_INTERVAL out of range (5000..3600000 ms each)");
+        } else {
+            saveHbCfg((unsigned long)n, (unsigned long)s);
+            Serial.printf("OK: HB_INTERVAL normal=%ldms solar=%ldms (saved to EEPROM)\n",
+                          n, s);
+        }
+    }
+    else if (line == "HB_INTERVAL_RESET") {
+        resetHbCfg();
+        Serial.printf("OK: HB_INTERVAL reset to defaults (normal=%lums solar=%lums)\n",
+                      (unsigned long)HB_INTERVAL, (unsigned long)HB_INTERVAL_SOLAR);
     }
     else if (line == "SBIN" || line.startsWith("SBIN ")) {
         // Binary SDATA mode disabled in firmware (caused gateway losing
@@ -7345,6 +7623,11 @@ void setup() {
     // EEPROM up early so the battery check honours any runtime override.
     EEPROM.begin(EEPROM_SIZE);
     loadBattCfg();
+    // Heartbeat interval override (HB_INTERVAL serial command). Writes
+    // mesh.hbIntervalMs / hbIntervalSolarMs from EEPROM if a valid
+    // record exists, otherwise leaves the inline-initialiser defaults
+    // (HB_INTERVAL / HB_INTERVAL_SOLAR macros) intact.
+    loadHbCfg();
     // Binary SDATA mode disabled — binarySDATA is now constexpr false.
 
     // ─── Early low-battery recovery check ──────────────────────
@@ -7568,10 +7851,19 @@ void loop() {
         handleBleAckRetry();
         mesh.processPendingForwards();
 
-        // Heartbeat (60s interval in solar mode to save TX power)
+        // Heartbeat (solar default 60s; runtime-overridable via
+        // HB_INTERVAL serial command — see mesh.hbIntervalSolarMs).
+        // Multiplied by the adaptive backoff so the cadence
+        // automatically stretches when the duty-cycle accumulator is
+        // approaching the local cap. 30-minute hard ceiling so the
+        // operator never loses visibility for longer than that
+        // regardless of how much the mesh is loaded.
         if (millis() > nextHeartbeatTime) {
             sendHeartbeatWithFlags();
-            nextHeartbeatTime = millis() + HB_INTERVAL_SOLAR + random(-5000, 5000);
+            unsigned long adj = mesh.hbIntervalSolarMs *
+                                (unsigned long)mesh.hbIntervalMultiplier();
+            if (adj > 1800000UL) adj = 1800000UL;   // 30 min ceiling
+            nextHeartbeatTime = millis() + adj + random(-5000, 5000);
             if (BOARD_LED >= 0) { digitalWrite(BOARD_LED, HIGH); delay(2); digitalWrite(BOARD_LED, LOW); }
         }
 
@@ -7651,10 +7943,18 @@ void loop() {
         radioStartListening();
     }
 
-    // 3. Heartbeat
+    // 3. Heartbeat (normal-mode default 30s; runtime-overridable via
+    // HB_INTERVAL serial command — see mesh.hbIntervalMs). Multiplied
+    // by the adaptive backoff so the cadence automatically stretches
+    // when the duty-cycle accumulator is approaching the local cap.
+    // 30-minute hard ceiling so the operator never loses visibility
+    // for longer than that regardless of how much the mesh is loaded.
     if (millis() > nextHeartbeatTime) {
         sendHeartbeatWithFlags();
-        nextHeartbeatTime = millis() + HB_INTERVAL + random(-2000, 2000);
+        unsigned long adj = mesh.hbIntervalMs *
+                            (unsigned long)mesh.hbIntervalMultiplier();
+        if (adj > 1800000UL) adj = 1800000UL;   // 30 min ceiling
+        nextHeartbeatTime = millis() + adj + random(-2000, 2000);
         if (BOARD_LED >= 0) { digitalWrite(BOARD_LED, HIGH); delay(10); digitalWrite(BOARD_LED, LOW); }
     }
 
