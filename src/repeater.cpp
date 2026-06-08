@@ -2242,78 +2242,6 @@ void resetBattCfg() {
     battCfgIsCustom       = false;
 }
 
-// ═══════════════════════════════════════════════════════════════
-// Heartbeat-interval config (EEPROM persistence + runtime override)
-// ═══════════════════════════════════════════════════════════════
-// Mirrors BattCfgEEPROM exactly. Compile-time defaults come from
-// HB_INTERVAL / HB_INTERVAL_SOLAR macros (which Pins.h can override
-// before MeshCore.h sees them). The HB_INTERVAL serial command writes
-// a record here so the override survives reboot without rebuilding.
-//
-// Validation: magic + range checks. Old firmware never wrote this
-// region, so it reads 0xFF... on first new-firmware boot, fails the
-// magic check, defaults apply, no corruption.
-struct __attribute__((packed)) HbCfgEEPROM {
-    uint16_t magic;       // EEPROM_HBCFG_MAGIC
-    uint16_t normalSec;   // override for HB_INTERVAL  (5..3600 valid)
-    uint16_t solarSec;    // override for HB_INTERVAL_SOLAR (same range)
-};
-// 6 bytes total — fits 467..472. AES key ends at byte 466, NDLOC
-// starts at 480, so 7 bytes of clear headroom remain at 473..479.
-
-bool hbCfgIsCustom = false;
-
-void loadHbCfg() {
-    HbCfgEEPROM e;
-    EEPROM.get(EEPROM_HBCFG_ADDR, e);
-    // Magic gate + sane-range gate. Mirrors loadBattCfg's belt-and-braces
-    // approach: a magic-byte collision on garbage data still has to pass
-    // the range check before we use the values, so an old EEPROM that
-    // happened to have 0xBEAE in those bytes (vanishingly unlikely but
-    // possible) still rejects unless the seconds values also look
-    // plausible (5..3600 inclusive — 5 s minimum to avoid flooding,
-    // 1 h maximum so a node never goes silent for more than an hour).
-    if (e.magic == EEPROM_HBCFG_MAGIC
-        && e.normalSec >= 5 && e.normalSec <= 3600
-        && e.solarSec  >= 5 && e.solarSec  <= 3600) {
-        mesh.hbIntervalMs      = (unsigned long)e.normalSec * 1000UL;
-        mesh.hbIntervalSolarMs = (unsigned long)e.solarSec  * 1000UL;
-        hbCfgIsCustom = true;
-    }
-}
-
-void saveHbCfg(unsigned long normalMs, unsigned long solarMs) {
-    // Convert ms → seconds for the on-disk record (uint16_t to keep the
-    // record 6 bytes and clear of EEPROM_MAGIC_ADDR at 508). Clamp on
-    // the way in so an out-of-range caller can't silently truncate to
-    // garbage. Caller (the HB_INTERVAL serial parser) already validates
-    // range, so the clamps below are belt-and-braces.
-    uint16_t nSec = (uint16_t)((normalMs + 500UL) / 1000UL);
-    uint16_t sSec = (uint16_t)((solarMs  + 500UL) / 1000UL);
-    if (nSec < 5)    nSec = 5;
-    if (nSec > 3600) nSec = 3600;
-    if (sSec < 5)    sSec = 5;
-    if (sSec > 3600) sSec = 3600;
-    HbCfgEEPROM e = { EEPROM_HBCFG_MAGIC, nSec, sSec };
-    EEPROM.put(EEPROM_HBCFG_ADDR, e);
-    EEPROM.commit();
-    mesh.hbIntervalMs      = (unsigned long)nSec * 1000UL;
-    mesh.hbIntervalSolarMs = (unsigned long)sSec * 1000UL;
-    hbCfgIsCustom = true;
-}
-
-void resetHbCfg() {
-    // Wipe the magic so loadHbCfg falls back to defaults on next boot.
-    // Zero-init the whole struct so leftover bytes can't accidentally
-    // re-validate against a future magic value.
-    HbCfgEEPROM e = { 0, 0, 0 };
-    EEPROM.put(EEPROM_HBCFG_ADDR, e);
-    EEPROM.commit();
-    mesh.hbIntervalMs      = HB_INTERVAL;
-    mesh.hbIntervalSolarMs = HB_INTERVAL_SOLAR;
-    hbCfgIsCustom = false;
-}
-
 // Returns battery voltage in millivolts, or -1 if no battery monitoring.
 // Pulses ADC_CTRL to its ACTIVE level (HIGH or LOW per board), takes 8
 // averaged samples via ESP32's calibrated reading, then returns to IDLE.
@@ -2398,6 +2326,84 @@ inline void checkBatteryAndShutdown()   { }
 inline void loadBattCfg()               { }
 inline void resetBattCfg()              { }
 #endif
+
+// ═══════════════════════════════════════════════════════════════
+// Heartbeat-interval config (EEPROM persistence + runtime override)
+// ═══════════════════════════════════════════════════════════════
+// Lives OUTSIDE the battery #if block — heartbeat cadence is independent
+// of battery monitoring, so a board without an ADC (lora32, xiao-s3)
+// still needs the HB_INTERVAL serial command to work. Earlier layout
+// nested this inside the battery #if and silently broke the build on
+// boards without BOARD_BAT_ADC.
+//
+// Compile-time defaults come from HB_INTERVAL / HB_INTERVAL_SOLAR
+// macros (which Pins.h can override before MeshCore.h sees them). The
+// HB_INTERVAL serial command writes a record here so the override
+// survives reboot without rebuilding.
+//
+// Validation: magic + range checks. Old firmware never wrote this
+// region, so it reads 0xFF... on first new-firmware boot, fails the
+// magic check, defaults apply, no corruption.
+struct __attribute__((packed)) HbCfgEEPROM {
+    uint16_t magic;       // EEPROM_HBCFG_MAGIC
+    uint16_t normalSec;   // override for HB_INTERVAL  (5..3600 valid)
+    uint16_t solarSec;    // override for HB_INTERVAL_SOLAR (same range)
+};
+// 6 bytes total — fits 467..472. AES key ends at byte 466, NDLOC
+// starts at 480, so 7 bytes of clear headroom remain at 473..479.
+
+bool hbCfgIsCustom = false;
+
+void loadHbCfg() {
+    HbCfgEEPROM e;
+    EEPROM.get(EEPROM_HBCFG_ADDR, e);
+    // Magic gate + sane-range gate. Mirrors loadBattCfg's belt-and-braces
+    // approach: a magic-byte collision on garbage data still has to pass
+    // the range check before we use the values, so an old EEPROM that
+    // happened to have 0xBEAE in those bytes (vanishingly unlikely but
+    // possible) still rejects unless the seconds values also look
+    // plausible (5..3600 inclusive — 5 s minimum to avoid flooding,
+    // 1 h maximum so a node never goes silent for more than an hour).
+    if (e.magic == EEPROM_HBCFG_MAGIC
+        && e.normalSec >= 5 && e.normalSec <= 3600
+        && e.solarSec  >= 5 && e.solarSec  <= 3600) {
+        mesh.hbIntervalMs      = (unsigned long)e.normalSec * 1000UL;
+        mesh.hbIntervalSolarMs = (unsigned long)e.solarSec  * 1000UL;
+        hbCfgIsCustom = true;
+    }
+}
+
+void saveHbCfg(unsigned long normalMs, unsigned long solarMs) {
+    // Convert ms → seconds for the on-disk record (uint16_t to keep the
+    // record 6 bytes and clear of EEPROM_MAGIC_ADDR at 508). Clamp on
+    // the way in so an out-of-range caller can't silently truncate to
+    // garbage. Caller (the HB_INTERVAL serial parser) already validates
+    // range, so the clamps below are belt-and-braces.
+    uint16_t nSec = (uint16_t)((normalMs + 500UL) / 1000UL);
+    uint16_t sSec = (uint16_t)((solarMs  + 500UL) / 1000UL);
+    if (nSec < 5)    nSec = 5;
+    if (nSec > 3600) nSec = 3600;
+    if (sSec < 5)    sSec = 5;
+    if (sSec > 3600) sSec = 3600;
+    HbCfgEEPROM e = { EEPROM_HBCFG_MAGIC, nSec, sSec };
+    EEPROM.put(EEPROM_HBCFG_ADDR, e);
+    EEPROM.commit();
+    mesh.hbIntervalMs      = (unsigned long)nSec * 1000UL;
+    mesh.hbIntervalSolarMs = (unsigned long)sSec * 1000UL;
+    hbCfgIsCustom = true;
+}
+
+void resetHbCfg() {
+    // Wipe the magic so loadHbCfg falls back to defaults on next boot.
+    // Zero-init the whole struct so leftover bytes can't accidentally
+    // re-validate against a future magic value.
+    HbCfgEEPROM e = { 0, 0, 0 };
+    EEPROM.put(EEPROM_HBCFG_ADDR, e);
+    EEPROM.commit();
+    mesh.hbIntervalMs      = HB_INTERVAL;
+    mesh.hbIntervalSolarMs = HB_INTERVAL_SOLAR;
+    hbCfgIsCustom = false;
+}
 
 // ═══════════════════════════════════════════════════════════════
 // SECTION: Solar Mode (SX1262 boards only)
@@ -6383,9 +6389,13 @@ void handleSerialConfig() {
     else if (line == "BATT_HIBERNATE") {
         // Query current hibernate state. With no argument, just print
         // the current value so the operator can confirm before changing it.
+#if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
         Serial.printf("BATT_HIBERNATE,%s,default=%s\n",
                       battHibernateEnabled ? "ON" : "OFF",
                       (BATT_HIBERNATE_DEFAULT != 0) ? "ON" : "OFF");
+#else
+        Serial.println("BATT_HIBERNATE,N/A,no battery monitoring on this board");
+#endif
     }
     else if (line == "BATT_HIBERNATE ON" || line == "BATT_HIBERNATE OFF") {
         // Toggle the low-voltage auto-shutdown. When OFF, the firmware
