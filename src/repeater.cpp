@@ -5197,10 +5197,16 @@ void handleCmd(const String& from, const String& cmdBody) {
 
     if (action == "SET") {
         int c2 = rest.indexOf(',');
-        if (c2 < 0) return;
+        if (c2 < 0) {
+            sendMeshReply(from, "CMD,RSP,SET,ERR,parse");
+            return;
+        }
         int pin = rest.substring(0, c2).toInt();
         int val = rest.substring(c2 + 1).toInt();
-        if (!isPinConfigurable(pin)) return;
+        if (!isPinConfigurable(pin)) {
+            sendMeshReply(from, "CMD,RSP,SET,ERR,badpin");
+            return;
+        }
         setupDigitalOutput(pin);
         setDigital(pin, val);
         // Deadman is a safety latch for HARDWARE OUTPUT relays — if
@@ -5226,7 +5232,10 @@ void handleCmd(const String& from, const String& cmdBody) {
     }
     else if (action == "GET") {
         int pin = rest.toInt();
-        if (!isPinConfigurable(pin)) return;
+        if (!isPinConfigurable(pin)) {
+            sendMeshReply(from, "CMD,RSP,GET,ERR,badpin");
+            return;
+        }
         int value = readSensorPin(pin);
         mesh.cmdsExecuted++;
         String mid = mesh.generateMsgID();
@@ -5239,15 +5248,24 @@ void handleCmd(const String& from, const String& cmdBody) {
     }
     else if (action == "PULSE") {
         int c2 = rest.indexOf(',');
-        if (c2 < 0) return;
+        if (c2 < 0) {
+            sendMeshReply(from, "CMD,RSP,PULSE,ERR,parse");
+            return;
+        }
         int pin = rest.substring(0, c2).toInt();
         int ms  = rest.substring(c2 + 1).toInt();
-        if (!isPinConfigurable(pin) || ms <= 0 || ms > PULSE_MAX_MS) return;
+        if (!isPinConfigurable(pin) || ms <= 0 || ms > PULSE_MAX_MS) {
+            sendMeshReply(from, "CMD,RSP,PULSE,ERR,badval");
+            return;
+        }
         setupDigitalOutput(pin);
         // Non-blocking: schedule the pulse and let checkPulseTimers() clear
         // the pin when the deadline expires. Firmware loop stays responsive
         // (heartbeats, mesh RX, etc. keep running during the pulse).
-        if (!startPulse((uint8_t)pin, (uint16_t)ms)) return;
+        if (!startPulse((uint8_t)pin, (uint16_t)ms)) {
+            sendMeshReply(from, "CMD,RSP,PULSE,ERR,bufful");
+            return;
+        }
         mesh.cmdsExecuted++;
         // Acknowledge immediately — the pulse is now in flight. The "0" in
         // the response is the *eventual* state once the pulse completes;
