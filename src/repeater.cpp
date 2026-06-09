@@ -5147,17 +5147,21 @@ void executeAutoPoll() {
 // Send a CMD,RSP-style reply over the mesh back to `from`, AND echo to
 // local USB serial. Used by the mesh-routable device-config commands
 // added below (HB_INTERVAL, NDLOC, BATT_HIBERNATE, BATT_CFG, etc.).
-// Mirrors the inline pattern used by SET/GET/PULSE so the wire format,
-// bookkeeping, and routing are identical to existing mesh replies —
-// no new behaviour, just deduped boilerplate.
+// Mirrors the inline pattern used by SET/GET/PULSE for mesh-originated
+// callers, plus the from=="LOCAL" guard the LIST handler at line 5247
+// uses: a USB-originated CMD arrives with from="LOCAL", and we must
+// NOT transmit a unicast reply to strtol("LOCAL",16)=0 (would send
+// garbage to node 0x0000). USB caller still sees the bleSend echo on
+// the local serial port so the response surfaces either way.
 static void sendMeshReply(const String& from, const String& rsp) {
+    bleSend(rsp);
+    if (from == "LOCAL") return;
     mesh.cmdsExecuted++;
     String mid = mesh.generateMsgID();
     String hex = mesh.encryptMsg(rsp);
     String payload = String(mesh.localID) + "," + from + "," + mid + "," +
                      String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
     mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
-    bleSend(rsp);
 }
 
 // CMD handler — called by MeshCore when a CMD arrives for us
