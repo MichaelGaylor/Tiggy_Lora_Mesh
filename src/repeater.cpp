@@ -5144,6 +5144,22 @@ void executeAutoPoll() {
     bleSend(sdata);  // Also notify local BLE client
 }
 
+// Send a CMD,RSP-style reply over the mesh back to `from`, AND echo to
+// local USB serial. Used by the mesh-routable device-config commands
+// added below (HB_INTERVAL, NDLOC, BATT_HIBERNATE, BATT_CFG, etc.).
+// Mirrors the inline pattern used by SET/GET/PULSE so the wire format,
+// bookkeeping, and routing are identical to existing mesh replies —
+// no new behaviour, just deduped boilerplate.
+static void sendMeshReply(const String& from, const String& rsp) {
+    mesh.cmdsExecuted++;
+    String mid = mesh.generateMsgID();
+    String hex = mesh.encryptMsg(rsp);
+    String payload = String(mesh.localID) + "," + from + "," + mid + "," +
+                     String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+    mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+    bleSend(rsp);
+}
+
 // CMD handler — called by MeshCore when a CMD arrives for us
 void handleCmd(const String& from, const String& cmdBody) {
     int c1 = cmdBody.indexOf(',');
@@ -5337,6 +5353,142 @@ void handleCmd(const String& from, const String& cmdBody) {
     }
     else if (action == "DEVICE") {
         handleDeviceCmd(rest, from);
+    }
+    // ─── Mesh-routable device-config commands ─────────────────────
+    // Parallels of HB_INTERVAL / NDLOC / BATT_* from handleSerialConfig so
+    // the GUI console can manage a remote node without USB access. Reply
+    // shape: "CMD,RSP,<verb>,..." — the gateway-side RX-unwrap path at
+    // [gateway_gui.py:3289-3301] routes these into the console output.
+    // Range checks mirror the USB-side parsers verbatim so failure modes
+    // are identical across the two surfaces.
+    else if (action == "HB_INTERVAL") {
+        if (rest.length() == 0) {
+            // Query
+            String rsp = "CMD,RSP,HB_INTERVAL,normal=" + String(mesh.hbIntervalMs) +
+                         "ms,solar=" + String(mesh.hbIntervalSolarMs) +
+                         "ms,source=" + String(hbCfgIsCustom ? "EEPROM" : "default");
+            sendMeshReply(from, rsp);
+        } else {
+            // Set: "<normalMs>" or "<normalMs>,<solarMs>"
+            long n = -1, s = -1;
+            int sp = rest.indexOf(',');
+            if (sp > 0) {
+                n = rest.substring(0, sp).toInt();
+                s = rest.substring(sp + 1).toInt();
+            } else {
+                n = rest.toInt();
+                s = (long)mesh.hbIntervalSolarMs;
+            }
+            if (n < 5000 || n > 3600000 || s < 5000 || s > 3600000) {
+                sendMeshReply(from, "CMD,RSP,HB_INTERVAL,ERR,range");
+            } else {
+                saveHbCfg((unsigned long)n, (unsigned long)s);
+                String rsp = "CMD,RSP,HB_INTERVAL,OK,normal=" + String(n) +
+                             "ms,solar=" + String(s) + "ms";
+                sendMeshReply(from, rsp);
+            }
+        }
+    }
+    else if (action == "HB_INTERVAL_RESET") {
+        resetHbCfg();
+        String rsp = "CMD,RSP,HB_INTERVAL,RESET,normal=" +
+                     String((unsigned long)HB_INTERVAL) +
+                     "ms,solar=" + String((unsigned long)HB_INTERVAL_SOLAR) + "ms";
+        sendMeshReply(from, rsp);
+    }
+    else if (action == "NDLOC") {
+        // Set node static location: "<lat>,<lon>" — lat -90..90, lon -180..180.
+        // Range-check (the USB parser doesn't; we tighten it here so a
+        // malformed mesh message can't write nonsense into EEPROM).
+        int sp = rest.indexOf(',');
+        if (sp <= 0) {
+            sendMeshReply(from, "CMD,RSP,NDLOC,ERR,format");
+        } else {
+            float lat = rest.substring(0, sp).toFloat();
+            float lon = rest.substring(sp + 1).toFloat();
+            if (lat < -90.0f || lat > 90.0f || lon < -180.0f || lon > 180.0f) {
+                sendMeshReply(from, "CMD,RSP,NDLOC,ERR,range");
+            } else {
+                nodeLat = lat;
+                nodeLon = lon;
+                EEPROM.put(EEPROM_NDLOC_ADDR, nodeLat);
+                EEPROM.put(EEPROM_NDLOC_ADDR + 4, nodeLon);
+                EEPROM.commit();
+                String rsp = "CMD,RSP,NDLOC,OK," +
+                             String(nodeLat, 6) + "," + String(nodeLon, 6);
+                sendMeshReply(from, rsp);
+            }
+        }
+    }
+    else if (action == "BATT_HIBERNATE") {
+#if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
+        if (rest.length() == 0) {
+            // Query
+            String rsp = String("CMD,RSP,BATT_HIBERNATE,") +
+                         (battHibernateEnabled ? "ON" : "OFF") +
+                         ",default=" +
+                         ((BATT_HIBERNATE_DEFAULT != 0) ? "ON" : "OFF");
+            sendMeshReply(from, rsp);
+        } else if (rest == "ON" || rest == "OFF") {
+            bool on = (rest == "ON");
+            saveBattHibernateFlag(on);
+            String rsp = String("CMD,RSP,BATT_HIBERNATE,OK,") +
+                         (on ? "ON" : "OFF");
+            sendMeshReply(from, rsp);
+        } else {
+            sendMeshReply(from, "CMD,RSP,BATT_HIBERNATE,ERR,format");
+        }
+#else
+        sendMeshReply(from, "CMD,RSP,BATT_HIBERNATE,ERR,no battery monitoring");
+#endif
+    }
+    else if (action == "BATT_CFG") {
+#if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
+        if (rest.length() == 0) {
+            // Query
+            String rsp = "CMD,RSP,BATT_CFG,div=" + String(battDivider, 3) +
+                         ",low=" + String((int)battLowMv) +
+                         ",recover=" + String((int)battRecoverMv) +
+                         ",hibernate=" + String(battHibernateEnabled ? "ON" : "OFF") +
+                         ",source=" + String(battCfgIsCustom ? "EEPROM" : "default");
+            sendMeshReply(from, rsp);
+        } else {
+            // Set: "<div>,<low>,<recover>" — three CSV floats/ints
+            int c2 = rest.indexOf(',');
+            int c3 = (c2 > 0) ? rest.indexOf(',', c2 + 1) : -1;
+            if (c2 <= 0 || c3 <= 0) {
+                sendMeshReply(from, "CMD,RSP,BATT_CFG,ERR,format");
+            } else {
+                float d = rest.substring(0, c2).toFloat();
+                int low = rest.substring(c2 + 1, c3).toInt();
+                int rec = rest.substring(c3 + 1).toInt();
+                if (d < 0.5f || d > 50.0f ||
+                    low < 1000 || low > 60000 ||
+                    rec <= low || rec > 60000) {
+                    sendMeshReply(from, "CMD,RSP,BATT_CFG,ERR,range");
+                } else {
+                    saveBattCfg(d, (uint16_t)low, (uint16_t)rec);
+                    String rsp = "CMD,RSP,BATT_CFG,OK,div=" + String(d, 3) +
+                                 ",low=" + String(low) +
+                                 ",recover=" + String(rec);
+                    sendMeshReply(from, rsp);
+                }
+            }
+        }
+#else
+        sendMeshReply(from, "CMD,RSP,BATT_CFG,ERR,no battery monitoring");
+#endif
+    }
+    else if (action == "BATT_CFG_RESET") {
+#if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
+        resetBattCfg();
+        String rsp = "CMD,RSP,BATT_CFG,RESET,div=" + String(battDivider, 3) +
+                     ",low=" + String((int)battLowMv) +
+                     ",recover=" + String((int)battRecoverMv);
+        sendMeshReply(from, rsp);
+#else
+        sendMeshReply(from, "CMD,RSP,BATT_CFG,ERR,no battery monitoring");
+#endif
     }
     else if (action == "B") {
         // Binary PLC deploy: rest is the base64-encoded binary blob. We
