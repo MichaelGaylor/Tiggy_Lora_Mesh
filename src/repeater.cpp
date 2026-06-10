@@ -499,6 +499,7 @@ bool hasActiveOledDevice() {
 // last OLED block goes away.
 extern unsigned long lastOledRefresh;
 
+void saveDevicesTable();  // forward — defined alongside savePlcTables much later
 void clearAllDevices() {
     bool hadOled = hasActiveOledDevice();
     for (int i = 0; i < MAX_DEVICES; i++) {
@@ -515,6 +516,9 @@ void clearAllDevices() {
     // VL53L0X/L1X will re-init from scratch (necessary because the
     // user may have re-wired or power-cycled the sensor).
     vl53ResetState();
+    // Persist the wipe so a reboot before the next DEVICE,ADD doesn't
+    // restore stale device configs from a prior session.
+    saveDevicesTable();
 }
 
 // Find free or matching-key device slot. For most devices the "key" is
@@ -2629,6 +2633,8 @@ void setupGPIO() {
 // than putting the impl with the other EEPROM code.
 void savePlcTables();
 void loadPlcTables();
+void saveDevicesTable();
+void loadDevicesTable();
 
 // Core timer logic — returns response string, used by both mesh and BLE paths
 String processTimerCommand(const String& args) {
@@ -5108,6 +5114,12 @@ String processDeviceCommand(const String& args) {
     int slot = allocDeviceSlot(type, tmp.pin1, tmp.i2cAddr);
     if (slot < 0) return "ERR,DEVICE,FULL";
     devices[slot] = tmp;
+    // Persist after every successful install so a reboot doesn't lose
+    // the peripheral config. Without this, the gateway had to re-emit
+    // every DEVICE,ADD after each node reboot even though the
+    // SETPOINT rules that consumed the device's output vpins already
+    // survived (via savePlcTables).
+    saveDevicesTable();
     return String("OK,DEVICE,ADD,") + typeStr;
 }
 
@@ -7098,6 +7110,18 @@ void loadBeaconRules() {
 //   1 — initial layout (SETPOINT/LOGIC/COUNTER/LATCH/SCALE/TIMER)
 //   2 — SetpointRule gained `cooldownMs` (per-rule action_gap override)
 #define EEPROM_PLC_LAYOUT_VER   2
+
+// ─── DEVICE peripheral persistence ──────────────────────────
+// Mirrors the PLC table pattern but with its OWN magic byte and
+// version so it stays backward-compatible with EEPROM blobs from
+// firmware versions that didn't persist devices. Placed immediately
+// AFTER the PLC table block (eeprom_dev_addr = eeprom_plc_end_addr)
+// so it naturally adapts when the PLC tables grow. Runtime overflow
+// guard skips the save if the combined region exceeds EEPROM_SIZE.
+// Distinct magic from EEPROM_PLC_MAGIC_VAL so the two regions can't
+// be confused if a future refactor moves addresses around.
+#define EEPROM_DEV_MAGIC_VAL    0xCD
+#define EEPROM_DEV_LAYOUT_VER   1
 // Header layout starting at EEPROM_PLC_BASE:
 //   0       magic    (1 B)
 //   1       version  (1 B)
@@ -7115,6 +7139,11 @@ static int eeprom_plc_latch_addr    = 0;
 static int eeprom_plc_scale_addr    = 0;
 static int eeprom_plc_timer_addr    = 0;
 static int eeprom_plc_end_addr      = 0;
+// Device persistence region — header(3 bytes: magic+ver+sizeof) + array.
+// Computed inside plcOffsetsInit() so the dynamic placement adapts
+// automatically when PLC table sizes change between firmware builds.
+static int eeprom_dev_addr          = 0;
+static int eeprom_dev_end_addr      = 0;
 
 static void plcOffsetsInit() {
     if (eeprom_plc_setpoint_addr) return;  // already computed
@@ -7125,6 +7154,10 @@ static void plcOffsetsInit() {
     eeprom_plc_scale_addr    = eeprom_plc_latch_addr    + sizeof(latchRules);
     eeprom_plc_timer_addr    = eeprom_plc_scale_addr    + sizeof(scaleRules);
     eeprom_plc_end_addr      = eeprom_plc_timer_addr    + sizeof(timers);
+    // DEVICE region starts immediately after PLC tables. Header is 3
+    // bytes (magic + version + sizeof low byte) followed by the array.
+    eeprom_dev_addr          = eeprom_plc_end_addr;
+    eeprom_dev_end_addr      = eeprom_dev_addr + 3 + sizeof(devices);
 }
 
 void savePlcTables() {
@@ -7239,6 +7272,67 @@ void loadPlcTables() {
         timers[i].nextAt = 0;
     }
     debugPrint("PLC: loaded tables from EEPROM");
+}
+
+// ─── DEVICE persistence ─────────────────────────────────────
+// Persist the peripheral device table (DHT, BME280, OLED, I2C, ToF,
+// etc.) so it survives reboot the same way SETPOINT/LOGIC/COUNTER
+// already do. Before this, every node reboot meant the gateway had
+// to redeploy every DEVICE,ADD even though the SETPOINT rules that
+// depended on those peripherals' output vpins WERE already persisted.
+// Result: sensor vpins fed stale data after reboot until the gateway
+// noticed and redeployed.
+//
+// Stored as a separate region (own magic + version) immediately after
+// the PLC tables. Independent of EEPROM_PLC_LAYOUT_VER so adding this
+// doesn't invalidate existing PLC blobs.
+void saveDevicesTable() {
+    plcOffsetsInit();
+    if (eeprom_dev_end_addr > EEPROM_SIZE) {
+        debugPrint("DEV: persist SKIPPED — region exceeds EEPROM_SIZE");
+        return;
+    }
+    EEPROM.write(eeprom_dev_addr + 0, EEPROM_DEV_MAGIC_VAL);
+    EEPROM.write(eeprom_dev_addr + 1, EEPROM_DEV_LAYOUT_VER);
+    EEPROM.write(eeprom_dev_addr + 2, (uint8_t)(sizeof(devices) & 0xFF));
+    EEPROM.put(eeprom_dev_addr + 3, devices);
+    EEPROM.commit();
+}
+
+void loadDevicesTable() {
+    plcOffsetsInit();
+    if (eeprom_dev_end_addr > EEPROM_SIZE) {
+        debugPrint("DEV: persist DISABLED — region exceeds EEPROM_SIZE");
+        return;
+    }
+    uint8_t magic   = EEPROM.read(eeprom_dev_addr + 0);
+    uint8_t version = EEPROM.read(eeprom_dev_addr + 1);
+    if (magic != EEPROM_DEV_MAGIC_VAL) {
+        // Fresh EEPROM (or older firmware that didn't persist devices).
+        // Leave the in-RAM defaults (all `active = false`) untouched.
+        return;
+    }
+    if (version != EEPROM_DEV_LAYOUT_VER) {
+        debugPrint("DEV: EEPROM blob version mismatch — discarding");
+        return;
+    }
+    uint8_t s_dev = EEPROM.read(eeprom_dev_addr + 2);
+    if (s_dev != (uint8_t)(sizeof(devices) & 0xFF)) {
+        debugPrint("DEV: EEPROM struct-size mismatch — discarding");
+        return;
+    }
+    EEPROM.get(eeprom_dev_addr + 3, devices);
+    // Reset transient runtime state. lastServiceMs is a millis()-based
+    // timestamp — it's meaningless after reboot (millis() restarts at
+    // 0) and must clear so the first scan tick triggers a real service
+    // call. Also reset the ToF init flags so VL53L0X/L1X re-init on
+    // first read (in case the sensor was power-cycled with the node).
+    for (int i = 0; i < MAX_DEVICES; i++) {
+        if (!devices[i].active) continue;
+        devices[i].lastServiceMs = 0;
+    }
+    vl53ResetState();
+    debugPrint("DEV: loaded peripheral table from EEPROM");
 }
 
 // Helper — serialise a single beacon rule by index. Used by both BEACON,GET
@@ -7876,6 +7970,7 @@ void setup() {
     // still thought the rule was confirmed but the firmware tables were
     // empty. Beacon rules already persist; this brings PLC to parity.
     loadPlcTables();
+    loadDevicesTable();
     // Storage vpin persistence: read the opt-in bitmap first, then load
     // values only for vpins the user has marked persistent. Non-persistent
     // vpins stay at 0 in RAM (and never hit EEPROM during this session).
