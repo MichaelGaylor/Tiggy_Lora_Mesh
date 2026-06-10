@@ -2851,6 +2851,14 @@ String processSetpointCommand(const String& args) {
                 int sEnd = suffixes.indexOf(',', sComma + 1);
                 scaleOffset = (sEnd > sComma) ? suffixes.substring(sComma + 1, sEnd).toFloat()
                                               : suffixes.substring(sComma + 1).toFloat();
+                // Reject NaN/Inf (String.toFloat parses "nan"/"inf"
+                // literally) and zero factor (would make scaled = offset
+                // always, ignoring the sensor). Silently-broken setpoint
+                // is worse than a clear deploy error.
+                if (!isfinite(scaleFactor) || scaleFactor == 0.0f ||
+                    !isfinite(scaleOffset)) {
+                    return "ERR,SETPOINT,BADSCALE";
+                }
             }
         }
         if (debouncePos >= 0) {
@@ -3998,6 +4006,11 @@ String processScaleCommand(const String& args) {
 
         if (!(isStorageVpin(vpin) || isScratchVpin(vpin))) return "ERR,SCALE,BADVPIN";
         if (offset < -32768 || offset > 32767) return "ERR,SCALE,BADOFFSET";
+        // NaN/Inf factor would make `(long)((float)raw * factor)` undefined
+        // at checkScales (line 3938); zero factor makes output always = offset,
+        // ignoring the input. Reject both at deploy time rather than silently
+        // emit a dead rule.
+        if (!isfinite(factor) || factor == 0.0f) return "ERR,SCALE,BADFACTOR";
         // 0 is the sentinel for "unwired input — read as 0 every tick".
         // Any non-zero input pin must be measurable. Without this check,
         // a typo'd sensor pin produces a permanently-zero output vpin with
