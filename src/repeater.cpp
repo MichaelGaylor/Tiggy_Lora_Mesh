@@ -4485,7 +4485,12 @@ String processPlcBinary(const uint8_t* data, size_t len) {
                 break;
             }
             case 0x20: case 0x21: case 0x23: {  // LOGIC AND/OR/XOR — needs in2
-                if (off + 8 > len) return "ERR,PLC,BIN,LOGICTRUNC";
+                // Payload is 7 bytes (out(1) + in1(1) + thr1(2) + in2(1) +
+                // thr2(2)). Previous check `off + 8 > len` rejected an
+                // exact-fit payload at the end of the buffer (too strict
+                // by one). Reading past the buffer was never a risk
+                // because off += 7 below stays within 7 bytes.
+                if (off + 7 > len) return "ERR,PLC,BIN,LOGICTRUNC";
                 const char* op = (tag == 0x20) ? "AND" : (tag == 0x21) ? "OR" : "XOR";
                 uint8_t  out   = data[off];
                 uint8_t  in1   = data[off + 1];
@@ -4533,7 +4538,13 @@ String processPlcBinary(const uint8_t* data, size_t len) {
                 break;
             }
             case 0x40: {  // SCALE
-                if (off + 7 > len) return "ERR,PLC,BIN,SCALETRUNC";
+                // Payload is 8 bytes: out(1) + in(1) + factor(4 LE float)
+                // + offs(2 LE int16). Previous check `off + 7 > len` let
+                // an exact-fit-by-one payload through and read 1 byte past
+                // the buffer at the binRd16LE(off+6) call — uninitialised
+                // memory got parsed as the offset and the SCALE installed
+                // with a corrupt offset value. Real bug, silent failure.
+                if (off + 8 > len) return "ERR,PLC,BIN,SCALETRUNC";
                 uint8_t  out    = data[off];
                 uint8_t  in     = data[off + 1];
                 float    factor = binRd32f_LE(data + off + 2);
