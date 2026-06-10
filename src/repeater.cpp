@@ -3331,10 +3331,29 @@ void checkSetpoints() {
                 // which silently treated whole-number analog thresholds
                 // (e.g. 20.0°C) as boolean and broke chatter
                 // suppression on real sensors.
-                float margin = setpoints[i].booleanDomain
+                // Detect canonical boolean-domain setpoints at RUNTIME, not
+                // just from the booleanDomain flag set by binary-deploy's
+                // markSetpointBoolean. Reason: the flag defaults false and
+                // ASCII-deployed rules — or rules persisted in EEPROM by an
+                // older firmware that lacked the marker — silently get stuck
+                // triggered after their first fire because the 10%-margin
+                // hysteresis (threshold=1.0 → margin=0.1 → clear gate=1.1)
+                // can never be crossed by a digital 1.0 source. Asymmetric:
+                // GE,1 clears at scaled<0.9 (V=0 satisfies trivially) so
+                // "Gate Open" re-fires every cycle; LT,1 clears at
+                // scaled>=1.1 (V=1 never satisfies) so "Gate Close" fires
+                // once and is then permanently stuck triggered=true.
+                // Threshold==1.0 with op LT(1) or GE(3) is unambiguously
+                // boolean — that's the only shape the PLC compiler ever
+                // emits for Digital Read / state-vpin sources.
+                bool effectiveBoolean =
+                    setpoints[i].booleanDomain ||
+                    (setpoints[i].threshold == 1.0f &&
+                     (setpoints[i].op == 1 || setpoints[i].op == 3));
+                float margin = effectiveBoolean
                     ? 0.0f
                     : fabsf(setpoints[i].threshold) * 0.1f;
-                if (!setpoints[i].booleanDomain && margin < 0.1f) margin = 0.1f;
+                if (!effectiveBoolean && margin < 0.1f) margin = 0.1f;
                 bool clearCondition = false;
                 switch (setpoints[i].op) {
                     case 0: case 3: clearCondition = (scaled <  (setpoints[i].threshold - margin)); break;
