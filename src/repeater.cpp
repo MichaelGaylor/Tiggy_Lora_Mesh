@@ -238,6 +238,12 @@ inline bool isStorageVpin(int pin) {
 #define EEPROM_PERSIST_MASK_ADDR 1668   // 4 bytes; past STORAGE_VPIN array (1600..1663)
 uint32_t storagePersistMask = 0;
 
+// Forward: per-vpin signed-domain bit is defined below the scratch
+// vpin macros (which it needs to know about). The address+masks here
+// are just the storage-class declarations needed by anything earlier
+// in the file that references them.
+#define EEPROM_SIGNED_MASK_ADDR 1672   // 4 bytes; after the persist mask at 1668..1671
+
 inline bool isPersistentVpin(int pin) {
     int idx = pin - STORAGE_VPIN_BASE;
     if (idx < 0 || idx >= STORAGE_VPIN_RESERVED) return false;
@@ -370,6 +376,76 @@ uint16_t getScratchVpin(int pin) {
 
 void clearAllScratchVpins() {
     for (int i = 0; i < SCRATCH_VPIN_RESERVED; i++) scratchVpinValues[i] = 0;
+}
+
+// ─── Per-vpin signed-domain bit ─────────────────────────────────
+// Some sources write signed values into the (uint16) storage/scratch
+// vpin cells — notably temperature sensors that can read below 0°C
+// (DHT22, DS18B20, BME280/SHT31 temp, MCP9808, THERMISTOR) and INA226
+// current. The bits are preserved (int16(-100) = uint16(65436) is the
+// same bit pattern) but readSensorPin's `(int)getStorageVpin(pin)`
+// cast zero-extends rather than sign-extends, so a SETPOINT comparing
+// against threshold -50 (×10 = -5°C) gets value 65436 instead of -100
+// and the comparison silently fails.
+//
+// Fix: per-vpin bit set by temp/current sensors at install time;
+// readSensorPin sign-extends through int16_t when the bit is set.
+// Stays unset for COUNTER (which legitimately uses 0..65535) and
+// other unsigned sources, so their behaviour is unchanged. Storage-
+// vpin flag is persisted to EEPROM at addr 1672 (4 bytes) so a node
+// reboot doesn't briefly mis-interpret negative temps before the
+// sensor's next service call re-marks the vpin.
+uint32_t storageSignedMask = 0;
+uint32_t scratchSignedMask = 0;        // RAM-only — scratch vpins themselves don't persist
+
+inline bool isVpinSigned(int pin) {
+    if (isStorageVpin(pin)) {
+        int idx = pin - STORAGE_VPIN_BASE;
+        return (storageSignedMask & (1u << idx)) != 0;
+    }
+    if (isScratchVpin(pin)) {
+        int idx = pin - SCRATCH_VPIN_BASE;
+        return (scratchSignedMask & (1u << idx)) != 0;
+    }
+    return false;
+}
+
+void setVpinSigned(int pin, bool isSigned) {
+    if (isStorageVpin(pin)) {
+        int idx = pin - STORAGE_VPIN_BASE;
+        bool wasSet = (storageSignedMask & (1u << idx)) != 0;
+        if (wasSet == isSigned) return;  // idempotent — skip EEPROM write
+        if (isSigned) storageSignedMask |=  (1u << idx);
+        else          storageSignedMask &= ~(1u << idx);
+        // Persist immediately so a reboot-while-temp-stored-but-flag-
+        // unsaved doesn't silently mis-interpret negative temps.
+        for (int i = 0; i < 4; i++) {
+            EEPROM.write(EEPROM_SIGNED_MASK_ADDR + i,
+                         (uint8_t)((storageSignedMask >> (i * 8)) & 0xFF));
+        }
+        EEPROM.commit();
+    } else if (isScratchVpin(pin)) {
+        int idx = pin - SCRATCH_VPIN_BASE;
+        if (isSigned) scratchSignedMask |=  (1u << idx);
+        else          scratchSignedMask &= ~(1u << idx);
+        // RAM only — scratch vpins reset on reboot and the device that
+        // owns the vpin will re-mark it on its next install/service.
+    }
+}
+
+void loadSignedMask() {
+    storageSignedMask = 0;
+    for (int i = 0; i < 4; i++) {
+        storageSignedMask |= ((uint32_t)EEPROM.read(EEPROM_SIGNED_MASK_ADDR + i)) << (i * 8);
+    }
+    // Sanity: an uninitialised EEPROM region reads as 0xFF... (all bits
+    // set) which would mark EVERY storage vpin signed, breaking
+    // COUNTER/LATCH on a fresh device. Treat 0xFFFFFFFF as "fresh — no
+    // signed bits set" rather than "all signed". Real installs that
+    // somehow legitimately marked all 32 vpins signed (impossible in
+    // practice — there are only 7 temp/current sensor types) take the
+    // small one-time hit of re-marking on the next sensor service.
+    if (storageSignedMask == 0xFFFFFFFFu) storageSignedMask = 0;
 }
 
 // Unified vpin set/get. Callers don't need to know which range they're
@@ -1160,12 +1236,21 @@ void setupDigitalOutput(int pin);
 // Use setpoint Scale to convert to engineering units (e.g., m/s).
 // AUTO mode: ESP32-S3 has ADC on GPIOs 1-20; classic ESP32 has ADC1 on 32-39.
 static int readSensorPin(int pin) {
-    // Storage virtual pins 200-231: in-firmware state variables (persisted to EEPROM).
-    // Read returns the last value set via CMD,SET or BEACON,ADD RELAY action.
-    if (isStorageVpin(pin)) return (int)getStorageVpin(pin);
-    // Scratch virtual pins 232-255: RAM-only, compiler-allocated "wires"
-    // between PLC blocks. Reads the last value written by a primitive.
-    if (isScratchVpin(pin)) return (int)getScratchVpin(pin);
+    // Storage / scratch virtual pins: sign-extend through int16_t when the
+    // vpin has been opted into signed domain (see setVpinSigned). This
+    // matters for temperature sensors that report negative values — a
+    // DS18B20 reading -10°C stores 65436 (= int16(-100) bit pattern),
+    // and a SETPOINT comparing against threshold -50 (×10 = -5°C) needs
+    // to see -100 not 65436. Unsigned sources (COUNTER, distance
+    // sensors, etc.) take the original zero-extending cast.
+    if (isStorageVpin(pin)) {
+        uint16_t v = getStorageVpin(pin);
+        return isVpinSigned(pin) ? (int)(int16_t)v : (int)v;
+    }
+    if (isScratchVpin(pin)) {
+        uint16_t v = getScratchVpin(pin);
+        return isVpinSigned(pin) ? (int)(int16_t)v : (int)v;
+    }
     // Virtual pins 100-115: IO expansion board
     if (pin >= IO_EXPAND_VPIN_BASE && pin < IO_EXPAND_VPIN_BASE + IO_EXPAND_MAX_PINS)
         return ioExpandRead(pin);
@@ -5227,6 +5312,33 @@ String processDeviceCommand(const String& args) {
     // SETPOINT rules that consumed the device's output vpins already
     // survived (via savePlcTables).
     saveDevicesTable();
+    // Opt the output vpin into signed-domain reading for sources that
+    // can produce negative values. Temperatures can drop below 0°C in
+    // any outdoor / refrigeration / cold-storage deployment; INA226
+    // current is signed by definition. Without this flag the read path
+    // zero-extends uint16 → int32 and negative-threshold comparisons
+    // silently fail (e.g. "if temp < -5°C alert" never fires because
+    // the runtime sees 65436 not -100).
+    switch (type) {
+        case DEV_DHT11:
+        case DEV_DHT22:
+        case DEV_DS18B20:
+        case DEV_BME280:
+        case DEV_SHT31:
+        case DEV_MCP9808:
+        case DEV_THERMISTOR:
+            // outVpin[0] = temperature × 10 — can be negative
+            if (tmp.outVpin[0]) setVpinSigned(tmp.outVpin[0], true);
+            break;
+        case DEV_INA226:
+            // outVpin[0] = bus voltage (always positive); outVpin[1] =
+            // shunt current (can be negative when load reverses).
+            if (tmp.outVpin[1]) setVpinSigned(tmp.outVpin[1], true);
+            break;
+        default:
+            // HCSR04, VL53*, OLED, I2C_READ — naturally unsigned.
+            break;
+    }
     return String("OK,DEVICE,ADD,") + typeStr;
 }
 
@@ -8085,6 +8197,7 @@ void setup() {
     // values only for vpins the user has marked persistent. Non-persistent
     // vpins stay at 0 in RAM (and never hit EEPROM during this session).
     loadPersistMask();
+    loadSignedMask();
     loadPersistentStorageVpins();
 
     // Wire up MeshCore callbacks
