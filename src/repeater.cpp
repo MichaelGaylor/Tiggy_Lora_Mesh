@@ -443,6 +443,8 @@ enum DeviceType : uint8_t {
     // Tier 3 — laser time-of-flight distance sensors
     DEV_VL53L0X    = 11,  // ~30-1200mm, default addr 0x29
     DEV_VL53L1X    = 12,  // ~40-4000mm, default addr 0x29 (long mode)
+    // Tier 4 — analog (ADC-based)
+    DEV_THERMISTOR = 13,  // NTC thermistor via voltage divider, Steinhart-Hart beta
 };
 struct Device {
     bool      active;
@@ -453,9 +455,19 @@ struct Device {
     uint8_t   i2cReg;        // register byte for DEV_I2C_READ
     uint8_t   readBytes;     // 1 or 2 for DEV_I2C_READ
     uint8_t   outVpin[4];    // up to 4 output vpins (DHT: temp+humid, I2C: 1)
-    // Per-device extra config — INA226 uses cfgA for shunt resistance
-    // in milliohms (e.g. 100 for a 0.1Ω shunt). Unused for other types.
+    // Per-device extra config:
+    //   INA226       → cfgA = shunt resistance in milliohms (e.g. 100 for 0.1Ω)
+    //   THERMISTOR   → cfgA = Beta coefficient (3000..5000 typical, e.g. 3950)
+    //   others       → unused
     int16_t   cfgA;
+    // THERMISTOR-only extras (would be `union` material but the struct
+    // is dumped to EEPROM whole so plain fields keep the layout stable
+    // across types):
+    //   cfgB         → R₀ (nominal resistance at 25°C) in units of 100Ω,
+    //                  so 10kΩ → 100, 100kΩ → 1000. Max ~6.5MΩ.
+    //   cfgC         → pullup resistor in units of 100Ω (same encoding).
+    uint16_t  cfgB;
+    uint16_t  cfgC;
     uint16_t  intervalMs;    // service interval
     uint32_t  lastServiceMs; // when this device last ran
     // OLED-only: template string referencing vpins as {Vnnn}. Statically
@@ -664,6 +676,51 @@ static int16_t ds18b20ReadTempC10(uint8_t pin) {
     int16_t raw = (int16_t)((hi << 8) | lo);
     // Raw is in 1/16°C steps (DS18B20 default 12-bit). Convert to ×10°C.
     return (int16_t)((int32_t)raw * 10 / 16);
+}
+
+// ─── NTC Thermistor driver (Steinhart-Hart beta equation) ───────
+// Wired as a voltage divider: pullup resistor from VCC (3.3V) to the
+// ADC pin, thermistor from the ADC pin to GND. ADC reads mV directly
+// via ESP32's calibrated analogReadMilliVolts(). Computes thermistor
+// resistance from the divider math, then applies the simplified
+// two-parameter Steinhart-Hart "beta" equation:
+//
+//   1/T = 1/T₀ + (1/β) × ln(R / R₀)
+//
+// where T₀ = 298.15 K (25°C reference), R₀ = thermistor nominal
+// resistance at T₀, β = Beta coefficient (3000..5000 typical), R =
+// measured resistance, T = temperature in Kelvin.
+//
+// Returns temp × 10 °C so the int fits in a uint16 vpin with 0.1°C
+// resolution (same convention as DHT22 / DS18B20 / BME280 / MCP9808).
+// INT16_MIN on error (sensor disconnected, rail short, garbage).
+static int16_t thermistorReadTempC10(uint8_t pin, int16_t beta,
+                                     uint32_t r0_ohm, uint32_t pullup_ohm) {
+    int mv = analogReadMilliVolts(pin);
+    // Sanity-bound the ADC reading. Below 50 mV the pin is essentially
+    // shorted to GND (thermistor failed short, or wiring reversed).
+    // Above 3250 mV the pin is at the rail (thermistor failed open, or
+    // the pullup isn't connected). Either way the divider math is
+    // garbage; report error and let the caller leave the previous
+    // vpin value in place rather than write nonsense.
+    if (mv < 50 || mv >= 3250) return INT16_MIN;
+    // R_th = R_pullup × (mV / (3300 - mV))
+    // Float math avoids overflow with large pullups (100kΩ × 3000 ≈ 3e8).
+    float r_th = (float)pullup_ohm * (float)mv / (float)(3300 - mv);
+    if (r_th <= 0.0f || r0_ohm == 0 || beta == 0) return INT16_MIN;
+    // Beta equation (simplified Steinhart-Hart, two-parameter form).
+    const float T0_KELVIN = 298.15f;
+    float invT = 1.0f / T0_KELVIN +
+                 (1.0f / (float)beta) * logf(r_th / (float)r0_ohm);
+    if (invT <= 0.0f) return INT16_MIN;  // log() returned -inf or huge
+    float t_kelvin = 1.0f / invT;
+    float t_celsius = t_kelvin - 273.15f;
+    // Final sanity clamp before truncating to int16. Anything beyond
+    // ±200°C is way past any real NTC sensor range and almost certainly
+    // a math error from a near-rail ADC reading we should have caught
+    // above. Report error rather than write a garbage vpin.
+    if (t_celsius < -200.0f || t_celsius > 200.0f) return INT16_MIN;
+    return (int16_t)(t_celsius * 10.0f);
 }
 
 // ─── I2C helpers (Tier 2) ────────────────────────────────────────
@@ -1005,6 +1062,22 @@ void serviceDevices() {
                     if (mm > 0 && mm < 8000) {
                         if (d.outVpin[0]) setVpinValue(d.outVpin[0], mm);
                     }
+                }
+                break;
+            }
+            case DEV_THERMISTOR: {
+                // R₀ and pullup are stored as units of 100Ω in the
+                // Device struct (uint16_t each) to keep the struct
+                // size down while still supporting up to ~6.5MΩ.
+                uint32_t r0_ohm     = (uint32_t)d.cfgB * 100UL;
+                uint32_t pullup_ohm = (uint32_t)d.cfgC * 100UL;
+                int16_t tC10 = thermistorReadTempC10(
+                    d.pin1, d.cfgA, r0_ohm, pullup_ohm);
+                if (tC10 != INT16_MIN && d.outVpin[0]) {
+                    // Same convention as DS18B20: signed temp stored
+                    // unsigned, downstream Compare blocks handle the
+                    // signed-int interpretation if needed.
+                    setVpinValue(d.outVpin[0], (uint16_t)tC10);
                 }
                 break;
             }
@@ -4921,7 +4994,7 @@ String processDeviceCommand(const String& args) {
         int count = 0;
         const char* names[] = {"NONE","DHT11","DHT22","HCSR04","DS18B20","I2C","OLED",
                                "BME280","SHT31","INA226","MCP9808",
-                               "VL53L0X","VL53L1X"};
+                               "VL53L0X","VL53L1X","THERMISTOR"};
         for (int i = 0; i < MAX_DEVICES; i++) {
             if (!devices[i].active) continue;
             count++;
@@ -4963,6 +5036,7 @@ String processDeviceCommand(const String& args) {
     else if (typeStr == "MCP9808") type = DEV_MCP9808;
     else if (typeStr == "VL53L0X") type = DEV_VL53L0X;
     else if (typeStr == "VL53L1X") type = DEV_VL53L1X;
+    else if (typeStr == "THERMISTOR") type = DEV_THERMISTOR;
     else return "ERR,DEVICE,BADTYPE";
 
     // Per-type parsing — each branch reads its args off tail and
@@ -5107,6 +5181,39 @@ String processDeviceCommand(const String& args) {
         // VL53L1X: continuous mode, library buffers — service polls
         // dataReady() so polling at 100ms is fine, no extra work.
         tmp.intervalMs = (type == DEV_VL53L0X) ? 200 : 100;
+    } else if (type == DEV_THERMISTOR) {
+        // <adc_pin>,<beta>,<r0_ohm>,<pullup_ohm>,<vT>
+        // Beta = thermistor B coefficient (3000..5000 typical).
+        // r0_ohm = nominal resistance at 25°C (typically 10000 or 100000).
+        // pullup_ohm = the voltage-divider pullup resistor to VCC.
+        // vT = output vpin for temperature × 10 (deci-Celsius).
+        String spin    = nextTok(tail);
+        String sbeta   = nextTok(tail);
+        String sR0     = nextTok(tail);
+        String sPull   = nextTok(tail);
+        String svT     = nextTok(tail);
+        if (svT.length() == 0) return "ERR,DEVICE,FORMAT";
+        int pin    = spin.toInt();
+        int beta   = sbeta.toInt();
+        long r0    = sR0.toInt();
+        long pull  = sPull.toInt();
+        tmp.pin1 = (uint8_t)pin;
+        // Validate before claiming a slot. Bands chosen to bracket any
+        // realistic NTC + pullup combo; out-of-range almost certainly
+        // means a malformed deploy and we'd rather error than install
+        // a dead rule.
+        if (!isPinConfigurable(pin))       return "ERR,DEVICE,BADPIN";
+        if (beta < 2000 || beta > 6000)    return "ERR,DEVICE,BADBETA";
+        if (r0   < 100  || r0   > 1000000) return "ERR,DEVICE,BADR0";
+        if (pull < 100  || pull > 1000000) return "ERR,DEVICE,BADPULL";
+        tmp.cfgA = (int16_t)beta;
+        // Pack R₀ and pullup as units of 100Ω so each fits in uint16_t
+        // (max ~6.5MΩ). 100Ω resolution is well under the 1-5%
+        // tolerance of typical NTC thermistors and pullup resistors.
+        tmp.cfgB = (uint16_t)((r0   + 50) / 100);
+        tmp.cfgC = (uint16_t)((pull + 50) / 100);
+        tmp.outVpin[0] = (uint8_t)svT.toInt();
+        tmp.intervalMs = 1000;  // 1 Hz polling — temperature isn't fast
     }
 
     // Claim slot — replace-by-key on (type, pin1/addr) so re-deploys
@@ -7121,7 +7228,10 @@ void loadBeaconRules() {
 // Distinct magic from EEPROM_PLC_MAGIC_VAL so the two regions can't
 // be confused if a future refactor moves addresses around.
 #define EEPROM_DEV_MAGIC_VAL    0xCD
-#define EEPROM_DEV_LAYOUT_VER   1
+// Layout versions:
+//   1 — initial DEVICE persistence (commit 2a1b8fb)
+//   2 — Device struct gained cfgB+cfgC fields for THERMISTOR R₀ / pullup
+#define EEPROM_DEV_LAYOUT_VER   2
 // Header layout starting at EEPROM_PLC_BASE:
 //   0       magic    (1 B)
 //   1       version  (1 B)
