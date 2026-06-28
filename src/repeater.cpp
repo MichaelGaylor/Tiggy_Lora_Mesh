@@ -521,6 +521,14 @@ enum DeviceType : uint8_t {
     DEV_VL53L1X    = 12,  // ~40-4000mm, default addr 0x29 (long mode)
     // Tier 4 — analog (ADC-based)
     DEV_THERMISTOR = 13,  // NTC thermistor via voltage divider, Steinhart-Hart beta
+    // Tier 5 — 3-axis magnetometers (vehicle/ferrous mass detection,
+    // rain-immune confirmation channel for radar/PIR systems).
+    DEV_HMC5883L   = 14,  // Honeywell 3-axis magnetometer, fixed addr 0x1E
+    DEV_QMC5883L   = 15,  // QST 3-axis magnetometer, fixed addr 0x0D.
+                          // Many "GY-271" modules sold as HMC5883L are
+                          // actually QMC silicon — different address +
+                          // different register layout, so both are
+                          // first-class types, not aliases.
 };
 struct Device {
     bool      active;
@@ -1001,6 +1009,79 @@ static bool bme280Read(uint8_t addr, int16_t* tempC10, uint16_t* hPa10,
     return true;
 }
 
+// ─── HMC5883L driver (Honeywell 3-axis magnetometer, addr 0x1E) ─
+// Use case: ferrous mass detection (passing vehicles), as a rain-immune
+// AND-gate confirmation channel for microwave radar. Earth's field
+// (~50 µT) is the noise floor; a passing car perturbs it by 5-50 µT
+// at ~1m mounting distance, easily distinguishable.
+//
+// Init each call (3 i2c writes, ~3ms) keeps the driver stateless and
+// lets the user hot-swap the chip without rebooting. Sample rate is
+// 500ms-bounded anyway by intervalMs, so the per-call init cost is
+// noise.
+//
+// Register layout (per datasheet):
+//   0x00 CONFIG_A   write 0x70: 8-sample average, 15 Hz output, normal
+//   0x01 CONFIG_B   write 0xA0: gain ±8.1 G (230 LSB/G — broad range so
+//                              ferrous saturation from a passing vehicle
+//                              is unlikely; still ample resolution for
+//                              the µT-level perturbations we care about)
+//   0x02 MODE       write 0x00: continuous measurement
+//   0x03-0x08       6 bytes: X_MSB X_LSB Z_MSB Z_LSB Y_MSB Y_LSB
+//                              (yes, Z comes before Y — datasheet quirk)
+//
+// Raw values are int16_t signed. We bit-cast into uint16_t for vpin
+// storage; setVpinSigned(vpin, true) tells SETPOINT to interpret as
+// signed so negative-threshold comparisons work on each axis.
+static bool hmc5883lRead(uint8_t addr, int16_t* xRaw, int16_t* yRaw,
+                         int16_t* zRaw) {
+    if (!i2cWrite8(addr, 0x00, 0x70)) return false;  // CONFIG_A
+    if (!i2cWrite8(addr, 0x01, 0xA0)) return false;  // CONFIG_B
+    if (!i2cWrite8(addr, 0x02, 0x00)) return false;  // MODE: continuous
+    delay(6);  // 15 Hz output rate → one sample every ~67ms; conservative
+               // 6ms wait ensures the first reading is fresh after init
+    uint8_t b[6];
+    if (!i2cReadN(addr, 0x03, b, 6)) return false;
+    // Big-endian; note the X / Z / Y order in the data registers.
+    *xRaw = (int16_t)((b[0] << 8) | b[1]);
+    *zRaw = (int16_t)((b[2] << 8) | b[3]);
+    *yRaw = (int16_t)((b[4] << 8) | b[5]);
+    return true;
+}
+
+// ─── QMC5883L driver (QST 3-axis magnetometer, addr 0x0D) ───────
+// Same use case as HMC5883L. Different chip, different address,
+// different register layout, much higher sensitivity at the same
+// physical range. Worth supporting both because cheap "GY-271"
+// modules are sold under the HMC5883L name but ship QMC silicon —
+// auto-detection by address probe is the user's workflow: try one
+// type, if no readings flow, try the other.
+//
+// Register layout (per QMC5883L datasheet):
+//   0x00-0x05       6 bytes: X_LSB X_MSB Y_LSB Y_MSB Z_LSB Z_MSB
+//                              (little-endian, conventional X/Y/Z order)
+//   0x09 CONTROL_1  write 0x1D: continuous, 200 Hz ODR, ±8 G range,
+//                              OSR=512 (max noise rejection)
+//   0x0B SET/RESET  write 0x01: SET/RESET period for noise cancel
+//                              (datasheet-mandated, "always 0x01")
+//
+// At 8 G range the chip outputs 12000 LSB/G — ~13× more sensitive than
+// HMC5883L for the same field. Earth's field reads ~6000 counts;
+// vehicle perturbations show up clearly above sensor noise.
+static bool qmc5883lRead(uint8_t addr, int16_t* xRaw, int16_t* yRaw,
+                         int16_t* zRaw) {
+    if (!i2cWrite8(addr, 0x0B, 0x01)) return false;  // SET/RESET period
+    if (!i2cWrite8(addr, 0x09, 0x1D)) return false;  // CONTROL_1
+    delay(6);  // 200 Hz ODR → 5ms per sample; 6ms wait covers first sample
+    uint8_t b[6];
+    if (!i2cReadN(addr, 0x00, b, 6)) return false;
+    // Little-endian, conventional X/Y/Z order.
+    *xRaw = (int16_t)((b[1] << 8) | b[0]);
+    *yRaw = (int16_t)((b[3] << 8) | b[2]);
+    *zRaw = (int16_t)((b[5] << 8) | b[4]);
+    return true;
+}
+
 // ─── Device service loop ─────────────────────────────────────────
 // Called from the main loop every tick. Each active device runs at its
 // own cadence (intervalMs since lastServiceMs). Reads land in the
@@ -1087,6 +1168,28 @@ void serviceDevices() {
                 int16_t tC10 = 0;
                 if (mcp9808Read(d.i2cAddr, &tC10)) {
                     if (d.outVpin[0]) setVpinValue(d.outVpin[0], (uint16_t)tC10);
+                }
+                break;
+            }
+            case DEV_HMC5883L: {
+                int16_t xRaw = 0, yRaw = 0, zRaw = 0;
+                if (hmc5883lRead(d.i2cAddr, &xRaw, &yRaw, &zRaw)) {
+                    // Bit-cast int16 → uint16 for vpin storage; the
+                    // signed-mask set at deploy time tells SETPOINT to
+                    // sign-extend on read so threshold comparisons work
+                    // on negative axis values (the chip outputs ±32767).
+                    if (d.outVpin[0]) setVpinValue(d.outVpin[0], (uint16_t)xRaw);
+                    if (d.outVpin[1]) setVpinValue(d.outVpin[1], (uint16_t)yRaw);
+                    if (d.outVpin[2]) setVpinValue(d.outVpin[2], (uint16_t)zRaw);
+                }
+                break;
+            }
+            case DEV_QMC5883L: {
+                int16_t xRaw = 0, yRaw = 0, zRaw = 0;
+                if (qmc5883lRead(d.i2cAddr, &xRaw, &yRaw, &zRaw)) {
+                    if (d.outVpin[0]) setVpinValue(d.outVpin[0], (uint16_t)xRaw);
+                    if (d.outVpin[1]) setVpinValue(d.outVpin[1], (uint16_t)yRaw);
+                    if (d.outVpin[2]) setVpinValue(d.outVpin[2], (uint16_t)zRaw);
                 }
                 break;
             }
@@ -5079,7 +5182,8 @@ String processDeviceCommand(const String& args) {
         int count = 0;
         const char* names[] = {"NONE","DHT11","DHT22","HCSR04","DS18B20","I2C","OLED",
                                "BME280","SHT31","INA226","MCP9808",
-                               "VL53L0X","VL53L1X","THERMISTOR"};
+                               "VL53L0X","VL53L1X","THERMISTOR",
+                               "HMC5883L","QMC5883L"};
         for (int i = 0; i < MAX_DEVICES; i++) {
             if (!devices[i].active) continue;
             count++;
@@ -5122,6 +5226,8 @@ String processDeviceCommand(const String& args) {
     else if (typeStr == "VL53L0X") type = DEV_VL53L0X;
     else if (typeStr == "VL53L1X") type = DEV_VL53L1X;
     else if (typeStr == "THERMISTOR") type = DEV_THERMISTOR;
+    else if (typeStr == "HMC5883L") type = DEV_HMC5883L;
+    else if (typeStr == "QMC5883L") type = DEV_QMC5883L;
     else return "ERR,DEVICE,BADTYPE";
 
     // Per-type parsing — each branch reads its args off tail and
@@ -5255,6 +5361,32 @@ String processDeviceCommand(const String& args) {
         tmp.i2cAddr = (uint8_t)a;
         tmp.outVpin[0] = (uint8_t)svT.toInt();
         tmp.intervalMs = 1000;
+    } else if (type == DEV_HMC5883L) {
+        // <vX>,<vY>,<vZ>   no address arg — HMC5883L is fixed at 0x1E.
+        String svX = nextTok(tail);
+        String svY = nextTok(tail);
+        String svZ = nextTok(tail);
+        if (svZ.length() == 0) return "ERR,DEVICE,FORMAT";
+        tmp.i2cAddr    = 0x1E;
+        tmp.outVpin[0] = (uint8_t)svX.toInt();
+        tmp.outVpin[1] = (uint8_t)svY.toInt();
+        tmp.outVpin[2] = (uint8_t)svZ.toInt();
+        tmp.intervalMs = 500;   // 2 Hz — fast enough to catch a passing
+                                // vehicle, slow enough not to flood the
+                                // I2C bus or burn battery on solar nodes
+    } else if (type == DEV_QMC5883L) {
+        // <vX>,<vY>,<vZ>   no address arg — QMC5883L is fixed at 0x0D
+        // (different chip from HMC despite the lookalike name, so the
+        // address can't collide with HMC even on the same I2C bus).
+        String svX = nextTok(tail);
+        String svY = nextTok(tail);
+        String svZ = nextTok(tail);
+        if (svZ.length() == 0) return "ERR,DEVICE,FORMAT";
+        tmp.i2cAddr    = 0x0D;
+        tmp.outVpin[0] = (uint8_t)svX.toInt();
+        tmp.outVpin[1] = (uint8_t)svY.toInt();
+        tmp.outVpin[2] = (uint8_t)svZ.toInt();
+        tmp.intervalMs = 500;
     } else if (type == DEV_VL53L0X || type == DEV_VL53L1X) {
         // <vDistMm>   no address config (default 0x29; multi-sensor
         // support needs XSHUT pin handling which v1 doesn't do).
@@ -5334,6 +5466,15 @@ String processDeviceCommand(const String& args) {
             // outVpin[0] = bus voltage (always positive); outVpin[1] =
             // shunt current (can be negative when load reverses).
             if (tmp.outVpin[1]) setVpinSigned(tmp.outVpin[1], true);
+            break;
+        case DEV_HMC5883L:
+        case DEV_QMC5883L:
+            // All 3 axes signed — the chip outputs ±32767 raw counts
+            // and threshold comparisons ("X < -5000") only work
+            // correctly when the read path sign-extends.
+            if (tmp.outVpin[0]) setVpinSigned(tmp.outVpin[0], true);
+            if (tmp.outVpin[1]) setVpinSigned(tmp.outVpin[1], true);
+            if (tmp.outVpin[2]) setVpinSigned(tmp.outVpin[2], true);
             break;
         default:
             // HCSR04, VL53*, OLED, I2C_READ — naturally unsigned.
