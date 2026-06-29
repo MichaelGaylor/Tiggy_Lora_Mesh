@@ -690,9 +690,19 @@
 //              Bidirectional + fast — required for DHT22, DS18B20,
 //              HC-SR04 echo. R18 5.1k pull-up to 3.3V already on board.
 //   15, 16     spare digital pins
+//   37         freed by the V1 ADC rework — the original battery
+//              divider trace was cut at R28 and fly-wired to GPIO 1,
+//              so the pin's now electrically NC at the module unless
+//              the user adds their own load. Not a strapping pin on
+//              ESP32-S3 (only 0/3/45/46 strap), no PSRAM claim on
+//              N8R2 (quad PSRAM shares the flash bus, doesn't touch
+//              33-37). Allocated to relay duty: external transistor
+//              or relay-module driver expected; 10k pulldown
+//              recommended to keep the load off during the ROM-boot
+//              window before pinMode() runs.
 // Available extras for future use: 45, 48
 #define USER_GPIO_COUNT     8
-#define DEFAULT_RELAY_PINS  { 2, 3, 4 }
+#define DEFAULT_RELAY_PINS  { 2, 3, 4, 37 }
 #define DEFAULT_SENSOR_PINS { 5, 6, 7, 15, 16, 40 }
 #define SENSOR_PIN_COUNT    5
 
