@@ -1082,6 +1082,28 @@ static bool qmc5883lRead(uint8_t addr, int16_t* xRaw, int16_t* yRaw,
     return true;
 }
 
+// ─── Vector magnitude helper (rotation-invariant, vibration-immune) ─
+// |⃗v| = sqrt(x² + y² + z²). For magnetometers, this is the killer
+// feature: pure rotation of the sensor (wind sway of an outdoor box,
+// post wobble, etc.) shuffles x/y/z but preserves magnitude. Only an
+// actual change in the FIELD STRENGTH — i.e. ferrous mass entering or
+// leaving the detection volume — moves the magnitude needle. Use it
+// as a Delta-Rate or threshold source for rain/vibration-immune
+// vehicle detection.
+//
+// Overflow note (caught by the pre-implementation audit): at QMC's
+// 8G full-scale, raw values reach ±32767. x² alone fits in int32
+// (max 32767² = 1.07e9 < 2.15e9 int32_t cap) but the SUM x²+y²+z²
+// can reach 3.22e9 which exceeds int32_t. Must use uint32_t for the
+// sum. sqrt result fits in uint16_t (max √(3·32767²) ≈ 56756).
+static uint16_t magnitude3(int16_t x, int16_t y, int16_t z) {
+    uint32_t x2 = (uint32_t)((int32_t)x * (int32_t)x);
+    uint32_t y2 = (uint32_t)((int32_t)y * (int32_t)y);
+    uint32_t z2 = (uint32_t)((int32_t)z * (int32_t)z);
+    uint32_t sumSq = x2 + y2 + z2;
+    return (uint16_t)sqrtf((float)sumSq);
+}
+
 // ─── Device service loop ─────────────────────────────────────────
 // Called from the main loop every tick. Each active device runs at its
 // own cadence (intervalMs since lastServiceMs). Reads land in the
@@ -1181,6 +1203,12 @@ void serviceDevices() {
                     if (d.outVpin[0]) setVpinValue(d.outVpin[0], (uint16_t)xRaw);
                     if (d.outVpin[1]) setVpinValue(d.outVpin[1], (uint16_t)yRaw);
                     if (d.outVpin[2]) setVpinValue(d.outVpin[2], (uint16_t)zRaw);
+                    // outVpin[3] = vector magnitude (always ≥ 0, unsigned).
+                    // Skipped if the gateway didn't allocate a 4th vpin —
+                    // backward compat with pre-magnitude gateway builds.
+                    if (d.outVpin[3]) {
+                        setVpinValue(d.outVpin[3], magnitude3(xRaw, yRaw, zRaw));
+                    }
                 }
                 break;
             }
@@ -1190,6 +1218,9 @@ void serviceDevices() {
                     if (d.outVpin[0]) setVpinValue(d.outVpin[0], (uint16_t)xRaw);
                     if (d.outVpin[1]) setVpinValue(d.outVpin[1], (uint16_t)yRaw);
                     if (d.outVpin[2]) setVpinValue(d.outVpin[2], (uint16_t)zRaw);
+                    if (d.outVpin[3]) {
+                        setVpinValue(d.outVpin[3], magnitude3(xRaw, yRaw, zRaw));
+                    }
                 }
                 break;
             }
@@ -5362,30 +5393,38 @@ String processDeviceCommand(const String& args) {
         tmp.outVpin[0] = (uint8_t)svT.toInt();
         tmp.intervalMs = 1000;
     } else if (type == DEV_HMC5883L) {
-        // <vX>,<vY>,<vZ>   no address arg — HMC5883L is fixed at 0x1E.
-        String svX = nextTok(tail);
-        String svY = nextTok(tail);
-        String svZ = nextTok(tail);
+        // <vX>,<vY>,<vZ>[,<vMag>]   no address arg — HMC5883L fixed at 0x1E.
+        // The 4th vpin (magnitude) is optional for backward compat with
+        // pre-magnitude gateway builds; if absent, outVpin[3] stays 0
+        // and the service loop skips the magnitude write.
+        String svX   = nextTok(tail);
+        String svY   = nextTok(tail);
+        String svZ   = nextTok(tail);
+        String svMag = nextTok(tail);    // optional
         if (svZ.length() == 0) return "ERR,DEVICE,FORMAT";
         tmp.i2cAddr    = 0x1E;
         tmp.outVpin[0] = (uint8_t)svX.toInt();
         tmp.outVpin[1] = (uint8_t)svY.toInt();
         tmp.outVpin[2] = (uint8_t)svZ.toInt();
+        tmp.outVpin[3] = (uint8_t)svMag.toInt();   // 0 if empty
         tmp.intervalMs = 500;   // 2 Hz — fast enough to catch a passing
                                 // vehicle, slow enough not to flood the
                                 // I2C bus or burn battery on solar nodes
     } else if (type == DEV_QMC5883L) {
-        // <vX>,<vY>,<vZ>   no address arg — QMC5883L is fixed at 0x0D
+        // <vX>,<vY>,<vZ>[,<vMag>]   no address arg — QMC5883L fixed at 0x0D
         // (different chip from HMC despite the lookalike name, so the
         // address can't collide with HMC even on the same I2C bus).
-        String svX = nextTok(tail);
-        String svY = nextTok(tail);
-        String svZ = nextTok(tail);
+        // Optional 4th vpin = vector magnitude (rotation/vibration-immune).
+        String svX   = nextTok(tail);
+        String svY   = nextTok(tail);
+        String svZ   = nextTok(tail);
+        String svMag = nextTok(tail);    // optional
         if (svZ.length() == 0) return "ERR,DEVICE,FORMAT";
         tmp.i2cAddr    = 0x0D;
         tmp.outVpin[0] = (uint8_t)svX.toInt();
         tmp.outVpin[1] = (uint8_t)svY.toInt();
         tmp.outVpin[2] = (uint8_t)svZ.toInt();
+        tmp.outVpin[3] = (uint8_t)svMag.toInt();
         tmp.intervalMs = 500;
     } else if (type == DEV_VL53L0X || type == DEV_VL53L1X) {
         // <vDistMm>   no address config (default 0x29; multi-sensor
