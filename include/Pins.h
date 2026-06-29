@@ -674,7 +674,7 @@
 //   8–14    Wio-SX1262 control + SPI
 //   17–18   I2C OLED
 //   19–20   USB
-//   21      OLED RST
+//   21      OLED RST  — DUAL ROLE (see sensor list below)
 //   35–36   LEDs
 //   38–39   GPS UART
 //   41–42   DRV8871 actuator
@@ -690,6 +690,14 @@
 //              Bidirectional + fast — required for DHT22, DS18B20,
 //              HC-SR04 echo. R18 5.1k pull-up to 3.3V already on board.
 //   15, 16     spare digital pins
+//   21         OLED RST on the J5 header — DOUBLES as a sensor pin
+//              when the OLED isn't deployed. The OLED driver only
+//              touches GPIO 21 if DEVICE,ADD,OLED has been issued;
+//              with no OLED in the device table the pin is
+//              electrically free. Either OLED or a sensor on 21 per
+//              node, not both. isPinSafe() passes it (not in the
+//              forbidden list), so DEVICE,ADD against pin 21 deploys
+//              cleanly when the user wires a sensor to J5 pin 3.
 //   37         freed by the V1 ADC rework — the original battery
 //              divider trace was cut at R28 and fly-wired to GPIO 1,
 //              so the pin's now electrically NC at the module unless
@@ -703,7 +711,7 @@
 // Available extras for future use: 45, 48
 #define USER_GPIO_COUNT     8
 #define DEFAULT_RELAY_PINS  { 2, 3, 4, 37 }
-#define DEFAULT_SENSOR_PINS { 5, 6, 7, 15, 16, 40 }
+#define DEFAULT_SENSOR_PINS { 5, 6, 7, 15, 16, 21, 40 }
 #define SENSOR_PIN_COUNT    5
 
 // ═══════════════════════════════════════════════════════════════
