@@ -13,12 +13,6 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
-    <!-- OTA firmware upload: only used as belt-and-braces on Android <13.
-         The Storage Access Framework (OpenDocument) doesn't actually need
-         this permission on modern Android — scoped storage handles it. -->
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
-        android:maxSdkVersion="32" />
-
     <!-- Foreground service — keeps BLE alive when app is backgrounded -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
