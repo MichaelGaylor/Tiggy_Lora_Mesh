@@ -11,6 +11,9 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.onSubscription
+import kotlinx.coroutines.withTimeout
 import java.util.UUID
 
 private const val PREFS_NAME = "mesh_ble_prefs"
@@ -356,4 +359,58 @@ class BleManager(private val context: Context) {
     // ─── Auto-poll ────────────────────────────────────────────
     fun autoPollSet(target: String, interval: Int) = send("AUTOPOLL,$target,$interval")
     fun autoPollOff() = send("AUTOPOLL,OFF")
+
+    // ─── OTA firmware upload (Phase 3) ───────────────────────
+    // Send a FW,* command and suspend until the matching reply lands
+    // on the incomingData SharedFlow. We use onSubscription { send(...) }
+    // so the subscriber is registered BEFORE the firmware can reply —
+    // without that, a fast-replying firmware could emit the reply
+    // before .first { ... } starts collecting, and we'd hang on the
+    // timeout. onSubscription guarantees subscribe → send → collect
+    // ordering on a single coroutine.
+    //
+    // Each method returns the raw reply line so the caller (ViewModel)
+    // can parse it. Returns the reply on success, throws
+    // TimeoutCancellationException via withTimeout on no reply.
+
+    suspend fun otaVersion(timeoutMs: Long = 3000L): String =
+        withTimeout(timeoutMs) {
+            incomingData
+                .onSubscription { send("FW,VERSION") }
+                .first { it.startsWith("FW,VERSION,") }
+        }
+
+    suspend fun otaBegin(totalBytes: Int, sha256Hex: String,
+                         timeoutMs: Long = 5000L): String =
+        withTimeout(timeoutMs) {
+            incomingData
+                .onSubscription { send("FW,BEGIN,$totalBytes,$sha256Hex") }
+                .first { it.startsWith("FW,BEGIN,") }
+        }
+
+    suspend fun otaChunk(seq: Int, payloadHex: String,
+                         timeoutMs: Long = 5000L): String =
+        withTimeout(timeoutMs) {
+            incomingData
+                .onSubscription { send("FW,CHUNK,$seq,$payloadHex") }
+                .first {
+                    it.startsWith("FW,ACK,") ||
+                    it.startsWith("FW,NACK,")
+                }
+        }
+
+    suspend fun otaEnd(sha256Hex: String,
+                       timeoutMs: Long = 30000L): String =
+        withTimeout(timeoutMs) {
+            incomingData
+                .onSubscription { send("FW,END,$sha256Hex") }
+                .first { it.startsWith("FW,END,") }
+        }
+
+    suspend fun otaAbort(timeoutMs: Long = 3000L): String =
+        withTimeout(timeoutMs) {
+            incomingData
+                .onSubscription { send("FW,ABORT") }
+                .first { it.startsWith("FW,ABORT,") }
+        }
 }

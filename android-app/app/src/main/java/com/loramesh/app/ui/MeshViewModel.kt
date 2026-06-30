@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.location.LocationManager
 import android.media.RingtoneManager
+import android.net.Uri
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -14,9 +15,25 @@ import com.loramesh.app.ble.BleConnectionService
 import com.loramesh.app.ble.BleManager
 import com.loramesh.app.ble.ConnectionState
 import com.loramesh.app.data.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.security.MessageDigest
+
+// ─── OTA upload state (Phase 3) ──────────────────────────────────
+// Top-level enum + data class so they're reachable from
+// OtaUploadScreen without importing ViewModel internals.
+enum class OtaState { IDLE, HASHING, UPLOADING, VERIFYING, REBOOTING, DONE, ERROR }
+data class OtaProgress(
+    val currentChunk: Int,
+    val totalChunks: Int,
+    val bytesSent: Long,
+    val totalBytes: Long,
+)
 
 // ═══════════════════════════════════════════════════════════════
 // ViewModel - bridges BLE manager with UI state
@@ -107,6 +124,28 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
     private val _remotePinConfigs = MutableStateFlow<Map<String, Pair<List<Int>, List<Int>>>>(emptyMap())
     val remotePinConfigs: StateFlow<Map<String, Pair<List<Int>, List<Int>>>> = _remotePinConfigs
 
+    // ─── OTA firmware upload (Phase 3) ───────────────────────
+    private val _otaState = MutableStateFlow(OtaState.IDLE)
+    val otaState: StateFlow<OtaState> = _otaState
+
+    private val _otaProgress = MutableStateFlow<OtaProgress?>(null)
+    val otaProgress: StateFlow<OtaProgress?> = _otaProgress
+
+    private val _otaLastError = MutableStateFlow<String?>(null)
+    val otaLastError: StateFlow<String?> = _otaLastError
+
+    // OTA-side metadata: filename + computed SHA256 prefix for display
+    private val _otaSelectedFileName = MutableStateFlow<String?>(null)
+    val otaSelectedFileName: StateFlow<String?> = _otaSelectedFileName
+
+    private val _otaSelectedFileSha = MutableStateFlow<String?>(null)
+    val otaSelectedFileSha: StateFlow<String?> = _otaSelectedFileSha
+
+    private val _otaSelectedFileUri = MutableStateFlow<Uri?>(null)
+    val otaSelectedFileUri: StateFlow<Uri?> = _otaSelectedFileUri
+
+    private var otaJob: Job? = null
+
     val connectionState = ble.connectionState
     val connectedDeviceName = ble.connectedDeviceName
     val discoveredDevices = ble.discoveredDevices
@@ -158,6 +197,16 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
         _sfChange.value = SfChangeState()
         _statusLine.value = ""
         pendingAcks.clear()
+        // Reset OTA state too so a half-finished upload doesn't show
+        // stale progress after a reconnect to a different node.
+        otaJob?.cancel()
+        otaJob = null
+        _otaState.value = OtaState.IDLE
+        _otaProgress.value = null
+        _otaLastError.value = null
+        _otaSelectedFileName.value = null
+        _otaSelectedFileSha.value = null
+        _otaSelectedFileUri.value = null
     }
 
     // ─── Auto-reconnect ───────────────────────────────────
@@ -293,6 +342,185 @@ class MeshViewModel(app: Application) : AndroidViewModel(app) {
         ble.autoPollSet(target, interval)
     }
     fun stopAutoPoll() = ble.autoPollOff()
+
+    // ─── OTA firmware upload ─────────────────────────────────
+    // The user picks a .bin file via the OtaUploadScreen's
+    // ActivityResultContracts.OpenDocument launcher; the screen calls
+    // selectOtaFile(uri) to register it + compute SHA256 for display.
+    // Then the Upload button triggers startOtaUpload() which streams
+    // the file in OTA_CHUNK_SIZE chunks to the firmware via the BLE
+    // NUS pipe. Progress flows through otaProgress; final state
+    // (DONE / ERROR) lives in otaState.
+    //
+    // Coroutine runs on viewModelScope (survives config changes) +
+    // Dispatchers.IO (file I/O off the main thread). The existing
+    // BleConnectionService foreground service keeps BLE alive if the
+    // user briefly backgrounds the app. Cancellation via cancelOta()
+    // sends FW,ABORT to the firmware so the partition is released.
+    private val OTA_CHUNK_SIZE = 256
+
+    /** User picked a file. Open it, compute SHA256, store for display. */
+    fun selectOtaFile(uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val ctx = getApplication<Application>()
+            try {
+                _otaState.value = OtaState.HASHING
+                _otaLastError.value = null
+                val md = MessageDigest.getInstance("SHA-256")
+                var bytes = 0L
+                ctx.contentResolver.openInputStream(uri)?.use { input ->
+                    val buf = ByteArray(8192)
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n <= 0) break
+                        md.update(buf, 0, n)
+                        bytes += n
+                    }
+                } ?: throw java.io.IOException("Cannot open selected file")
+                val sha = md.digest().joinToString("") { "%02x".format(it) }
+
+                // Try to extract filename from the URI; fall back to "firmware.bin"
+                val name = ctx.contentResolver.query(uri, null, null, null, null)?.use { c ->
+                    val idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                    if (idx >= 0 && c.moveToFirst()) c.getString(idx) else null
+                } ?: "firmware.bin"
+
+                _otaSelectedFileUri.value = uri
+                _otaSelectedFileName.value = "$name (${bytes / 1024} KB)"
+                _otaSelectedFileSha.value = sha
+                _otaState.value = OtaState.IDLE   // ready to upload
+            } catch (e: Exception) {
+                _otaLastError.value = e.message ?: "Failed to read file"
+                _otaState.value = OtaState.ERROR
+            }
+        }
+    }
+
+    /** Upload the previously-selected file to the connected node. */
+    fun startOtaUpload() {
+        val uri = _otaSelectedFileUri.value ?: return
+        val sha = _otaSelectedFileSha.value ?: return
+        if (_otaState.value !in setOf(OtaState.IDLE, OtaState.DONE, OtaState.ERROR)) return
+
+        otaJob = viewModelScope.launch(Dispatchers.IO) {
+            val ctx = getApplication<Application>()
+            try {
+                _otaLastError.value = null
+                _otaProgress.value = null
+
+                // Determine total bytes (we hashed already; re-open and stream)
+                val totalBytes = ctx.contentResolver.openInputStream(uri)?.use { it.available().toLong() } ?: 0L
+                // openInputStream(uri).available() isn't always accurate on Android;
+                // fall back to a counted read if zero.
+                val byteCount = if (totalBytes > 0) totalBytes else countBytes(ctx, uri)
+                if (byteCount <= 0) throw java.io.IOException("File is empty or unreadable")
+
+                _otaState.value = OtaState.UPLOADING
+
+                // FW,BEGIN — firmware erases the next slot here, takes a moment
+                val beginReply = ble.otaBegin(byteCount.toInt(), sha, timeoutMs = 10000L)
+                if (!beginReply.startsWith("FW,BEGIN,OK,")) {
+                    fail("BEGIN rejected: $beginReply")
+                    return@launch
+                }
+                val chunkSize = beginReply.removePrefix("FW,BEGIN,OK,").toIntOrNull() ?: OTA_CHUNK_SIZE
+
+                val totalChunks = ((byteCount + chunkSize - 1) / chunkSize).toInt()
+
+                // FW,CHUNK loop — strict in-order, one ACK per chunk
+                ctx.contentResolver.openInputStream(uri)?.use { input ->
+                    val buf = ByteArray(chunkSize)
+                    var seq = 0
+                    var bytesSent = 0L
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n <= 0) break
+                        val hex = StringBuilder(n * 2)
+                        for (i in 0 until n) hex.append("%02x".format(buf[i]))
+                        val ack = ble.otaChunk(seq, hex.toString(), timeoutMs = 8000L)
+                        if (!ack.startsWith("FW,ACK,$seq")) {
+                            fail("Chunk $seq rejected: $ack")
+                            return@launch
+                        }
+                        bytesSent += n
+                        _otaProgress.value = OtaProgress(
+                            currentChunk = seq + 1,
+                            totalChunks = totalChunks,
+                            bytesSent = bytesSent,
+                            totalBytes = byteCount,
+                        )
+                        seq++
+                    }
+                } ?: run { fail("Cannot reopen file for upload"); return@launch }
+
+                // FW,END — firmware verifies SHA, commits partition, schedules reboot.
+                // 30s timeout because firmware spends ~500ms+ on the partition
+                // bookkeeping then disconnects BLE before we get the reply.
+                _otaState.value = OtaState.VERIFYING
+                val endReply = ble.otaEnd(sha, timeoutMs = 30000L)
+                if (!endReply.startsWith("FW,END,OK,")) {
+                    fail("END rejected: $endReply")
+                    return@launch
+                }
+
+                _otaState.value = OtaState.REBOOTING
+                // Node reboots ~500ms after sending the OK. BLE will drop, then
+                // the foreground service's auto-reconnect kicks in. We don't
+                // actively reconnect — leave that to the existing flow. Just
+                // wait long enough that "DONE" reflects when the user could
+                // expect to see the node come back.
+                delay(20_000)   // 20s — boot + BLE rediscovery typically ~10-15s
+
+                _otaState.value = OtaState.DONE
+            } catch (e: TimeoutCancellationException) {
+                fail("Timeout waiting for reply from node")
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // Cancelled (user pressed Cancel). Don't overwrite the state — cancelOta() handled it.
+                throw e
+            } catch (e: Exception) {
+                fail(e.message ?: "Unknown error")
+            }
+        }
+    }
+
+    /** Cancel an in-flight upload — fires FW,ABORT to release the partition. */
+    fun cancelOta() {
+        otaJob?.cancel()
+        otaJob = null
+        // Best-effort ABORT — if BLE is dead this will throw, which we swallow
+        viewModelScope.launch {
+            try { ble.otaAbort() } catch (_: Exception) { /* ignore */ }
+        }
+        _otaState.value = OtaState.IDLE
+        _otaProgress.value = null
+    }
+
+    /** Clear an error so the user can retry. */
+    fun clearOtaError() {
+        if (_otaState.value == OtaState.ERROR) {
+            _otaState.value = OtaState.IDLE
+            _otaLastError.value = null
+        }
+    }
+
+    private fun fail(msg: String) {
+        _otaLastError.value = msg
+        _otaState.value = OtaState.ERROR
+    }
+
+    private suspend fun countBytes(ctx: android.content.Context, uri: Uri): Long =
+        withContext(Dispatchers.IO) {
+            var n = 0L
+            ctx.contentResolver.openInputStream(uri)?.use { input ->
+                val buf = ByteArray(8192)
+                while (true) {
+                    val r = input.read(buf)
+                    if (r <= 0) break
+                    n += r
+                }
+            }
+            n
+        }
 
     // ─── Nodes request ─────────────────────────────────────
     fun requestNodes() = ble.send("NODES")

@@ -71,6 +71,7 @@ enum class Screen(val label: String, val icon: ImageVector) {
     NODES("Nodes", Icons.Default.CellTower),
     MAP("Map", Icons.Default.Map),
     CONTROL("Control", Icons.Default.SettingsRemote),
+    OTA("OTA", Icons.Default.SystemUpdate),
     SETTINGS("Settings", Icons.Default.Settings)
 }
 
@@ -154,6 +155,7 @@ fun MainApp(viewModel: MeshViewModel = viewModel()) {
                 Screen.NODES -> NodesScreen(viewModel)
                 Screen.MAP -> MapScreen(viewModel)
                 Screen.CONTROL -> ControlScreen(viewModel)
+                Screen.OTA -> OtaUploadScreen(viewModel)
                 Screen.SETTINGS -> SettingsScreen(viewModel)
             }
         }
