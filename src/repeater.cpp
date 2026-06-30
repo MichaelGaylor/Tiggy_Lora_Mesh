@@ -37,6 +37,29 @@
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #endif
+#include <esp_ota_ops.h>   // OTA rollback: post-boot validity mark in setup()
+
+// OTA: mark a freshly-flashed image valid so the bootloader stops the rollback
+// timer. Only fires for OTA-flashed images that are still PENDING_VERIFY —
+// USB-flashed images return VALID/UNDEFINED and skip the call (correct; they
+// don't need marking). Called from both the solar-mode and normal boot paths
+// in setup() so OTA-flashed solar nodes don't accidentally rollback on the
+// next reboot. If a freshly-flashed image crashes before reaching this call,
+// the bootloader auto-reverts to the previous slot. This is the safety net
+// that makes remote BLE OTA safe on field-deployed nodes.
+static inline void otaMarkImageValidIfPending() {
+    const esp_partition_t* running = esp_ota_get_running_partition();
+    esp_ota_img_states_t state;
+    if (esp_ota_get_state_partition(running, &state) == ESP_OK &&
+        state == ESP_OTA_IMG_PENDING_VERIFY) {
+        esp_ota_mark_app_valid_cancel_rollback();
+        // Note: cannot use debugPrint here because this header runs before
+        // setup() body, where Serial may not yet be initialised. Use raw
+        // Serial.println when we're sure it's available (it is, by the time
+        // this is called from setup()).
+        Serial.println("OTA: image marked valid");
+    }
+}
 
 // Only compile for repeater boards
 #if defined(BOARD_LORA32) || defined(BOARD_HELTEC_V3) || defined(BOARD_HELTEC_V4) || defined(BOARD_XIAO_S3) || defined(BOARD_CUSTOM) || defined(BOARD_TIGGYOPENMESH_V1)
@@ -8519,6 +8542,12 @@ void setup() {
         startSolarMode();
         Serial.println("Solar mode active. OLED off, BLE off, CPU light-sleep between packets.");
         Serial.println("Send SOLAR OFF via serial or press PRG button to restore.");
+        // Solar mode keeps BLE on (line 8505 above), so an OTA-flashed solar
+        // node would reach this branch on every subsequent boot. Mark valid
+        // here too — otherwise the bootloader would roll back the OTA image
+        // on the NEXT reboot because the validity mark in the normal path
+        // (below) is never reached when solarMode is set.
+        otaMarkImageValidIfPending();
         return;
     }
 #endif
@@ -8551,6 +8580,9 @@ void setup() {
     Serial.println("          STATUS | SAVE | RESET | GATEWAY ON/OFF | AUTOPOLL <id> <sec>");
     Serial.println("          PINMODE <pin> PULSE|AUTO | BLEPIN,<6digits> | EEPROM,RESET | REBOOT");
     Serial.println("          BATT | BATT_CFG | BATT_CFG <div> <low_mv> <rec_mv> | BATT_CFG_RESET");
+
+    otaMarkImageValidIfPending();
+
     debugPrint("Free heap: " + String(ESP.getFreeHeap()));
 }
 
