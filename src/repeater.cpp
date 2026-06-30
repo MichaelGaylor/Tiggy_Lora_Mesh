@@ -38,6 +38,8 @@
 #include "driver/uart.h"
 #endif
 #include <esp_ota_ops.h>   // OTA rollback: post-boot validity mark in setup()
+#include <Update.h>        // OTA Phase 2: Arduino-ESP32 partition write API
+#include <mbedtls/sha256.h>  // OTA Phase 2: SHA256 of incoming image for integrity
 
 // OTA: mark a freshly-flashed image valid so the bootloader stops the rollback
 // timer. Only fires for OTA-flashed images that are still PENDING_VERIFY —
@@ -6526,8 +6528,261 @@ void bleSend(const String& line) {
     delay(30);
 }
 
+// ════════════════════════════════════════════════════════════════════
+// OTA Phase 2 — FW,* command set for BLE firmware uploads
+// ════════════════════════════════════════════════════════════════════
+// Wire protocol (text, line-oriented; runs through processBleCommand
+// from either BLE NUS or USB-CDC serial via the same code path):
+//
+//   FW,VERSION                    → query running image (no state change)
+//   FW,BEGIN,<bytes>,<sha256hex>  → start session, erase next slot
+//   FW,CHUNK,<seq>,<hexPayload>   → append 256-byte (max) chunk
+//   FW,END,<sha256hex>            → verify + commit + reboot
+//   FW,ABORT                      → tear down session
+//
+// Safety net: every OTA-flashed image enters PENDING_VERIFY state. If
+// setup() runs to completion, otaMarkImageValidIfPending() commits the
+// image. If it crashes before, the bootloader reverts on next reboot.
+// (Phase 1 — already committed at cf19463.)
+//
+// Coexistence: while an OTA session is active, we park the LoRa radio
+// in standby AND disable BLE beacon scanning. The historical bluedroid
+// dual-mode failures (commit 8256676) hit precisely this scenario —
+// GATT server + BLE scanner concurrent under load. NimBLE handles it
+// far better, but the safest bet is to remove the variable entirely
+// for the OTA duration. Mesh and beacon resume the moment the upload
+// completes or aborts.
+
+#define OTA_SESSION_TIMEOUT_MS 60000UL
+#define OTA_CHUNK_SIZE         256       // bytes, advertised in BEGIN reply
+#define OTA_MAX_CHUNK_BYTES    512       // accept up to 2x advertised for headroom
+
+static bool          otaActive       = false;
+static bool          otaRebooting    = false;
+static unsigned long otaRebootAtMs   = 0;
+static bool          otaRadioPaused  = false;
+static bool          otaPriorBeaconScanEnabled = true;
+static mbedtls_sha256_context otaCtx;
+static size_t        otaTotalSize    = 0;
+static size_t        otaBytesWritten = 0;
+static uint8_t       otaTargetSha[32];
+static uint16_t      otaLastSeq      = 0xFFFF;       // 0xFFFF = none yet
+static unsigned long otaLastChunkMs  = 0;
+
+// Parse 64-hex-char SHA256 string into a 32-byte array. Returns false
+// on length mismatch or non-hex characters.
+static bool otaParseSha256(const String& hex, uint8_t out[32]) {
+    if (hex.length() != 64) return false;
+    auto h2n = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    for (int i = 0; i < 32; i++) {
+        int hi = h2n(hex[i*2]);
+        int lo = h2n(hex[i*2 + 1]);
+        if (hi < 0 || lo < 0) return false;
+        out[i] = (uint8_t)((hi << 4) | lo);
+    }
+    return true;
+}
+
+// Tear-down — called on explicit FW,ABORT, session timeout, hash
+// mismatch in FW,END, or Update.end() failure. Restores radio +
+// beacon scanning to pre-OTA state. Idempotent (safe to call when
+// no session is active).
+static void otaHandleAbort() {
+    if (!otaActive && !otaRadioPaused) return;
+    if (otaActive) {
+        Update.abort();
+        mbedtls_sha256_free(&otaCtx);
+    }
+    if (otaRadioPaused) {
+        radio.startReceive();
+        otaRadioPaused = false;
+    }
+    // Restore beacon scanning to whatever it was before OTA — preserve
+    // user's prior setting rather than unconditionally re-enable.
+    beaconScanEnabled = otaPriorBeaconScanEnabled;
+    otaActive       = false;
+    otaTotalSize    = 0;
+    otaBytesWritten = 0;
+    otaLastSeq      = 0xFFFF;
+    memset(otaTargetSha, 0, sizeof(otaTargetSha));
+}
+
+// FW,VERSION — report running image info. Read-only, no state change.
+static String otaHandleVersion() {
+    const esp_partition_t* p = esp_ota_get_running_partition();
+    String slot = p ? String(p->label) : "?";
+    size_t freeKB = ESP.getFreeHeap() / 1024;
+    // Compile-time build stamp (more portable than esp_app_desc reads).
+    static const char* buildTs = __DATE__ " " __TIME__;
+    return "FW,VERSION," + slot + "," + String(buildTs) + "," + String(freeKB);
+}
+
+// FW,BEGIN,<bytes>,<sha256hex>  — start a session, erase the next slot.
+static String otaHandleBegin(const String& args) {
+    int c1 = args.indexOf(',');
+    if (c1 < 0) return "FW,BEGIN,ERR,FORMAT";
+    long total = args.substring(0, c1).toInt();
+    String shaHex = args.substring(c1 + 1);
+    uint8_t sha[32];
+    if (!otaParseSha256(shaHex, sha)) return "FW,BEGIN,ERR,FORMAT";
+    if (total <= 0) return "FW,BEGIN,ERR,FORMAT";
+
+    if (otaActive) otaHandleAbort();   // start fresh
+
+    const esp_partition_t* next = esp_ota_get_next_update_partition(NULL);
+    if (!next) return "FW,BEGIN,ERR,NO_PARTITION";
+    if ((size_t)total > next->size) return "FW,BEGIN,ERR,TOO_BIG";
+
+    // Quiesce both radios — see header comment for the dual-mode story.
+    radio.standby();
+    otaRadioPaused = true;
+    otaPriorBeaconScanEnabled = beaconScanEnabled;
+    beaconScanEnabled = false;
+
+    if (!Update.begin((size_t)total, U_FLASH)) {
+        // Unwind on failure — restore everything we just paused.
+        radio.startReceive();
+        otaRadioPaused = false;
+        beaconScanEnabled = otaPriorBeaconScanEnabled;
+        return "FW,BEGIN,ERR,WRITE_FAIL";
+    }
+
+    mbedtls_sha256_init(&otaCtx);
+    mbedtls_sha256_starts(&otaCtx, 0);
+    memcpy(otaTargetSha, sha, 32);
+    otaTotalSize    = (size_t)total;
+    otaBytesWritten = 0;
+    otaLastSeq      = 0xFFFF;
+    otaLastChunkMs  = millis();
+    otaActive       = true;
+    debugPrint("OTA: session begin, " + String(total) + " bytes");
+    return "FW,BEGIN,OK," + String(OTA_CHUNK_SIZE);
+}
+
+// FW,CHUNK,<seq>,<hexPayload>  — append decoded bytes to the partition.
+// Idempotent on the most-recently-acked seq (dup-ack on retransmit).
+static String otaHandleChunk(const String& args) {
+    int c1 = args.indexOf(',');
+    if (c1 < 0) return "FW,NACK,0,FORMAT";
+    long seq = args.substring(0, c1).toInt();
+    String hex = args.substring(c1 + 1);
+    String seqStr = String((int)seq);
+
+    if (!otaActive) return "FW,NACK," + seqStr + ",NO_SESSION";
+
+    int payloadLen = hex.length() / 2;
+    if (payloadLen <= 0 || payloadLen > OTA_MAX_CHUNK_BYTES)
+        return "FW,NACK," + seqStr + ",FORMAT";
+
+    // Stack buffer — OTA_MAX_CHUNK_BYTES (512) is well within ESP32 task
+    // stack (default ~8KB). Decoded payload flows straight into Update.
+    uint8_t buf[OTA_MAX_CHUNK_BYTES];
+    int outLen = 0;
+    mesh.hexToBytes(hex, buf, outLen);
+    if (outLen != payloadLen) return "FW,NACK," + seqStr + ",FORMAT";
+
+    // Idempotent dup: same seq as we last acked → re-ACK without re-write.
+    if ((uint16_t)seq == otaLastSeq) return "FW,ACK," + seqStr;
+    // Strict in-order: anything other than lastSeq+1 (or 0 on first chunk)
+    // is OUT_OF_ORDER. Sender must FW,ABORT + FW,BEGIN to recover.
+    if (otaLastSeq != 0xFFFF && (uint16_t)seq != (uint16_t)(otaLastSeq + 1))
+        return "FW,NACK," + seqStr + ",OUT_OF_ORDER";
+    if (otaLastSeq == 0xFFFF && seq != 0)
+        return "FW,NACK," + seqStr + ",OUT_OF_ORDER";
+
+    size_t w = Update.write(buf, payloadLen);
+    if (w != (size_t)payloadLen) return "FW,NACK," + seqStr + ",WRITE_FAIL";
+    mbedtls_sha256_update(&otaCtx, buf, payloadLen);
+    otaBytesWritten += payloadLen;
+    otaLastSeq      = (uint16_t)seq;
+    otaLastChunkMs  = millis();
+    return "FW,ACK," + seqStr;
+}
+
+// FW,END,<sha256hex>  — verify + commit + schedule reboot.
+static String otaHandleEnd(const String& shaHex) {
+    if (!otaActive) return "FW,END,ERR,NO_SESSION";
+    uint8_t finalSha[32];
+    if (!otaParseSha256(shaHex, finalSha)) return "FW,END,ERR,FORMAT";
+    if (otaBytesWritten != otaTotalSize) return "FW,END,ERR,NOT_FINISHED";
+    if (memcmp(finalSha, otaTargetSha, 32) != 0)
+        return "FW,END,ERR,HASH_MISMATCH";
+
+    uint8_t computed[32];
+    mbedtls_sha256_finish(&otaCtx, computed);
+    mbedtls_sha256_free(&otaCtx);   // hash context done either way
+    if (memcmp(computed, finalSha, 32) != 0) {
+        // computed hash differs from declared — partition holds corrupt
+        // data. Abort restores radio + beacon and frees the slot.
+        otaActive = false;          // skip the second sha256_free in abort
+        Update.abort();
+        if (otaRadioPaused) { radio.startReceive(); otaRadioPaused = false; }
+        beaconScanEnabled = otaPriorBeaconScanEnabled;
+        return "FW,END,ERR,HASH_MISMATCH";
+    }
+    if (!Update.end(true)) {        // marks new slot as boot target
+        otaActive = false;
+        if (otaRadioPaused) { radio.startReceive(); otaRadioPaused = false; }
+        beaconScanEnabled = otaPriorBeaconScanEnabled;
+        return "FW,END,ERR,WRITE_FAIL";
+    }
+
+    // Successful commit. We're about to reboot — leave radio paused
+    // (no point resuming what we're about to power-cycle) and beacon
+    // disabled. They'll come back automatically after reboot since
+    // the new image's setup() initialises them fresh.
+    otaActive    = false;
+    otaRebooting = true;
+    otaRebootAtMs = millis() + 500;   // let the OK reply drain BLE TX
+    debugPrint("OTA: image committed, rebooting in 500ms");
+    return "FW,END,OK,REBOOTING";
+}
+
+// FW,* dispatcher — called from processBleCommand for any line that
+// starts with "FW,". Replies via bleSend (or Serial when fromSerial,
+// since processBleCommand handles that distinction).
+static void otaDispatchFW(const String& line) {
+    int c1 = line.indexOf(',');
+    if (c1 < 0) { bleSend("FW,ERR,FORMAT"); return; }
+    int c2 = line.indexOf(',', c1 + 1);
+    String verb = (c2 > 0) ? line.substring(c1 + 1, c2) : line.substring(c1 + 1);
+    String args = (c2 > 0) ? line.substring(c2 + 1) : "";
+
+    String reply;
+    if      (verb == "VERSION") reply = otaHandleVersion();
+    else if (verb == "BEGIN")   reply = otaHandleBegin(args);
+    else if (verb == "CHUNK")   reply = otaHandleChunk(args);
+    else if (verb == "END")     reply = otaHandleEnd(args);
+    else if (verb == "ABORT") { otaHandleAbort(); reply = "FW,ABORT,OK"; }
+    else                        reply = "FW,ERR,UNKNOWN_VERB";
+
+    bleSend(reply);
+}
+
 void processBleCommand(const String& line, bool fromSerial) {
     debugPrint("BLE CMD: " + line);
+
+    // OTA reboot-pending gate: block all command processing during the
+    // 500ms reply-drain window before ESP.restart() fires from loop().
+    // A concurrent app probe could otherwise backlog the BLE TX queue
+    // past the restart and lose the FW,END,OK,REBOOTING reply.
+    if (otaRebooting) return;
+
+    // OTA FW,* dispatch — handled before the SETUP_MODE / PIN guard
+    // because FW,VERSION needs to be callable from a freshly-paired
+    // device to confirm reachability. FW,BEGIN / CHUNK / END / ABORT
+    // make their own session checks. No PIN-gated commands need to
+    // exclude OTA — uploading firmware is an authenticated act by
+    // virtue of having a BLE bond + the app being on the user's phone.
+    if (line.startsWith("FW,")) {
+        otaDispatchFW(line);
+        return;
+    }
 
     // Setup mode: only enforce PIN for BLE connections, not serial (physical access = trusted)
     if (blePinIsDefault && !fromSerial &&
@@ -7398,7 +7653,7 @@ void handleSerialConfig() {
              line.startsWith("BEACON,") || line.startsWith("BLEPIN,") ||
              line.startsWith("COUNTER,") || line.startsWith("LOGIC,") ||
              line.startsWith("LATCH,") || line.startsWith("SCALE,") ||
-             line.startsWith("PLC,")) {
+             line.startsWith("PLC,") || line.startsWith("FW,")) {
         processBleCommand(line, true);  // fromSerial=true: skip BLE PIN check
     }
     else Serial.println("Commands: ID xxxx | KEY xxx... | Example RELAY 2,4,12 | SENSOR 34,36 | GPS <tx>,<rx> | GPS OFF | STATUS | SAVE | RESET | GATEWAY ON/OFF | AUTOPOLL <id> <sec> | PINMODE <pin> PULSE|AUTO"
@@ -8587,6 +8842,21 @@ void setup() {
 }
 
 void loop() {
+    // OTA session inactivity timeout — if the phone disconnects or the
+    // upload stalls, tear down the session after 60s of no chunks so
+    // a fresh FW,BEGIN can reuse the partition. Also resumes radio
+    // and beacon scan inside otaHandleAbort().
+    if (otaActive && (millis() - otaLastChunkMs) > OTA_SESSION_TIMEOUT_MS) {
+        otaHandleAbort();
+        debugPrint("OTA: session timeout, aborted");
+    }
+
+    // OTA deferred reboot — fires ~500 ms after FW,END,OK reply was
+    // queued so the BLE notification actually drains before restart.
+    if (otaRebooting && otaRebootAtMs && millis() >= otaRebootAtMs) {
+        ESP.restart();   // does not return
+    }
+
     // ─── Solar mode — deep low-power with light sleep ──────────
     // OLED off, BLE off, CPU sleeps between DIO1 (radio packet) interrupts.
     // Radio stays in continuous RX — no packets lost.
