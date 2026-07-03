@@ -484,6 +484,7 @@ struct PlcStats {
     uint32_t counterFires= 0;
     uint32_t timerFires  = 0;  // Timer rising/falling edges
     uint32_t setpointFires = 0; // Setpoint actions actually dispatched
+    uint32_t deltaFires  = 0;  // DELTA outputs written (one per period expiry)
     uint32_t lastFireMs  = 0;  // millis() of the last setpoint fire
 };
 PlcStats plcStats;
@@ -1853,7 +1854,8 @@ void sendHeartbeatWithFlags() {
     mesh.plcScans = plcStats.scanTicks;
     mesh.plcFires = plcStats.logicFires + plcStats.latchFires +
                     plcStats.scaleFires + plcStats.counterFires +
-                    plcStats.timerFires + plcStats.setpointFires;
+                    plcStats.timerFires + plcStats.setpointFires +
+                    plcStats.deltaFires;
     mesh.sendHeartbeat();
 
     // In gateway mode, publish our own battery to serial — remote nodes
@@ -4350,6 +4352,173 @@ void handleScaleCmd(const String& args, const String& from) {
     bleSend(resp);
 }
 
+// ─── DELTA: rate-of-change primitive (deployable Delta-Rate) ────
+// Every `periodMs` this primitive samples the input, computes
+// `current - lastValue`, writes the delta to the output vpin as a
+// signed int16, and snapshots the current value + time for the next
+// period. Output can be negative when the input is decreasing, so
+// setVpinSigned() is called on the output vpin at install time — any
+// downstream Compare / LOGIC / SETPOINT sees the sign-extended value
+// via readSensorPin's isVpinSigned() check.
+//
+// This is the firmware-native counterpart to the gateway's Python-side
+// Delta-Rate block. Deploying it locally means the gateway no longer
+// needs to receive every sensor sample just to compute deltas — only
+// downstream primitives (like SETPOINT MSG on a threshold crossing)
+// put anything on the LoRa mesh, and only when they fire. That's a
+// ~172,000× reduction in vpin telemetry vs the gateway-side Delta-
+// Rate flow for a magnetometer vehicle detector.
+//
+// State semantics:
+//   lastTime == 0  → uninitialised. First checkDeltas() tick after
+//                    install snapshots the current value + time and
+//                    emits nothing. This matches the gateway-side
+//                    behaviour of returning None on the first sample
+//                    so downstream Compare doesn't see a spurious
+//                    "delta=huge" on startup.
+//   lastTime  > 0  → gated on (now - lastTime) >= periodMs. When
+//                    triggered, compute delta, clamp to int16 range,
+//                    bit-cast to uint16 for vpin storage, refresh the
+//                    snapshot.
+#define MAX_DELTA_RULES 4
+struct DeltaRule {
+    bool     active = false;
+    uint8_t  outputVpin;
+    uint8_t  inputPin;
+    uint16_t periodMs;      // 100..65500, validated at ADD
+    int16_t  lastValue;
+    uint32_t lastTime;      // millis() of last sample; 0 = uninitialised
+};
+DeltaRule deltaRules[MAX_DELTA_RULES];
+
+void checkDeltas() {
+    uint32_t now = millis();
+    for (int i = 0; i < MAX_DELTA_RULES; i++) {
+        DeltaRule& r = deltaRules[i];
+        if (!r.active) continue;
+        // First tick after install / reboot: snapshot current, emit
+        // nothing. The output vpin keeps its last value (or 0 on
+        // fresh boot) until the second tick.
+        if (r.lastTime == 0) {
+            r.lastValue = (int16_t)((r.inputPin > 0) ? readSensorPin(r.inputPin) : 0);
+            r.lastTime  = now;
+            continue;
+        }
+        if ((uint32_t)(now - r.lastTime) < r.periodMs) continue;
+
+        int cur   = (r.inputPin > 0) ? readSensorPin(r.inputPin) : 0;
+        long delta = (long)cur - (long)r.lastValue;
+        if (delta >  32767) delta =  32767;
+        if (delta < -32768) delta = -32768;
+        // Bit-cast into uint16 for storage. The signed-mask bit set
+        // at install time tells readSensorPin to sign-extend the
+        // stored value on read, so downstream primitives see the
+        // correct negative values.
+        setVpinValue(r.outputVpin, (uint16_t)(int16_t)delta);
+        r.lastValue = (int16_t)cur;
+        r.lastTime  = now;
+        plcStats.deltaFires++;
+    }
+}
+
+String processDeltaCommand(const String& args) {
+    String act = args;
+    int comma = act.indexOf(',');
+    String first = (comma >= 0) ? act.substring(0, comma) : act;
+    String rest  = (comma >= 0) ? act.substring(comma + 1) : "";
+    first.toUpperCase();
+
+    if (first == "CLEAR") {
+        for (int i = 0; i < MAX_DELTA_RULES; i++) deltaRules[i].active = false;
+        savePlcTables();
+        return "OK,DELTA,CLEAR";
+    }
+    if (first == "LIST") {
+        String resp = "DELTAS";
+        int count = 0;
+        for (int i = 0; i < MAX_DELTA_RULES; i++) {
+            if (!deltaRules[i].active) continue;
+            count++;
+            resp += "," + String(deltaRules[i].outputVpin) + ":" +
+                    "in=" + String(deltaRules[i].inputPin) + ":" +
+                    "p="  + String(deltaRules[i].periodMs) + "ms";
+        }
+        if (count == 0) resp += ",NONE";
+        return resp;
+    }
+    if (first == "DELETE") {
+        int vpin = rest.toInt();
+        for (int i = 0; i < MAX_DELTA_RULES; i++) {
+            if (deltaRules[i].active && deltaRules[i].outputVpin == vpin) {
+                deltaRules[i].active = false;
+                savePlcTables();
+                return "OK,DELTA,DELETE," + String(vpin);
+            }
+        }
+        return "ERR,DELTA,NOTFOUND";
+    }
+    if (first == "ADD") {
+        // <out_vpin>,<in_pin>,<period_ms>
+        int c1 = rest.indexOf(','); if (c1 < 0) return "ERR,DELTA,FORMAT";
+        int vpin = rest.substring(0, c1).toInt();
+        String tmp = rest.substring(c1 + 1);
+        int c2 = tmp.indexOf(','); if (c2 < 0) return "ERR,DELTA,FORMAT";
+        int inPin = tmp.substring(0, c2).toInt();
+        int period = tmp.substring(c2 + 1).toInt();
+
+        if (!(isStorageVpin(vpin) || isScratchVpin(vpin))) return "ERR,DELTA,BADVPIN";
+        // 0 is the sentinel for "unwired input" — mirrors SCALE's ADD
+        // path. Any non-zero pin must be measurable.
+        if (inPin != 0 && !isPinConfigurable(inPin)) return "ERR,DELTA,BADIN";
+        // Period bounds: min 100 ms (well below any realistic sensor
+        // cadence — sub-100 ms would burn CPU on the millis() gate for
+        // no benefit). Max 65500 ms leaves uint16 headroom.
+        if (period < 100 || period > 65500) return "ERR,DELTA,BADPERIOD";
+
+        int slot = -1;
+        for (int i = 0; i < MAX_DELTA_RULES; i++) {
+            if (deltaRules[i].active && deltaRules[i].outputVpin == vpin) { slot = i; break; }
+        }
+        if (slot < 0) {
+            for (int i = 0; i < MAX_DELTA_RULES; i++) {
+                if (!deltaRules[i].active) { slot = i; break; }
+            }
+        }
+        if (slot < 0) return "ERR,DELTA,FULL";
+
+        memset(&deltaRules[slot], 0, sizeof(DeltaRule));
+        deltaRules[slot].active     = true;
+        deltaRules[slot].outputVpin = (uint8_t)vpin;
+        deltaRules[slot].inputPin   = (uint8_t)inPin;
+        deltaRules[slot].periodMs   = (uint16_t)period;
+        // lastValue / lastTime stay 0 — checkDeltas will initialise
+        // on its first tick after install.
+
+        // DELTA output is inherently signed (can be negative when the
+        // input is decreasing). Mark the vpin signed so any downstream
+        // Compare/LOGIC/SETPOINT reads the sign-extended value via
+        // readSensorPin's isVpinSigned() check. Mirrors the discipline
+        // used in the magnetometer install path.
+        setVpinSigned(vpin, true);
+
+        savePlcTables();
+        return "OK,DELTA,ADD," + String(vpin) + "," + String(inPin) +
+               "," + String(period);
+    }
+    return "ERR,DELTA,UNKNOWN";
+}
+void handleDeltaBle(const String& args) { bleSend(processDeltaCommand(args)); }
+void handleDeltaCmd(const String& args, const String& from) {
+    String resp = processDeltaCommand(args);
+    mesh.cmdsExecuted++;
+    String mid = mesh.generateMsgID();
+    String hex = mesh.encryptMsg(resp);
+    String payload = String(mesh.localID) + "," + from + "," + mid + "," +
+                     String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+    mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+    bleSend(resp);
+}
+
 // ─── PLC,CLEAR / PLC,DEPLOY — batched rule deploy ──────────────
 // One firmware verb that bundles up to ~6 PLC primitives in a single
 // LoRa packet. Replaces the per-primitive CLEAR+ADD chatter (was 6
@@ -4370,6 +4539,7 @@ void handleScaleCmd(const String& args, const String& from) {
 //     K = LATCH    (wraps to 'LATCH,ADD,<args>')  — K not L since L is taken
 //     X = SCALE    (wraps to 'SCALE,ADD,<args>')
 //     T = TIMER    (raw args, same as 'TIMER,<args>')
+//     D = DELTA    (wraps to 'DELTA,ADD,<args>')
 //
 // Example:
 //   PLC,DEPLOY,R;T,200,PULSE,15,15,0;L,201,GT,200,1,0,0;S,201,GE,1,MSG,Open,Closed
@@ -4397,21 +4567,23 @@ String processPlcCommand(const String& args) {
     // landed (and didn't lose half its primitives to a dropped LoRa
     // packet). Much smaller reply than PLC,LIST.
     if (verb == "COUNT") {
-        int sp = 0, ct = 0, lg = 0, lt = 0, sc = 0, tm = 0;
-        for (int i = 0; i < MAX_SETPOINTS;   i++) if (setpoints[i].active)  sp++;
-        for (int i = 0; i < MAX_COUNTERS;    i++) if (counters[i].active)   ct++;
-        for (int i = 0; i < MAX_LOGIC_RULES; i++) if (logicRules[i].active) lg++;
-        for (int i = 0; i < MAX_LATCH_RULES; i++) if (latchRules[i].active) lt++;
-        for (int i = 0; i < MAX_SCALE_RULES; i++) if (scaleRules[i].active) sc++;
-        for (int i = 0; i < MAX_TIMERS;      i++) if (timers[i].active)     tm++;
-        int total = sp + ct + lg + lt + sc + tm;
+        int sp = 0, ct = 0, lg = 0, lt = 0, sc = 0, tm = 0, dl = 0;
+        for (int i = 0; i < MAX_SETPOINTS;    i++) if (setpoints[i].active)  sp++;
+        for (int i = 0; i < MAX_COUNTERS;     i++) if (counters[i].active)   ct++;
+        for (int i = 0; i < MAX_LOGIC_RULES;  i++) if (logicRules[i].active) lg++;
+        for (int i = 0; i < MAX_LATCH_RULES;  i++) if (latchRules[i].active) lt++;
+        for (int i = 0; i < MAX_SCALE_RULES;  i++) if (scaleRules[i].active) sc++;
+        for (int i = 0; i < MAX_TIMERS;       i++) if (timers[i].active)     tm++;
+        for (int i = 0; i < MAX_DELTA_RULES;  i++) if (deltaRules[i].active) dl++;
+        int total = sp + ct + lg + lt + sc + tm + dl;
         return String("OK,PLC,COUNT,total=") + String(total)
              + ",setpoint=" + String(sp)
              + ",counter="  + String(ct)
              + ",logic="    + String(lg)
              + ",latch="    + String(lt)
              + ",scale="    + String(sc)
-             + ",timer="    + String(tm);
+             + ",timer="    + String(tm)
+             + ",delta="    + String(dl);
     }
 
     // PERSIST — toggle the EEPROM-mirror bit for one storage vpin.
@@ -4443,10 +4615,15 @@ String processPlcCommand(const String& args) {
     if (verb == "STATUS") {
         uint32_t totalFires = plcStats.logicFires + plcStats.latchFires +
                               plcStats.scaleFires + plcStats.counterFires +
-                              plcStats.timerFires + plcStats.setpointFires;
+                              plcStats.timerFires + plcStats.setpointFires +
+                              plcStats.deltaFires;
+        // cap=3 signals to the gateway that this firmware understands
+        // the DELTA primitive (bumped from cap=2 when DELTA was added).
+        // A gateway that sees cap<3 can fall back to the gateway-side
+        // Delta-Rate evaluator for compatibility with older firmware.
         return String("OK,PLC,STATUS,scans=") + String(plcStats.scanTicks)
              + ",fires="                       + String(totalFires)
-             + ",bin=1,cap=2";
+             + ",bin=1,cap=3";
     }
 
     // CLEAR — wipes all 6 PLC tables in one shot. Each individual CLEAR is
@@ -4458,6 +4635,7 @@ String processPlcCommand(const String& args) {
         processLatchCommand("CLEAR");
         processScaleCommand("CLEAR");
         processTimerCommand("CLEAR");
+        processDeltaCommand("CLEAR");
         clearAllStorageVpins();
         clearAllScratchVpins();
         clearAllDevices();
@@ -4491,6 +4669,7 @@ String processPlcCommand(const String& args) {
         processLatchCommand("CLEAR");
         processScaleCommand("CLEAR");
         processTimerCommand("CLEAR");
+        processDeltaCommand("CLEAR");
         clearAllStorageVpins();
         clearAllScratchVpins();
         clearAllDevices();
@@ -4533,6 +4712,7 @@ String processPlcCommand(const String& args) {
             case 'K': resp = processLatchCommand("ADD," + tail); break;
             case 'X': resp = processScaleCommand("ADD," + tail); break;
             case 'T': resp = processTimerCommand(tail); break;
+            case 'D': resp = processDeltaCommand("ADD," + tail); break;
 
             // ── Compact setpoint shortcuts ──
             // 'p' / 'q': pulse-action setpoint on high/low. tail is
@@ -4668,6 +4848,10 @@ int b64decode(const char* in, size_t inLen, uint8_t* out, size_t outCap) {
 //   body     N × primitive records, each starting with a 1-byte tag:
 //
 //   0x10  TIMER PULSE       <vpin:1> <on_sec:2> <off_sec:2> <repeats:1>
+//   0x11  DELTA             <out:1> <in:1> <period_ms:2>
+//                           — deployable rate-of-change primitive.
+//                           Output vpin is auto-marked signed at install
+//                           (delta can be negative when input decreases).
 //   0x20  LOGIC AND         <out:1> <in1:1> <thr1:2> <in2:1> <thr2:2>
 //   0x21  LOGIC OR          <out:1> <in1:1> <thr1:2> <in2:1> <thr2:2>
 //   0x22  LOGIC NOT         <out:1> <in1:1> <thr1:2>
@@ -4709,6 +4893,7 @@ String processLogicCommand(const String& args);
 String processLatchCommand(const String& args);
 String processScaleCommand(const String& args);
 String processTimerCommand(const String& args);
+String processDeltaCommand(const String& args);
 void   saveBeaconRules();  // used by processBeaconBinary on REPLACE
 
 // Mark every SETPOINT slot matching (vpin, op) as boolean-domain.
@@ -4758,6 +4943,7 @@ String processPlcBinary(const uint8_t* data, size_t len) {
         processLatchCommand("CLEAR");
         processScaleCommand("CLEAR");
         processTimerCommand("CLEAR");
+        processDeltaCommand("CLEAR");
         clearAllStorageVpins();
         clearAllScratchVpins();
         clearAllDevices();
@@ -4780,6 +4966,21 @@ String processPlcBinary(const uint8_t* data, size_t len) {
                 resp = processTimerCommand(
                     String(vpin) + ",PULSE," + String(on_s) + "," +
                     String(off_s) + "," + String(reps));
+                break;
+            }
+            case 0x11: {  // DELTA
+                // Payload is 4 bytes: out(1) + in(1) + period_ms(2 LE).
+                // Guard checks off+4 to include the ceiling — matches
+                // the fix applied to the SCALE / LOGIC guards above
+                // (off+N where N is the exact payload byte count).
+                if (off + 4 > len) return "ERR,PLC,BIN,DELTATRUNC";
+                uint8_t  out    = data[off];
+                uint8_t  in     = data[off + 1];
+                uint16_t period = binRd16LE(data + off + 2);
+                off += 4;
+                resp = processDeltaCommand(
+                    String("ADD,") + String(out) + "," + String(in) + "," +
+                    String(period));
                 break;
             }
             case 0x20: case 0x21: case 0x23: {  // LOGIC AND/OR/XOR — needs in2
@@ -5824,6 +6025,9 @@ void handleCmd(const String& from, const String& cmdBody) {
     else if (action == "SCALE") {
         handleScaleCmd(rest, from);
     }
+    else if (action == "DELTA") {
+        handleDeltaCmd(rest, from);
+    }
     else if (action == "PLC") {
         handlePlcCmd(rest, from);
     }
@@ -6855,6 +7059,9 @@ void processBleCommand(const String& line, bool fromSerial) {
     else if (line.startsWith("SCALE,")) {
         handleScaleBle(line.substring(6));
     }
+    else if (line.startsWith("DELTA,")) {
+        handleDeltaBle(line.substring(6));
+    }
     else if (line.startsWith("PLC,")) {
         handlePlcBle(line.substring(4));
     }
@@ -7508,7 +7715,8 @@ void loadBeaconRules() {
 // offsets / type sizes. Versions:
 //   1 — initial layout (SETPOINT/LOGIC/COUNTER/LATCH/SCALE/TIMER)
 //   2 — SetpointRule gained `cooldownMs` (per-rule action_gap override)
-#define EEPROM_PLC_LAYOUT_VER   2
+//   3 — DELTA primitive added (7th persisted table + 7th size byte)
+#define EEPROM_PLC_LAYOUT_VER   3
 
 // ─── DEVICE peripheral persistence ──────────────────────────
 // Mirrors the PLC table pattern but with its OWN magic byte and
@@ -7527,19 +7735,21 @@ void loadBeaconRules() {
 // Header layout starting at EEPROM_PLC_BASE:
 //   0       magic    (1 B)
 //   1       version  (1 B)
-//   2..7    table sizes: [setpoints, logicRules, counters,
-//                         latchRules, scaleRules, timers] × 1 B each
-//                         — only the LOW byte of each sizeof() so a
-//                         silent struct-size change between firmware
-//                         builds is detected as a mismatch and the
-//                         blob discarded rather than miss-decoded.
-#define EEPROM_PLC_HEADER_LEN   8
+//   2..8    table sizes: [setpoints, logicRules, counters,
+//                         latchRules, scaleRules, timers, deltaRules]
+//                         × 1 B each — only the LOW byte of each
+//                         sizeof() so a silent struct-size change
+//                         between firmware builds is detected as a
+//                         mismatch and the blob discarded rather than
+//                         miss-decoded.
+#define EEPROM_PLC_HEADER_LEN   9
 static int eeprom_plc_setpoint_addr = 0;
 static int eeprom_plc_logic_addr    = 0;
 static int eeprom_plc_counter_addr  = 0;
 static int eeprom_plc_latch_addr    = 0;
 static int eeprom_plc_scale_addr    = 0;
 static int eeprom_plc_timer_addr    = 0;
+static int eeprom_plc_delta_addr    = 0;
 static int eeprom_plc_end_addr      = 0;
 // Device persistence region — header(3 bytes: magic+ver+sizeof) + array.
 // Computed inside plcOffsetsInit() so the dynamic placement adapts
@@ -7555,7 +7765,8 @@ static void plcOffsetsInit() {
     eeprom_plc_latch_addr    = eeprom_plc_counter_addr  + sizeof(counters);
     eeprom_plc_scale_addr    = eeprom_plc_latch_addr    + sizeof(latchRules);
     eeprom_plc_timer_addr    = eeprom_plc_scale_addr    + sizeof(scaleRules);
-    eeprom_plc_end_addr      = eeprom_plc_timer_addr    + sizeof(timers);
+    eeprom_plc_delta_addr    = eeprom_plc_timer_addr    + sizeof(timers);
+    eeprom_plc_end_addr      = eeprom_plc_delta_addr    + sizeof(deltaRules);
     // DEVICE region starts immediately after PLC tables. Header is 3
     // bytes (magic + version + sizeof low byte) followed by the array.
     eeprom_dev_addr          = eeprom_plc_end_addr;
@@ -7583,12 +7794,14 @@ void savePlcTables() {
     EEPROM.write(EEPROM_PLC_BASE + 5, (uint8_t)(sizeof(latchRules)  & 0xFF));
     EEPROM.write(EEPROM_PLC_BASE + 6, (uint8_t)(sizeof(scaleRules)  & 0xFF));
     EEPROM.write(EEPROM_PLC_BASE + 7, (uint8_t)(sizeof(timers)      & 0xFF));
+    EEPROM.write(EEPROM_PLC_BASE + 8, (uint8_t)(sizeof(deltaRules)  & 0xFF));
     EEPROM.put(eeprom_plc_setpoint_addr, setpoints);
     EEPROM.put(eeprom_plc_logic_addr,    logicRules);
     EEPROM.put(eeprom_plc_counter_addr,  counters);
     EEPROM.put(eeprom_plc_latch_addr,    latchRules);
     EEPROM.put(eeprom_plc_scale_addr,    scaleRules);
     EEPROM.put(eeprom_plc_timer_addr,    timers);
+    EEPROM.put(eeprom_plc_delta_addr,    deltaRules);
     EEPROM.commit();
 }
 
@@ -7625,12 +7838,14 @@ void loadPlcTables() {
     uint8_t s_la = EEPROM.read(EEPROM_PLC_BASE + 5);
     uint8_t s_sc = EEPROM.read(EEPROM_PLC_BASE + 6);
     uint8_t s_tm = EEPROM.read(EEPROM_PLC_BASE + 7);
+    uint8_t s_dl = EEPROM.read(EEPROM_PLC_BASE + 8);
     if (s_sp != (uint8_t)(sizeof(setpoints)   & 0xFF) ||
         s_lg != (uint8_t)(sizeof(logicRules)  & 0xFF) ||
         s_co != (uint8_t)(sizeof(counters)    & 0xFF) ||
         s_la != (uint8_t)(sizeof(latchRules)  & 0xFF) ||
         s_sc != (uint8_t)(sizeof(scaleRules)  & 0xFF) ||
-        s_tm != (uint8_t)(sizeof(timers)      & 0xFF)) {
+        s_tm != (uint8_t)(sizeof(timers)      & 0xFF) ||
+        s_dl != (uint8_t)(sizeof(deltaRules)  & 0xFF)) {
         debugPrint("PLC: EEPROM struct-size mismatch — discarding");
         return;
     }
@@ -7640,6 +7855,7 @@ void loadPlcTables() {
     EEPROM.get(eeprom_plc_latch_addr,    latchRules);
     EEPROM.get(eeprom_plc_scale_addr,    scaleRules);
     EEPROM.get(eeprom_plc_timer_addr,    timers);
+    EEPROM.get(eeprom_plc_delta_addr,    deltaRules);
     // Sanitise runtime-only state. Persisted structs contain BOTH the
     // user's rule config (op, threshold, msgTrue, …) AND volatile
     // runtime fields (triggered, lastFired, edge-detect lastUp, …)
@@ -7672,6 +7888,15 @@ void loadPlcTables() {
         if (!timers[i].active) continue;
         timers[i].phase = 0;
         timers[i].nextAt = 0;
+    }
+    // DeltaRule.lastValue / lastTime are runtime state. Reset lastTime
+    // to 0 so checkDeltas() treats the first post-boot tick as an
+    // initialisation (snapshot current value, emit nothing) rather
+    // than trying to compute a delta against a stale snapshot.
+    for (int i = 0; i < MAX_DELTA_RULES; i++) {
+        if (!deltaRules[i].active) continue;
+        deltaRules[i].lastValue = 0;
+        deltaRules[i].lastTime  = 0;
     }
     debugPrint("PLC: loaded tables from EEPROM");
 }
@@ -8601,6 +8826,7 @@ void loop() {
         checkLogic();
         checkLatches();
         checkScales();
+        checkDeltas();
         serviceDevices();
         plcStats.scanTicks++;
         readGPS();
@@ -8749,6 +8975,7 @@ void loop() {
     checkLogic();
     checkLatches();
     checkScales();
+    checkDeltas();
 
     // 9. GPS read + broadcast
     readGPS();
