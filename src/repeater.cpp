@@ -493,6 +493,31 @@ inline void plcResetStats() {
     plcStats = PlcStats();
 }
 
+// Suspend savePlcTables() persistence during a batched PLC deploy so the
+// firmware runs 1 EEPROM commit at the end instead of 11 per REPLACE. Each
+// commit stalls the CPU (~50-100 ms with interrupts partially disabled) and
+// blocks the radio TX. That accumulated ~500-1100 ms window before the
+// OK,PLC,DEPLOY,<n> reply is emitted was causing the reply to collide with
+// gateway-hub TX activity on the shared LoRa channel and be lost silently
+// (fire-and-forget with no retry). Collapsing to a single commit shrinks
+// the pre-reply block to ~50-100 ms, well under the collision window.
+// See workflow wf_bd9837dc-1e2.
+static bool plcPersistSuspended = false;
+
+// Forward-decl so PlcCommitGuard's dtor can call it.
+void savePlcTables();
+
+// RAII guard: on any exit from processPlcBinary (OK, ERR, exception), clear
+// the suspend flag and flush the single accumulated commit. Prevents a
+// mid-loop TRUNC/BADTAG error from leaving the flag TRUE, which would
+// silently no-op every subsequent savePlcTables() call in the firmware.
+struct PlcCommitGuard {
+    ~PlcCommitGuard() {
+        plcPersistSuspended = false;
+        savePlcTables();
+    }
+};
+
 // ─── Peripheral devices ────────────────────────────────────────────
 // Standard Arduino-style sensors (DHT11/22, HC-SR04 ultrasonic, DS18B20,
 // generic I2C, SSD1306 OLED) get a small device table here. Each entry
@@ -530,6 +555,10 @@ enum DeviceType : uint8_t {
                           // actually QMC silicon — different address +
                           // different register layout, so both are
                           // first-class types, not aliases.
+    DEV_QMC5883P   = 16,  // QST QMC5883P (successor to QMC5883L), addr 0x2C.
+                          // Newer GY-273 boards ship this — different
+                          // register map from QMC5883L, so also its own
+                          // first-class driver.
 };
 struct Device {
     bool      active;
@@ -1083,6 +1112,32 @@ static bool qmc5883lRead(uint8_t addr, int16_t* xRaw, int16_t* yRaw,
     return true;
 }
 
+// ─── QMC5883P driver (QST 3-axis magnetometer, addr 0x2C) ───────
+// Newer QMC5883P is what most current "GY-273" modules ship. Register
+// map differs from QMC5883L (data starts at 0x01 not 0x00, control
+// regs at 0x0A/0x0B/0x0C, chip ID at 0x00 = 0x80).
+//
+// Init sequence:
+//   0x0D SIGN_CFG    write 0x40: enable axes in default orientation
+//   0x0B CTRL2       write 0x08: SET_RESET on, ±8G range
+//   0x0A CTRL1       write 0xC3: continuous mode, 200Hz ODR, OSR=8, DSR=8
+//
+// Data read: 6 bytes little-endian from 0x01 (X_LSB, X_MSB, Y_LSB, Y_MSB,
+// Z_LSB, Z_MSB). Same signed int16 semantics as QMC5883L.
+static bool qmc5883pRead(uint8_t addr, int16_t* xRaw, int16_t* yRaw,
+                         int16_t* zRaw) {
+    if (!i2cWrite8(addr, 0x0D, 0x40)) return false;  // SIGN
+    if (!i2cWrite8(addr, 0x0B, 0x08)) return false;  // CTRL2: SET/RESET + 8G
+    if (!i2cWrite8(addr, 0x0A, 0xC3)) return false;  // CTRL1: continuous, 200Hz
+    delay(6);
+    uint8_t b[6];
+    if (!i2cReadN(addr, 0x01, b, 6)) return false;
+    *xRaw = (int16_t)((b[1] << 8) | b[0]);
+    *yRaw = (int16_t)((b[3] << 8) | b[2]);
+    *zRaw = (int16_t)((b[5] << 8) | b[4]);
+    return true;
+}
+
 // ─── Vector magnitude helper (rotation-invariant, vibration-immune) ─
 // |⃗v| = sqrt(x² + y² + z²). For magnetometers, this is the killer
 // feature: pure rotation of the sensor (wind sway of an outdoor box,
@@ -1216,6 +1271,18 @@ void serviceDevices() {
             case DEV_QMC5883L: {
                 int16_t xRaw = 0, yRaw = 0, zRaw = 0;
                 if (qmc5883lRead(d.i2cAddr, &xRaw, &yRaw, &zRaw)) {
+                    if (d.outVpin[0]) setVpinValue(d.outVpin[0], (uint16_t)xRaw);
+                    if (d.outVpin[1]) setVpinValue(d.outVpin[1], (uint16_t)yRaw);
+                    if (d.outVpin[2]) setVpinValue(d.outVpin[2], (uint16_t)zRaw);
+                    if (d.outVpin[3]) {
+                        setVpinValue(d.outVpin[3], magnitude3(xRaw, yRaw, zRaw));
+                    }
+                }
+                break;
+            }
+            case DEV_QMC5883P: {
+                int16_t xRaw = 0, yRaw = 0, zRaw = 0;
+                if (qmc5883pRead(d.i2cAddr, &xRaw, &yRaw, &zRaw)) {
                     if (d.outVpin[0]) setVpinValue(d.outVpin[0], (uint16_t)xRaw);
                     if (d.outVpin[1]) setVpinValue(d.outVpin[1], (uint16_t)yRaw);
                     if (d.outVpin[2]) setVpinValue(d.outVpin[2], (uint16_t)zRaw);
@@ -4936,6 +5003,13 @@ String processPlcBinary(const uint8_t* data, size_t len) {
     size_t off = 3;
 
     bool replace = (flags & 0x01) != 0;
+    // Suspend per-primitive EEPROM commits for the duration of this batched
+    // deploy — one commit at the end instead of ~11. Prevents the reply-
+    // collision failure documented at plcPersistSuspended's definition.
+    // PlcCommitGuard's dtor unconditionally clears the flag + fires ONE
+    // commit on any exit path (OK, ERR, early-return TRUNC/BADTAG).
+    plcPersistSuspended = true;
+    PlcCommitGuard _plc_guard;
     if (replace) {
         processSetpointCommand("CLEAR");
         processCounterCommand("CLEAR");
@@ -4946,7 +5020,19 @@ String processPlcBinary(const uint8_t* data, size_t len) {
         processDeltaCommand("CLEAR");
         clearAllStorageVpins();
         clearAllScratchVpins();
-        clearAllDevices();
+        // NB: clearAllDevices() intentionally NOT called here. The DEVICE
+        // table is a separate concern from PLC primitives — wiping it on
+        // every PLC,DEPLOY,R created a wire-order race: gateway sends
+        // DEVICE,ADD then PLC binary as separate packets, and any PLC
+        // RETRY (with REPLACE flag) wiped the peripheral just installed.
+        // Symptom: OK,DEVICE,ADD,QMC5883P at t=12:03:22 followed by PLC
+        // retry OK at t=12:03:37 → DEVICE table empty at PLC,COUNT time,
+        // magnetometer never reads, SETPOINTs fire against v236=0 forever.
+        // If the gateway wants a fresh device table, it sends DEVICE,CLEAR
+        // as its own explicit command. Undeploy_rule already does this
+        // via the CLEAR verb dispatch. Redeploy naturally overwrites the
+        // slot for the same device type via processDeviceCommand's slot
+        // reuse logic.
         plcResetStats();
     }
 
@@ -5188,10 +5274,12 @@ String processPlcBinary(const uint8_t* data, size_t len) {
         }
 
         if (resp.startsWith("ERR,")) {
+            // Guard's dtor flushes the single accumulated commit on return.
             return "ERR,PLC,BIN,DEPLOY," + String(count) + "," + resp;
         }
         count++;
     }
+    // Guard's dtor flushes the single accumulated commit on return.
     return "OK,PLC,DEPLOY," + String(count);
 }
 
@@ -5415,7 +5503,7 @@ String processDeviceCommand(const String& args) {
         const char* names[] = {"NONE","DHT11","DHT22","HCSR04","DS18B20","I2C","OLED",
                                "BME280","SHT31","INA226","MCP9808",
                                "VL53L0X","VL53L1X","THERMISTOR",
-                               "HMC5883L","QMC5883L"};
+                               "HMC5883L","QMC5883L","QMC5883P"};
         for (int i = 0; i < MAX_DEVICES; i++) {
             if (!devices[i].active) continue;
             count++;
@@ -5460,6 +5548,7 @@ String processDeviceCommand(const String& args) {
     else if (typeStr == "THERMISTOR") type = DEV_THERMISTOR;
     else if (typeStr == "HMC5883L") type = DEV_HMC5883L;
     else if (typeStr == "QMC5883L") type = DEV_QMC5883L;
+    else if (typeStr == "QMC5883P") type = DEV_QMC5883P;
     else return "ERR,DEVICE,BADTYPE";
 
     // Per-type parsing — each branch reads its args off tail and
@@ -5627,6 +5716,19 @@ String processDeviceCommand(const String& args) {
         tmp.outVpin[2] = (uint8_t)svZ.toInt();
         tmp.outVpin[3] = (uint8_t)svMag.toInt();
         tmp.intervalMs = 500;
+    } else if (type == DEV_QMC5883P) {
+        // <vX>,<vY>,<vZ>[,<vMag>]   no address arg — QMC5883P fixed at 0x2C.
+        String svX   = nextTok(tail);
+        String svY   = nextTok(tail);
+        String svZ   = nextTok(tail);
+        String svMag = nextTok(tail);
+        if (svZ.length() == 0) return "ERR,DEVICE,FORMAT";
+        tmp.i2cAddr    = 0x2C;
+        tmp.outVpin[0] = (uint8_t)svX.toInt();
+        tmp.outVpin[1] = (uint8_t)svY.toInt();
+        tmp.outVpin[2] = (uint8_t)svZ.toInt();
+        tmp.outVpin[3] = (uint8_t)svMag.toInt();
+        tmp.intervalMs = 500;
     } else if (type == DEV_VL53L0X || type == DEV_VL53L1X) {
         // <vDistMm>   no address config (default 0x29; multi-sensor
         // support needs XSHUT pin handling which v1 doesn't do).
@@ -5709,6 +5811,7 @@ String processDeviceCommand(const String& args) {
             break;
         case DEV_HMC5883L:
         case DEV_QMC5883L:
+        case DEV_QMC5883P:
             // All 3 axes signed — the chip outputs ±32767 raw counts
             // and threshold comparisons ("X < -5000") only work
             // correctly when the read path sign-extends.
@@ -7192,6 +7295,61 @@ void handleSerialConfig() {
         Serial.println(pins);
     }
     else if (line == "SAVE") { saveConfig(); Serial.println("OK: Saved"); }
+    else if (line == "I2CSCAN") {
+        Serial.print("I2CSCAN,");
+        int found = 0;
+        for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
+            Wire.beginTransmission(addr);
+            if (Wire.endTransmission() == 0) {
+                if (found) Serial.print(",");
+                Serial.printf("0x%02X", addr);
+                found++;
+            }
+        }
+        if (!found) Serial.print("none");
+        Serial.printf(" (bus SDA=%d SCL=%d)\n", BOARD_I2C_SDA, BOARD_I2C_SCL);
+    }
+    else if (line.startsWith("I2CREAD ")) {
+        // I2CREAD <addr_hex> <reg_hex> <n>   — raw I2C probe
+        // e.g. "I2CREAD 0x2C 0x00 1" → reads 1 byte from reg 0x00 at 0x2C
+        String rest = line.substring(8); rest.trim();
+        int sp1 = rest.indexOf(' ');
+        int sp2 = rest.indexOf(' ', sp1 + 1);
+        if (sp1 < 0 || sp2 < 0) { Serial.println("ERR,I2CREAD,USAGE addr reg n"); return; }
+        uint8_t addr = (uint8_t)strtol(rest.substring(0, sp1).c_str(), nullptr, 0);
+        uint8_t reg  = (uint8_t)strtol(rest.substring(sp1 + 1, sp2).c_str(), nullptr, 0);
+        uint8_t n    = (uint8_t)strtol(rest.substring(sp2 + 1).c_str(), nullptr, 0);
+        if (n == 0 || n > 16) { Serial.println("ERR,I2CREAD,BADLEN"); return; }
+        Wire.beginTransmission(addr);
+        Wire.write(reg);
+        uint8_t txres = Wire.endTransmission(false);
+        if (txres != 0) { Serial.printf("I2CREAD,0x%02X,0x%02X,NACK(%d)\n", addr, reg, txres); return; }
+        Wire.requestFrom((int)addr, (int)n);
+        Serial.printf("I2CREAD,0x%02X,0x%02X,", addr, reg);
+        int got = 0;
+        while (Wire.available() && got < n) {
+            if (got) Serial.print(",");
+            Serial.printf("0x%02X", Wire.read());
+            got++;
+        }
+        Serial.printf(" (%d/%d bytes)\n", got, n);
+    }
+    else if (line.startsWith("I2CWRITE ")) {
+        // I2CWRITE <addr_hex> <reg_hex> <val_hex>   — raw I2C register write
+        String rest = line.substring(9); rest.trim();
+        int sp1 = rest.indexOf(' ');
+        int sp2 = rest.indexOf(' ', sp1 + 1);
+        if (sp1 < 0 || sp2 < 0) { Serial.println("ERR,I2CWRITE,USAGE addr reg val"); return; }
+        uint8_t addr = (uint8_t)strtol(rest.substring(0, sp1).c_str(), nullptr, 0);
+        uint8_t reg  = (uint8_t)strtol(rest.substring(sp1 + 1, sp2).c_str(), nullptr, 0);
+        uint8_t val  = (uint8_t)strtol(rest.substring(sp2 + 1).c_str(), nullptr, 0);
+        Wire.beginTransmission(addr);
+        Wire.write(reg);
+        Wire.write(val);
+        uint8_t r = Wire.endTransmission();
+        Serial.printf("I2CWRITE,0x%02X,0x%02X<-0x%02X,%s\n", addr, reg, val,
+                      r == 0 ? "OK" : "NACK");
+    }
     else if (line == "BATT") {
 #if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
         int mv = readBatteryMv();
@@ -7582,6 +7740,7 @@ void handleSerialConfig() {
              line.startsWith("BEACON,") || line.startsWith("BLEPIN,") ||
              line.startsWith("COUNTER,") || line.startsWith("LOGIC,") ||
              line.startsWith("LATCH,") || line.startsWith("SCALE,") ||
+             line.startsWith("DELTA,") || line.startsWith("DEVICE,") ||
              line.startsWith("PLC,")) {
         processBleCommand(line, true);  // fromSerial=true: skip BLE PIN check
     }
@@ -7774,6 +7933,13 @@ static void plcOffsetsInit() {
 }
 
 void savePlcTables() {
+    // During a batched deploy (processPlcBinary REPLACE), every ADD calls
+    // savePlcTables() individually. That's ~11 EEPROM commits per rule
+    // (7 CLEARs + 4 ADDs on a typical 4-primitive rule). Each commit stalls
+    // the CPU and blocks radio TX, and the accumulated delay was collapsing
+    // the OK,PLC,DEPLOY reply into a collision window with the gateway hub.
+    // Suspend flag lets the caller batch a single commit at the end.
+    if (plcPersistSuspended) return;
     plcOffsetsInit();
     if (eeprom_plc_end_addr > EEPROM_SIZE) {
         // Tables grew beyond the EEPROM region. Caller has no good
@@ -8976,6 +9142,7 @@ void loop() {
     checkLatches();
     checkScales();
     checkDeltas();
+    serviceDevices();
 
     // 9. GPS read + broadcast
     readGPS();
