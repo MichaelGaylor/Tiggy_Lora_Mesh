@@ -1190,6 +1190,59 @@ static uint16_t magnitude3(int16_t x, int16_t y, int16_t z) {
     return (uint16_t)sqrtf((float)sumSq);
 }
 
+// ─── {Vnnn} template renderer ────────────────────────────────────
+// Substitutes {Vnnn} placeholders in src with the current uint16 value
+// of vpin nnn from getVpinValue. Writes into dst up to dstCap-1 bytes
+// and always NUL-terminates. Malformed braces (no closing '}', bad
+// digits) pass through verbatim — same lenient behaviour the OLED
+// renderer has always had, and matches the docs' promise that any
+// text without matching {Vnnn} tokens ships unchanged.
+//
+// Used by:
+//   - DEV_OLED display formatter (serviceDevices)
+//   - SETPOINT MSG broadcast (fireSetpointAction) — telemetry embed
+//   - BEACON,ADD MSG + LEAVE MSG (beacon detect broadcasts)
+//
+// Buffer sizing note. Worst-case expansion is the shortest template
+// `{V0}` (4 bytes) rendering to a signed-int16 like `-32768` (6 bytes
+// once the future signed-vpin extension lands) → +2 bytes per token.
+// A 32-byte stored template packed with 8 tokens renders to 48 bytes
+// — comfortably within the 64-byte rendered[] the callers allocate,
+// and well under MAX_MSG_LEN (200) at the encrypt stage. Callers that
+// use smaller dst[] buffers get clamped silently by the dstCap-1
+// guard on every write, so no stack overrun regardless of template
+// content. Returns final rendered length excluding the NUL.
+static size_t renderVpinTemplate(const char* src, char* dst, size_t dstCap) {
+    if (!dst || dstCap == 0) return 0;
+    size_t r = 0;
+    const char* p = src ? src : "";
+    while (*p && r < dstCap - 1) {
+        if (p[0] == '{' && p[1] == 'V') {
+            // Parse {Vnnn} — find closing brace within 6 chars.
+            const char* close = strchr(p, '}');
+            if (close && (close - p) <= 6) {
+                int vp = atoi(p + 2);
+                uint16_t v = getVpinValue(vp);
+                int wrote = snprintf(dst + r, dstCap - r,
+                                      "%u", (unsigned)v);
+                if (wrote > 0) {
+                    // snprintf may return "would have written" > space;
+                    // clamp so we don't skip over the NUL it wrote.
+                    size_t added = ((size_t)wrote < dstCap - r)
+                                    ? (size_t)wrote
+                                    : (dstCap - r - 1);
+                    r += added;
+                }
+                p = close + 1;
+                continue;
+            }
+        }
+        dst[r++] = *p++;
+    }
+    dst[r] = '\0';
+    return r;
+}
+
 // ─── Device service loop ─────────────────────────────────────────
 // Called from the main loop every tick. Each active device runs at its
 // own cadence (intervalMs since lastServiceMs). Reads land in the
@@ -1392,29 +1445,13 @@ void serviceDevices() {
             case DEV_OLED: {
                 if (!oledAvailable) break;
                 // Substitute {Vnnn} placeholders with current vpin values
-                // and render. Format string is null-terminated, max
-                // DEVICE_OLED_FMT_LEN chars. Up to 4 lines via \n.
+                // via the shared renderer (identical semantics to the
+                // inline loop this replaces — factored out so SETPOINT
+                // MSG and BEACON MSG broadcasts get the same behaviour).
+                // Max DEVICE_OLED_FMT_LEN chars stored, up to 4 lines
+                // via \n; rendered gets ~2× headroom for expansions.
                 char rendered[DEVICE_OLED_FMT_LEN * 2 + 1];
-                size_t r = 0;
-                const char* p = d.oledFmt;
-                while (*p && r < sizeof(rendered) - 1) {
-                    if (p[0] == '{' && p[1] == 'V') {
-                        // Parse {Vnnn} — find closing brace.
-                        const char* close = strchr(p, '}');
-                        if (close && (close - p) <= 6) {
-                            int vp = atoi(p + 2);
-                            uint16_t v = getVpinValue(vp);
-                            int wrote = snprintf(rendered + r,
-                                                 sizeof(rendered) - r,
-                                                 "%u", (unsigned)v);
-                            if (wrote > 0) r += (size_t)wrote;
-                            p = close + 1;
-                            continue;
-                        }
-                    }
-                    rendered[r++] = *p++;
-                }
-                rendered[r] = '\0';
+                renderVpinTemplate(d.oledFmt, rendered, sizeof(rendered));
                 oled.clearDisplay();
                 oled.setTextSize(1);
                 oled.setTextColor(SSD1306_WHITE);
@@ -2160,15 +2197,19 @@ void executeBeaconAction(BeaconRule& r) {
         r.triggered = true;
         notifyBeaconEvent("BEACON,TRIGGERED," + String(r.name) + ",PULSE," + String(r.relayPin) + "," + String(r.revertMs), true);
     } else {
-        // Broadcast message over mesh
+        // Broadcast message over mesh — same {Vnnn} template
+        // substitution as SETPOINT MSG so users can piggy-back
+        // diagnostic values on beacon events.
+        char rendered[64];
+        renderVpinTemplate(r.message, rendered, sizeof(rendered));
         String mid = mesh.generateMsgID();
-        String hex = mesh.encryptMsg("MSG," + String(r.message));
+        String hex = mesh.encryptMsg("MSG," + String(rendered));
         String payload = String(mesh.localID) + ",FFFF," + mid + "," +
                          String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
         mesh.transmitPacket(0xFFFF, payload);
         r.triggered = true;
-        debugPrint("BEACON: " + String(r.name) + " -> broadcast: " + String(r.message));
-        notifyBeaconEvent("BEACON,TRIGGERED," + String(r.name) + ",MSG," + String(r.message), true);  // Edge: broadcast once
+        debugPrint("BEACON: " + String(r.name) + " -> broadcast: " + String(rendered));
+        notifyBeaconEvent("BEACON,TRIGGERED," + String(r.name) + ",MSG," + String(rendered), true);  // Edge: broadcast once
     }
 }
 
@@ -2271,13 +2312,18 @@ void checkBeaconReverts() {
             if (now - r.lastSeen > grace) {
                 const char* leaveMsg = beaconLeaveMessage(r);
                 if (leaveMsg) {
+                    // Same {Vnnn} substitution as the enter broadcast
+                    // above — leaves the debug echo showing rendered
+                    // text so the local UI matches the wire.
+                    char rendered[64];
+                    renderVpinTemplate(leaveMsg, rendered, sizeof(rendered));
                     String mid = mesh.generateMsgID();
-                    String hex = mesh.encryptMsg("MSG," + String(leaveMsg));
+                    String hex = mesh.encryptMsg("MSG," + String(rendered));
                     String payload = String(mesh.localID) + ",FFFF," + mid + "," +
                                      String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
                     mesh.transmitPacket(0xFFFF, payload);
-                    debugPrint("BEACON: " + String(r.name) + " -> LEAVE broadcast: " + String(leaveMsg));
-                    notifyBeaconEvent("BEACON,LEAVE," + String(r.name) + ",MSG," + String(leaveMsg), true);
+                    debugPrint("BEACON: " + String(r.name) + " -> LEAVE broadcast: " + String(rendered));
+                    notifyBeaconEvent("BEACON,LEAVE," + String(r.name) + ",MSG," + String(rendered), true);
                 } else {
                     debugPrint("BEACON: " + String(r.name) + " -> MSG rearmed (no leave configured)");
                 }
@@ -3589,19 +3635,39 @@ bool fireSetpointAction(SetpointRule& sp, int value, bool triggered) {
         }
     }
     else if (sp.actionType == 1) {
-        // MSG action — broadcast message on state change (both edges)
+        // MSG action — broadcast message on state change (both edges).
+        // NOTE: the msg[0]=='\0' empty-check below uses the RAW template
+        // intentionally — do NOT move rendering above it. The "falling
+        // edge has effect" gate (checkSetpoints ~ fallingHasEffect
+        // upstream) also inspects the raw sp.msgFalse[0] to decide
+        // whether the cooldown clock advances. Rendering earlier would
+        // silently break that cooldown suppression for rules whose
+        // msgFalse is "" but msgTrue has content.
         const char* msg = triggered ? sp.msgTrue : sp.msgFalse;
         if (msg[0] == '\0') return false;  // No message configured for this edge
 
-        String msgText = "MSG," + String(msg);
+        // Substitute {Vnnn} tokens with current vpin values so users
+        // can piggy-back diagnostic telemetry on state-change
+        // broadcasts (e.g. "pressent {V201}" → "pressent 2019") — no
+        // polling airtime, and receivers see the value that triggered
+        // the edge. Worst-case expansion of a 32-char stored msg is
+        // ~48 chars (8 × {V0}→"-32768" future signed), well under
+        // MAX_MSG_LEN=200 after the "MSG," prefix.
+        char rendered[64];
+        renderVpinTemplate(msg, rendered, sizeof(rendered));
+
+        String msgText = "MSG," + String(rendered);
         String mid = mesh.generateMsgID();
         String hex = mesh.encryptMsg(msgText);
         String payload = String(mesh.localID) + ",FFFF," + mid + "," +
                          String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
         mesh.transmitPacket(0xFFFF, payload);
+        // BLE echo shows the RENDERED text so the local app/log
+        // matches what actually went on the wire — the raw template
+        // still shows up in SETPOINT,LIST config dumps (elsewhere).
         debugPrint("SETPOINT MSG: pin " + String(sp.sensorPin) + "=" + String(value) +
-                   " -> broadcast '" + String(msg) + "'");
-        bleSend("SETPOINT,MSG," + String(sp.sensorPin) + "," + String(value) + "," + String(msg));
+                   " -> broadcast '" + String(rendered) + "'");
+        bleSend("SETPOINT,MSG," + String(sp.sensorPin) + "," + String(value) + "," + String(rendered));
         return true;  // Radio TX happened
     }
     else if (sp.actionType == 2) {
