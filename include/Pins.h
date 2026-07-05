@@ -585,16 +585,28 @@
 // ═══════════════════════════════════════════════════════════════
 #elif defined(BOARD_TIGGYOPENMESH_V1)
 // ═══════════════════════════════════════════════════════════════
-// TiggyOpenMesh-V1 — custom 3S LiPo farm/repeater board
+// TiggyOpenMesh V1 / V2 — custom 3S LiPo farm/repeater board
 // ESP32-S3-WROOM-1-N8R2 + Wio-SX1262 (header) + DRV8871 actuator
 // 12V 3S LiPo input → AP63203 buck → 3.3V. Native USB-C.
-// 3 high-side MOSFET relays, 2 analog + 3 digital/opto sensor inputs,
+// 4 high-side MOSFET relays, 2 analog + 3 digital/opto sensor inputs,
 // optional GPS and OLED via headers (J5 / GPS port).
 //
-// ⚠️ V1 PCB rework: "Battery Voltage" was routed to GPIO 37, which
-//    has no ADC peripheral. Cut R28→GPIO37 trace, fly-wire R28 to
-//    the GPIO 1 pad (ADC1_CH0). V2 should route directly to a free
-//    ADC1 pin and add an ADC_CTRL gate FET for sleep current saving.
+// One board define (BOARD_TIGGYOPENMESH_V1) covers both PCB revs —
+// V2 is electrically identical to V1+rework from the firmware's
+// perspective, so no separate build env is needed. The "V1" string
+// is the heartbeat board code that nodes already in the field report,
+// so renaming would break recognition on existing deployments.
+//
+// V1 → V2 PCB changes (informational; firmware semantics unchanged):
+//   • Battery divider: V1 routed Vbat→ADC to GPIO 37 (which has no
+//     ADC peripheral), requiring R28 to be cut and fly-wired to GPIO 1
+//     before the board would work. V2 routes Vbat→ADC natively to
+//     GPIO 1 (ADC1_CH0).
+//   • Relay 4: V2 adds an on-board high-side MOSFET driver on GPIO 37
+//     (the pin freed by the battery re-route). The pin is HARDWIRED
+//     to that driver — it can ONLY be used as a relay output, never
+//     as a sensor input or anything else, regardless of what the
+//     firmware would otherwise allow.
 // ═══════════════════════════════════════════════════════════════
 
 #define BOARD_NAME          "TiggyOpenMesh V1"
@@ -649,10 +661,12 @@
 #define BOARD_SDCARD_CS     -1
 
 // Battery — 3S LiPo via 1MΩ + 220kΩ divider (always-on, no ADC_CTRL gate)
-//   ⚠️ V1 rework: physical pin moved from GPIO 37 → GPIO 1 by fly-wire.
+//   V1 ships with the divider on GPIO 37 (no ADC peripheral) — needs
+//   manual rework: cut R28→GPIO37, fly-wire R28 to the GPIO 1 pad.
+//   V2 routes the divider directly to GPIO 1 on the PCB — no rework.
 //   Divider math: (1M + 220k) / 220k = 5.545 (multiplier ADC→VBAT)
 //   ADC sees max 12.6V × 0.180 = 2.27V (within ESP32-S3 2.4V headroom)
-#define BOARD_BAT_ADC       1     // ADC1_CH0 GPIO1 (after rework)
+#define BOARD_BAT_ADC       1     // ADC1_CH0 GPIO1 (V1+rework / V2 native)
 #define BAT_DIVIDER         5.545f
 #define BAT_LOW_MV          9300    // 3 × 3.1V LiPo cutoff
 #define BAT_RECOVER_MV      11100   // 3 × 3.7V LiPo recovery
@@ -674,13 +688,23 @@
 //   8–14    Wio-SX1262 control + SPI
 //   17–18   I2C OLED
 //   19–20   USB
-//   21      OLED RST
+//   21      OLED RST  — DUAL ROLE (see sensor list below)
 //   35–36   LEDs
 //   38–39   GPS UART
 //   41–42   DRV8871 actuator
 //   46      strap pin
 //   47      RF_SW
-//   1       Battery ADC (after rework)
+//   1       Battery ADC (V1+rework / V2 native)
+//   37      Relay 4 driver (V2 only; V1 had Vbat divider here)
+// Relay outputs (high-side MOSFET drivers on the PCB):
+//   2, 3, 4    relays 1-3 (V1 + V2)
+//   37         relay 4 — V2 only. HARDWIRED to the on-board driver,
+//              cannot be repurposed as a sensor / digital input /
+//              anything else. Drives the relay coil directly when
+//              the GPIO goes HIGH. Boot-time behaviour: floats low
+//              during ROM bootloader (~50-200ms), so the relay stays
+//              de-energised until pinMode()+digitalWrite(LOW) runs
+//              in setup() — no boot-time twitch.
 // Sensor headers:
 //   5, 6, 7    opto-isolated digital inputs (active LOW on GPIO side —
 //              external HIGH lights the opto LED → GPIO reads LOW). Use
@@ -690,10 +714,18 @@
 //              Bidirectional + fast — required for DHT22, DS18B20,
 //              HC-SR04 echo. R18 5.1k pull-up to 3.3V already on board.
 //   15, 16     spare digital pins
+//   21         OLED RST on the J5 header — DOUBLES as a sensor pin
+//              when the OLED isn't deployed. The OLED driver only
+//              touches GPIO 21 if DEVICE,ADD,OLED has been issued;
+//              with no OLED in the device table the pin is
+//              electrically free. Either OLED or a sensor on 21 per
+//              node, not both. isPinSafe() passes it (not in the
+//              forbidden list), so DEVICE,ADD against pin 21 deploys
+//              cleanly when the user wires a sensor to J5 pin 3.
 // Available extras for future use: 45, 48
 #define USER_GPIO_COUNT     8
-#define DEFAULT_RELAY_PINS  { 2, 3, 4 }
-#define DEFAULT_SENSOR_PINS { 5, 6, 7, 15, 16, 40 }
+#define DEFAULT_RELAY_PINS  { 2, 3, 4, 37 }
+#define DEFAULT_SENSOR_PINS { 5, 6, 7, 15, 16, 21, 40 }
 #define SENSOR_PIN_COUNT    5
 
 // ═══════════════════════════════════════════════════════════════

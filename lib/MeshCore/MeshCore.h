@@ -208,6 +208,15 @@ public:
     uint32_t plcScans = 0;
     uint32_t plcFires = 0;
 
+    // 8-bit "state changed" signal for gateway reconciliation. Repeater
+    // firmware sets this to its `stateGeneration` global before each
+    // heartbeat; sendHeartbeat() rides it as ",G<hex2>" (3 chars).
+    // Zero = never-changed baseline (fresh boot before any deploy). The
+    // gateway queries PLC,STATUS to fetch the full 32-bit fingerprint
+    // only when this value changes — so the frequent HB stays cheap and
+    // the expensive fingerprint round-trip only happens on real events.
+    uint8_t stateGeneration = 0;
+
     // Runtime heartbeat interval (ms). Initialised from the compile-time
     // defaults via the inline initialisers below; the firmware reads
     // an EEPROM override at boot (HbCfgEEPROM in repeater.cpp) and

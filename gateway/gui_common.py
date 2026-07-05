@@ -132,10 +132,76 @@ class HexPacketParser:
                 result["ack_mid"] = parts[1]
         elif payload.startswith("HB,"):
             result["type"] = "HB"
-            hb_parts = payload[3:].strip().split(",")
-            result["hb_from"] = hb_parts[0]
-            result["hb_board"] = hb_parts[1] if len(hb_parts) > 1 else ""
-            result["hb_flags"] = hb_parts[2] if len(hb_parts) > 2 else ""
+            hb_parts = [p.strip() for p in payload[3:].strip().split(",") if p.strip()]
+            # Mixed positional + tagged fields. Order:
+            #   0: hb_from        (positional)
+            #   1: hb_board       (positional, optional)
+            #   2: hb_flags       (positional, optional)
+            #   any: B<mv>        (tagged battery, e.g. "B4067")
+            #   any: P<scans>:<fires>  (tagged PLC runtime counters — replaces
+            #                          the old gateway STATUS,PLC auto-poll;
+            #                          missing field = node has no PLC primitives)
+            #   any: H<sec>            (effective current heartbeat interval in
+            #                          seconds — lets gateway size per-node
+            #                          offline detection so a node that throttled
+            #                          its HB cadence isn't false-flagged offline
+            #                          by the global 120 s default)
+            result["hb_from"] = hb_parts[0] if hb_parts else ""
+            result["hb_board"] = ""
+            result["hb_flags"] = ""
+            result["hb_battery_mv"] = -1
+            result["hb_plc_scans"] = None  # None = not reported (no PLC primitives)
+            result["hb_plc_fires"] = None
+            result["hb_interval_s"] = None  # None = legacy firmware, use 120 s default
+            # Fingerprint reconciliation: 8-bit "state changed" counter from
+            # firmware cap>=4. None = legacy firmware without the field —
+            # gateway treats 3 such HBs as "reflash required" and refuses
+            # further deploys to that node. See the plan file for design
+            # details.
+            result["hb_state_gen"] = None
+            positional_idx = 0
+            for tok in hb_parts:
+                if positional_idx == 0:
+                    positional_idx += 1
+                    continue  # already used for hb_from
+                if tok.startswith("B") and len(tok) > 1 and tok[1:].lstrip("-").isdigit():
+                    result["hb_battery_mv"] = int(tok[1:])
+                elif tok.startswith("P") and ":" in tok:
+                    # P<scans>:<fires> — keep strict so we don't grab a board
+                    # code that happens to start with P. Both halves must parse.
+                    try:
+                        s, f = tok[1:].split(":", 1)
+                        result["hb_plc_scans"] = int(s)
+                        result["hb_plc_fires"] = int(f)
+                    except (ValueError, IndexError):
+                        pass
+                elif tok.startswith("H") and len(tok) > 1 and tok[1:].isdigit():
+                    # H<sec> — strict isdigit() so we don't accidentally grab a
+                    # board code or flag that happens to start with H. Range
+                    # check on the gateway side (5..3600) — anything outside
+                    # is suspicious and we treat it as missing.
+                    try:
+                        sec = int(tok[1:])
+                        if 1 <= sec <= 7200:
+                            result["hb_interval_s"] = sec
+                    except ValueError:
+                        pass
+                elif (tok.startswith("G") and len(tok) == 3
+                      and all(c in "0123456789abcdefABCDEF" for c in tok[1:])):
+                    # G<hex2> — 8-bit state-change generation counter from
+                    # cap>=4 firmware. Strict length+hexdigit check so we
+                    # don't grab a board code or flag that happens to
+                    # start with G (e.g. gateway-mode 'G' flag).
+                    try:
+                        result["hb_state_gen"] = int(tok[1:], 16)
+                    except ValueError:
+                        pass
+                elif positional_idx == 1:
+                    result["hb_board"] = tok
+                    positional_idx += 1
+                elif positional_idx == 2:
+                    result["hb_flags"] = tok
+                    positional_idx += 1
         else:
             fields = HexPacketParser.parse_payload_fields(payload)
             if fields:

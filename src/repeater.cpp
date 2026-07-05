@@ -18,6 +18,10 @@
 #include <Wire.h>
 #include <EEPROM.h>
 #include <RadioLib.h>
+// BLAKE2s (from the same lib/Crypto/ that provides GCM via MeshCore) —
+// used for the 32-bit state fingerprint fed to gateway reconciliation.
+// One-shot API on a small stack buffer; ~30 µs on ESP32-S3.
+#include <BLAKE2s.h>
 // VL53L0X / VL53L1X laser time-of-flight distance sensors. Pololu's
 // libraries are smaller than Adafruit's (~5KB vs ~30KB) and have a
 // cleaner API for our use case (one-shot read from a service loop).
@@ -238,6 +242,12 @@ inline bool isStorageVpin(int pin) {
 #define EEPROM_PERSIST_MASK_ADDR 1668   // 4 bytes; past STORAGE_VPIN array (1600..1663)
 uint32_t storagePersistMask = 0;
 
+// Forward: per-vpin signed-domain bit is defined below the scratch
+// vpin macros (which it needs to know about). The address+masks here
+// are just the storage-class declarations needed by anything earlier
+// in the file that references them.
+#define EEPROM_SIGNED_MASK_ADDR 1672   // 4 bytes; after the persist mask at 1668..1671
+
 inline bool isPersistentVpin(int pin) {
     int idx = pin - STORAGE_VPIN_BASE;
     if (idx < 0 || idx >= STORAGE_VPIN_RESERVED) return false;
@@ -372,6 +382,76 @@ void clearAllScratchVpins() {
     for (int i = 0; i < SCRATCH_VPIN_RESERVED; i++) scratchVpinValues[i] = 0;
 }
 
+// ─── Per-vpin signed-domain bit ─────────────────────────────────
+// Some sources write signed values into the (uint16) storage/scratch
+// vpin cells — notably temperature sensors that can read below 0°C
+// (DHT22, DS18B20, BME280/SHT31 temp, MCP9808, THERMISTOR) and INA226
+// current. The bits are preserved (int16(-100) = uint16(65436) is the
+// same bit pattern) but readSensorPin's `(int)getStorageVpin(pin)`
+// cast zero-extends rather than sign-extends, so a SETPOINT comparing
+// against threshold -50 (×10 = -5°C) gets value 65436 instead of -100
+// and the comparison silently fails.
+//
+// Fix: per-vpin bit set by temp/current sensors at install time;
+// readSensorPin sign-extends through int16_t when the bit is set.
+// Stays unset for COUNTER (which legitimately uses 0..65535) and
+// other unsigned sources, so their behaviour is unchanged. Storage-
+// vpin flag is persisted to EEPROM at addr 1672 (4 bytes) so a node
+// reboot doesn't briefly mis-interpret negative temps before the
+// sensor's next service call re-marks the vpin.
+uint32_t storageSignedMask = 0;
+uint32_t scratchSignedMask = 0;        // RAM-only — scratch vpins themselves don't persist
+
+inline bool isVpinSigned(int pin) {
+    if (isStorageVpin(pin)) {
+        int idx = pin - STORAGE_VPIN_BASE;
+        return (storageSignedMask & (1u << idx)) != 0;
+    }
+    if (isScratchVpin(pin)) {
+        int idx = pin - SCRATCH_VPIN_BASE;
+        return (scratchSignedMask & (1u << idx)) != 0;
+    }
+    return false;
+}
+
+void setVpinSigned(int pin, bool isSigned) {
+    if (isStorageVpin(pin)) {
+        int idx = pin - STORAGE_VPIN_BASE;
+        bool wasSet = (storageSignedMask & (1u << idx)) != 0;
+        if (wasSet == isSigned) return;  // idempotent — skip EEPROM write
+        if (isSigned) storageSignedMask |=  (1u << idx);
+        else          storageSignedMask &= ~(1u << idx);
+        // Persist immediately so a reboot-while-temp-stored-but-flag-
+        // unsaved doesn't silently mis-interpret negative temps.
+        for (int i = 0; i < 4; i++) {
+            EEPROM.write(EEPROM_SIGNED_MASK_ADDR + i,
+                         (uint8_t)((storageSignedMask >> (i * 8)) & 0xFF));
+        }
+        EEPROM.commit();
+    } else if (isScratchVpin(pin)) {
+        int idx = pin - SCRATCH_VPIN_BASE;
+        if (isSigned) scratchSignedMask |=  (1u << idx);
+        else          scratchSignedMask &= ~(1u << idx);
+        // RAM only — scratch vpins reset on reboot and the device that
+        // owns the vpin will re-mark it on its next install/service.
+    }
+}
+
+void loadSignedMask() {
+    storageSignedMask = 0;
+    for (int i = 0; i < 4; i++) {
+        storageSignedMask |= ((uint32_t)EEPROM.read(EEPROM_SIGNED_MASK_ADDR + i)) << (i * 8);
+    }
+    // Sanity: an uninitialised EEPROM region reads as 0xFF... (all bits
+    // set) which would mark EVERY storage vpin signed, breaking
+    // COUNTER/LATCH on a fresh device. Treat 0xFFFFFFFF as "fresh — no
+    // signed bits set" rather than "all signed". Real installs that
+    // somehow legitimately marked all 32 vpins signed (impossible in
+    // practice — there are only 7 temp/current sensor types) take the
+    // small one-time hit of re-marking on the next sensor service.
+    if (storageSignedMask == 0xFFFFFFFFu) storageSignedMask = 0;
+}
+
 // Unified vpin set/get. Callers don't need to know which range they're
 // hitting; this dispatches based on pin number. Anything outside both
 // ranges is a no-op for set, returns 0 for get — that's safe because the
@@ -408,6 +488,7 @@ struct PlcStats {
     uint32_t counterFires= 0;
     uint32_t timerFires  = 0;  // Timer rising/falling edges
     uint32_t setpointFires = 0; // Setpoint actions actually dispatched
+    uint32_t deltaFires  = 0;  // DELTA outputs written (one per period expiry)
     uint32_t lastFireMs  = 0;  // millis() of the last setpoint fire
 };
 PlcStats plcStats;
@@ -415,6 +496,57 @@ PlcStats plcStats;
 inline void plcResetStats() {
     plcStats = PlcStats();
 }
+
+// Suspend savePlcTables() persistence during a batched PLC deploy so the
+// firmware runs 1 EEPROM commit at the end instead of 11 per REPLACE. Each
+// commit stalls the CPU (~50-100 ms with interrupts partially disabled) and
+// blocks the radio TX. That accumulated ~500-1100 ms window before the
+// OK,PLC,DEPLOY,<n> reply is emitted was causing the reply to collide with
+// gateway-hub TX activity on the shared LoRa channel and be lost silently
+// (fire-and-forget with no retry). Collapsing to a single commit shrinks
+// the pre-reply block to ~50-100 ms, well under the collision window.
+// See workflow wf_bd9837dc-1e2.
+static bool plcPersistSuspended = false;
+
+// ─── State fingerprint for gateway reconciliation ────────────────────
+// Gateway-side reconciliation ("device shadow" pattern) uses two values:
+//   stateGeneration — 8-bit RAM-only counter, increments on every state
+//                     change (savePlcTables / saveDevicesTable). Rides
+//                     in every heartbeat as ",G<hex2>". Cheap change
+//                     signal; resets to 0 on reboot which is fine — the
+//                     gateway then issues ONE PLC,STATUS query, sees the
+//                     fingerprint matches its desired state, and moves
+//                     on. No auto-redeploy on powerup: rules already
+//                     persist in EEPROM via loadPlcTables/loadDevicesTable.
+//   stateFingerprint — 32-bit BLAKE2s truncation of the installed PLC
+//                     + DEVICE tables with runtime fields zeroed. NOT
+//                     broadcast in HB (too expensive at mesh scale);
+//                     returned on demand via PLC,STATUS ",K<hex8>".
+//                     Byte-identical to the gateway's desired-state hash
+//                     computed over the same canonical table bytes.
+static uint8_t  stateGeneration  = 0;
+static uint32_t stateFingerprint = 0;
+
+// Recompute the fingerprint by walking every persisted PLC / DEVICE table
+// entry, copying to a stack-local temporary, zeroing the runtime-only
+// fields listed in the loadPlcTables() sanitiser at ~line 8025, and
+// updating a BLAKE2s hash. Truncate the 32-byte digest to the low 4
+// bytes → uint32_t.
+static void recomputeStateFingerprint();
+
+// Forward-decl so PlcCommitGuard's dtor can call it.
+void savePlcTables();
+
+// RAII guard: on any exit from processPlcBinary (OK, ERR, exception), clear
+// the suspend flag and flush the single accumulated commit. Prevents a
+// mid-loop TRUNC/BADTAG error from leaving the flag TRUE, which would
+// silently no-op every subsequent savePlcTables() call in the firmware.
+struct PlcCommitGuard {
+    ~PlcCommitGuard() {
+        plcPersistSuspended = false;
+        savePlcTables();
+    }
+};
 
 // ─── Peripheral devices ────────────────────────────────────────────
 // Standard Arduino-style sensors (DHT11/22, HC-SR04 ultrasonic, DS18B20,
@@ -443,6 +575,20 @@ enum DeviceType : uint8_t {
     // Tier 3 — laser time-of-flight distance sensors
     DEV_VL53L0X    = 11,  // ~30-1200mm, default addr 0x29
     DEV_VL53L1X    = 12,  // ~40-4000mm, default addr 0x29 (long mode)
+    // Tier 4 — analog (ADC-based)
+    DEV_THERMISTOR = 13,  // NTC thermistor via voltage divider, Steinhart-Hart beta
+    // Tier 5 — 3-axis magnetometers (vehicle/ferrous mass detection,
+    // rain-immune confirmation channel for radar/PIR systems).
+    DEV_HMC5883L   = 14,  // Honeywell 3-axis magnetometer, fixed addr 0x1E
+    DEV_QMC5883L   = 15,  // QST 3-axis magnetometer, fixed addr 0x0D.
+                          // Many "GY-271" modules sold as HMC5883L are
+                          // actually QMC silicon — different address +
+                          // different register layout, so both are
+                          // first-class types, not aliases.
+    DEV_QMC5883P   = 16,  // QST QMC5883P (successor to QMC5883L), addr 0x2C.
+                          // Newer GY-273 boards ship this — different
+                          // register map from QMC5883L, so also its own
+                          // first-class driver.
 };
 struct Device {
     bool      active;
@@ -453,9 +599,19 @@ struct Device {
     uint8_t   i2cReg;        // register byte for DEV_I2C_READ
     uint8_t   readBytes;     // 1 or 2 for DEV_I2C_READ
     uint8_t   outVpin[4];    // up to 4 output vpins (DHT: temp+humid, I2C: 1)
-    // Per-device extra config — INA226 uses cfgA for shunt resistance
-    // in milliohms (e.g. 100 for a 0.1Ω shunt). Unused for other types.
+    // Per-device extra config:
+    //   INA226       → cfgA = shunt resistance in milliohms (e.g. 100 for 0.1Ω)
+    //   THERMISTOR   → cfgA = Beta coefficient (3000..5000 typical, e.g. 3950)
+    //   others       → unused
     int16_t   cfgA;
+    // THERMISTOR-only extras (would be `union` material but the struct
+    // is dumped to EEPROM whole so plain fields keep the layout stable
+    // across types):
+    //   cfgB         → R₀ (nominal resistance at 25°C) in units of 100Ω,
+    //                  so 10kΩ → 100, 100kΩ → 1000. Max ~6.5MΩ.
+    //   cfgC         → pullup resistor in units of 100Ω (same encoding).
+    uint16_t  cfgB;
+    uint16_t  cfgC;
     uint16_t  intervalMs;    // service interval
     uint32_t  lastServiceMs; // when this device last ran
     // OLED-only: template string referencing vpins as {Vnnn}. Statically
@@ -499,6 +655,7 @@ bool hasActiveOledDevice() {
 // last OLED block goes away.
 extern unsigned long lastOledRefresh;
 
+void saveDevicesTable();  // forward — defined alongside savePlcTables much later
 void clearAllDevices() {
     bool hadOled = hasActiveOledDevice();
     for (int i = 0; i < MAX_DEVICES; i++) {
@@ -515,6 +672,9 @@ void clearAllDevices() {
     // VL53L0X/L1X will re-init from scratch (necessary because the
     // user may have re-wired or power-cycled the sensor).
     vl53ResetState();
+    // Persist the wipe so a reboot before the next DEVICE,ADD doesn't
+    // restore stale device configs from a prior session.
+    saveDevicesTable();
 }
 
 // Find free or matching-key device slot. For most devices the "key" is
@@ -660,6 +820,51 @@ static int16_t ds18b20ReadTempC10(uint8_t pin) {
     int16_t raw = (int16_t)((hi << 8) | lo);
     // Raw is in 1/16°C steps (DS18B20 default 12-bit). Convert to ×10°C.
     return (int16_t)((int32_t)raw * 10 / 16);
+}
+
+// ─── NTC Thermistor driver (Steinhart-Hart beta equation) ───────
+// Wired as a voltage divider: pullup resistor from VCC (3.3V) to the
+// ADC pin, thermistor from the ADC pin to GND. ADC reads mV directly
+// via ESP32's calibrated analogReadMilliVolts(). Computes thermistor
+// resistance from the divider math, then applies the simplified
+// two-parameter Steinhart-Hart "beta" equation:
+//
+//   1/T = 1/T₀ + (1/β) × ln(R / R₀)
+//
+// where T₀ = 298.15 K (25°C reference), R₀ = thermistor nominal
+// resistance at T₀, β = Beta coefficient (3000..5000 typical), R =
+// measured resistance, T = temperature in Kelvin.
+//
+// Returns temp × 10 °C so the int fits in a uint16 vpin with 0.1°C
+// resolution (same convention as DHT22 / DS18B20 / BME280 / MCP9808).
+// INT16_MIN on error (sensor disconnected, rail short, garbage).
+static int16_t thermistorReadTempC10(uint8_t pin, int16_t beta,
+                                     uint32_t r0_ohm, uint32_t pullup_ohm) {
+    int mv = analogReadMilliVolts(pin);
+    // Sanity-bound the ADC reading. Below 50 mV the pin is essentially
+    // shorted to GND (thermistor failed short, or wiring reversed).
+    // Above 3250 mV the pin is at the rail (thermistor failed open, or
+    // the pullup isn't connected). Either way the divider math is
+    // garbage; report error and let the caller leave the previous
+    // vpin value in place rather than write nonsense.
+    if (mv < 50 || mv >= 3250) return INT16_MIN;
+    // R_th = R_pullup × (mV / (3300 - mV))
+    // Float math avoids overflow with large pullups (100kΩ × 3000 ≈ 3e8).
+    float r_th = (float)pullup_ohm * (float)mv / (float)(3300 - mv);
+    if (r_th <= 0.0f || r0_ohm == 0 || beta == 0) return INT16_MIN;
+    // Beta equation (simplified Steinhart-Hart, two-parameter form).
+    const float T0_KELVIN = 298.15f;
+    float invT = 1.0f / T0_KELVIN +
+                 (1.0f / (float)beta) * logf(r_th / (float)r0_ohm);
+    if (invT <= 0.0f) return INT16_MIN;  // log() returned -inf or huge
+    float t_kelvin = 1.0f / invT;
+    float t_celsius = t_kelvin - 273.15f;
+    // Final sanity clamp before truncating to int16. Anything beyond
+    // ±200°C is way past any real NTC sensor range and almost certainly
+    // a math error from a near-rail ADC reading we should have caught
+    // above. Report error rather than write a garbage vpin.
+    if (t_celsius < -200.0f || t_celsius > 200.0f) return INT16_MIN;
+    return (int16_t)(t_celsius * 10.0f);
 }
 
 // ─── I2C helpers (Tier 2) ────────────────────────────────────────
@@ -864,6 +1069,127 @@ static bool bme280Read(uint8_t addr, int16_t* tempC10, uint16_t* hPa10,
     return true;
 }
 
+// ─── HMC5883L driver (Honeywell 3-axis magnetometer, addr 0x1E) ─
+// Use case: ferrous mass detection (passing vehicles), as a rain-immune
+// AND-gate confirmation channel for microwave radar. Earth's field
+// (~50 µT) is the noise floor; a passing car perturbs it by 5-50 µT
+// at ~1m mounting distance, easily distinguishable.
+//
+// Init each call (3 i2c writes, ~3ms) keeps the driver stateless and
+// lets the user hot-swap the chip without rebooting. Sample rate is
+// 500ms-bounded anyway by intervalMs, so the per-call init cost is
+// noise.
+//
+// Register layout (per datasheet):
+//   0x00 CONFIG_A   write 0x70: 8-sample average, 15 Hz output, normal
+//   0x01 CONFIG_B   write 0xA0: gain ±8.1 G (230 LSB/G — broad range so
+//                              ferrous saturation from a passing vehicle
+//                              is unlikely; still ample resolution for
+//                              the µT-level perturbations we care about)
+//   0x02 MODE       write 0x00: continuous measurement
+//   0x03-0x08       6 bytes: X_MSB X_LSB Z_MSB Z_LSB Y_MSB Y_LSB
+//                              (yes, Z comes before Y — datasheet quirk)
+//
+// Raw values are int16_t signed. We bit-cast into uint16_t for vpin
+// storage; setVpinSigned(vpin, true) tells SETPOINT to interpret as
+// signed so negative-threshold comparisons work on each axis.
+static bool hmc5883lRead(uint8_t addr, int16_t* xRaw, int16_t* yRaw,
+                         int16_t* zRaw) {
+    if (!i2cWrite8(addr, 0x00, 0x70)) return false;  // CONFIG_A
+    if (!i2cWrite8(addr, 0x01, 0xA0)) return false;  // CONFIG_B
+    if (!i2cWrite8(addr, 0x02, 0x00)) return false;  // MODE: continuous
+    delay(6);  // 15 Hz output rate → one sample every ~67ms; conservative
+               // 6ms wait ensures the first reading is fresh after init
+    uint8_t b[6];
+    if (!i2cReadN(addr, 0x03, b, 6)) return false;
+    // Big-endian; note the X / Z / Y order in the data registers.
+    *xRaw = (int16_t)((b[0] << 8) | b[1]);
+    *zRaw = (int16_t)((b[2] << 8) | b[3]);
+    *yRaw = (int16_t)((b[4] << 8) | b[5]);
+    return true;
+}
+
+// ─── QMC5883L driver (QST 3-axis magnetometer, addr 0x0D) ───────
+// Same use case as HMC5883L. Different chip, different address,
+// different register layout, much higher sensitivity at the same
+// physical range. Worth supporting both because cheap "GY-271"
+// modules are sold under the HMC5883L name but ship QMC silicon —
+// auto-detection by address probe is the user's workflow: try one
+// type, if no readings flow, try the other.
+//
+// Register layout (per QMC5883L datasheet):
+//   0x00-0x05       6 bytes: X_LSB X_MSB Y_LSB Y_MSB Z_LSB Z_MSB
+//                              (little-endian, conventional X/Y/Z order)
+//   0x09 CONTROL_1  write 0x1D: continuous, 200 Hz ODR, ±8 G range,
+//                              OSR=512 (max noise rejection)
+//   0x0B SET/RESET  write 0x01: SET/RESET period for noise cancel
+//                              (datasheet-mandated, "always 0x01")
+//
+// At 8 G range the chip outputs 12000 LSB/G — ~13× more sensitive than
+// HMC5883L for the same field. Earth's field reads ~6000 counts;
+// vehicle perturbations show up clearly above sensor noise.
+static bool qmc5883lRead(uint8_t addr, int16_t* xRaw, int16_t* yRaw,
+                         int16_t* zRaw) {
+    if (!i2cWrite8(addr, 0x0B, 0x01)) return false;  // SET/RESET period
+    if (!i2cWrite8(addr, 0x09, 0x1D)) return false;  // CONTROL_1
+    delay(6);  // 200 Hz ODR → 5ms per sample; 6ms wait covers first sample
+    uint8_t b[6];
+    if (!i2cReadN(addr, 0x00, b, 6)) return false;
+    // Little-endian, conventional X/Y/Z order.
+    *xRaw = (int16_t)((b[1] << 8) | b[0]);
+    *yRaw = (int16_t)((b[3] << 8) | b[2]);
+    *zRaw = (int16_t)((b[5] << 8) | b[4]);
+    return true;
+}
+
+// ─── QMC5883P driver (QST 3-axis magnetometer, addr 0x2C) ───────
+// Newer QMC5883P is what most current "GY-273" modules ship. Register
+// map differs from QMC5883L (data starts at 0x01 not 0x00, control
+// regs at 0x0A/0x0B/0x0C, chip ID at 0x00 = 0x80).
+//
+// Init sequence:
+//   0x0D SIGN_CFG    write 0x40: enable axes in default orientation
+//   0x0B CTRL2       write 0x08: SET_RESET on, ±8G range
+//   0x0A CTRL1       write 0xC3: continuous mode, 200Hz ODR, OSR=8, DSR=8
+//
+// Data read: 6 bytes little-endian from 0x01 (X_LSB, X_MSB, Y_LSB, Y_MSB,
+// Z_LSB, Z_MSB). Same signed int16 semantics as QMC5883L.
+static bool qmc5883pRead(uint8_t addr, int16_t* xRaw, int16_t* yRaw,
+                         int16_t* zRaw) {
+    if (!i2cWrite8(addr, 0x0D, 0x40)) return false;  // SIGN
+    if (!i2cWrite8(addr, 0x0B, 0x08)) return false;  // CTRL2: SET/RESET + 8G
+    if (!i2cWrite8(addr, 0x0A, 0xC3)) return false;  // CTRL1: continuous, 200Hz
+    delay(6);
+    uint8_t b[6];
+    if (!i2cReadN(addr, 0x01, b, 6)) return false;
+    *xRaw = (int16_t)((b[1] << 8) | b[0]);
+    *yRaw = (int16_t)((b[3] << 8) | b[2]);
+    *zRaw = (int16_t)((b[5] << 8) | b[4]);
+    return true;
+}
+
+// ─── Vector magnitude helper (rotation-invariant, vibration-immune) ─
+// |⃗v| = sqrt(x² + y² + z²). For magnetometers, this is the killer
+// feature: pure rotation of the sensor (wind sway of an outdoor box,
+// post wobble, etc.) shuffles x/y/z but preserves magnitude. Only an
+// actual change in the FIELD STRENGTH — i.e. ferrous mass entering or
+// leaving the detection volume — moves the magnitude needle. Use it
+// as a Delta-Rate or threshold source for rain/vibration-immune
+// vehicle detection.
+//
+// Overflow note (caught by the pre-implementation audit): at QMC's
+// 8G full-scale, raw values reach ±32767. x² alone fits in int32
+// (max 32767² = 1.07e9 < 2.15e9 int32_t cap) but the SUM x²+y²+z²
+// can reach 3.22e9 which exceeds int32_t. Must use uint32_t for the
+// sum. sqrt result fits in uint16_t (max √(3·32767²) ≈ 56756).
+static uint16_t magnitude3(int16_t x, int16_t y, int16_t z) {
+    uint32_t x2 = (uint32_t)((int32_t)x * (int32_t)x);
+    uint32_t y2 = (uint32_t)((int32_t)y * (int32_t)y);
+    uint32_t z2 = (uint32_t)((int32_t)z * (int32_t)z);
+    uint32_t sumSq = x2 + y2 + z2;
+    return (uint16_t)sqrtf((float)sumSq);
+}
+
 // ─── Device service loop ─────────────────────────────────────────
 // Called from the main loop every tick. Each active device runs at its
 // own cadence (intervalMs since lastServiceMs). Reads land in the
@@ -953,6 +1279,49 @@ void serviceDevices() {
                 }
                 break;
             }
+            case DEV_HMC5883L: {
+                int16_t xRaw = 0, yRaw = 0, zRaw = 0;
+                if (hmc5883lRead(d.i2cAddr, &xRaw, &yRaw, &zRaw)) {
+                    // Bit-cast int16 → uint16 for vpin storage; the
+                    // signed-mask set at deploy time tells SETPOINT to
+                    // sign-extend on read so threshold comparisons work
+                    // on negative axis values (the chip outputs ±32767).
+                    if (d.outVpin[0]) setVpinValue(d.outVpin[0], (uint16_t)xRaw);
+                    if (d.outVpin[1]) setVpinValue(d.outVpin[1], (uint16_t)yRaw);
+                    if (d.outVpin[2]) setVpinValue(d.outVpin[2], (uint16_t)zRaw);
+                    // outVpin[3] = vector magnitude (always ≥ 0, unsigned).
+                    // Skipped if the gateway didn't allocate a 4th vpin —
+                    // backward compat with pre-magnitude gateway builds.
+                    if (d.outVpin[3]) {
+                        setVpinValue(d.outVpin[3], magnitude3(xRaw, yRaw, zRaw));
+                    }
+                }
+                break;
+            }
+            case DEV_QMC5883L: {
+                int16_t xRaw = 0, yRaw = 0, zRaw = 0;
+                if (qmc5883lRead(d.i2cAddr, &xRaw, &yRaw, &zRaw)) {
+                    if (d.outVpin[0]) setVpinValue(d.outVpin[0], (uint16_t)xRaw);
+                    if (d.outVpin[1]) setVpinValue(d.outVpin[1], (uint16_t)yRaw);
+                    if (d.outVpin[2]) setVpinValue(d.outVpin[2], (uint16_t)zRaw);
+                    if (d.outVpin[3]) {
+                        setVpinValue(d.outVpin[3], magnitude3(xRaw, yRaw, zRaw));
+                    }
+                }
+                break;
+            }
+            case DEV_QMC5883P: {
+                int16_t xRaw = 0, yRaw = 0, zRaw = 0;
+                if (qmc5883pRead(d.i2cAddr, &xRaw, &yRaw, &zRaw)) {
+                    if (d.outVpin[0]) setVpinValue(d.outVpin[0], (uint16_t)xRaw);
+                    if (d.outVpin[1]) setVpinValue(d.outVpin[1], (uint16_t)yRaw);
+                    if (d.outVpin[2]) setVpinValue(d.outVpin[2], (uint16_t)zRaw);
+                    if (d.outVpin[3]) {
+                        setVpinValue(d.outVpin[3], magnitude3(xRaw, yRaw, zRaw));
+                    }
+                }
+                break;
+            }
             case DEV_VL53L0X: {
                 // Lazy init on first service call. setBus() lets the
                 // library know our existing Wire instance — saves
@@ -1001,6 +1370,22 @@ void serviceDevices() {
                     if (mm > 0 && mm < 8000) {
                         if (d.outVpin[0]) setVpinValue(d.outVpin[0], mm);
                     }
+                }
+                break;
+            }
+            case DEV_THERMISTOR: {
+                // R₀ and pullup are stored as units of 100Ω in the
+                // Device struct (uint16_t each) to keep the struct
+                // size down while still supporting up to ~6.5MΩ.
+                uint32_t r0_ohm     = (uint32_t)d.cfgB * 100UL;
+                uint32_t pullup_ohm = (uint32_t)d.cfgC * 100UL;
+                int16_t tC10 = thermistorReadTempC10(
+                    d.pin1, d.cfgA, r0_ohm, pullup_ohm);
+                if (tC10 != INT16_MIN && d.outVpin[0]) {
+                    // Same convention as DS18B20: signed temp stored
+                    // unsigned, downstream Compare blocks handle the
+                    // signed-int interpretation if needed.
+                    setVpinValue(d.outVpin[0], (uint16_t)tC10);
                 }
                 break;
             }
@@ -1083,12 +1468,21 @@ void setupDigitalOutput(int pin);
 // Use setpoint Scale to convert to engineering units (e.g., m/s).
 // AUTO mode: ESP32-S3 has ADC on GPIOs 1-20; classic ESP32 has ADC1 on 32-39.
 static int readSensorPin(int pin) {
-    // Storage virtual pins 200-231: in-firmware state variables (persisted to EEPROM).
-    // Read returns the last value set via CMD,SET or BEACON,ADD RELAY action.
-    if (isStorageVpin(pin)) return (int)getStorageVpin(pin);
-    // Scratch virtual pins 232-255: RAM-only, compiler-allocated "wires"
-    // between PLC blocks. Reads the last value written by a primitive.
-    if (isScratchVpin(pin)) return (int)getScratchVpin(pin);
+    // Storage / scratch virtual pins: sign-extend through int16_t when the
+    // vpin has been opted into signed domain (see setVpinSigned). This
+    // matters for temperature sensors that report negative values — a
+    // DS18B20 reading -10°C stores 65436 (= int16(-100) bit pattern),
+    // and a SETPOINT comparing against threshold -50 (×10 = -5°C) needs
+    // to see -100 not 65436. Unsigned sources (COUNTER, distance
+    // sensors, etc.) take the original zero-extending cast.
+    if (isStorageVpin(pin)) {
+        uint16_t v = getStorageVpin(pin);
+        return isVpinSigned(pin) ? (int)(int16_t)v : (int)v;
+    }
+    if (isScratchVpin(pin)) {
+        uint16_t v = getScratchVpin(pin);
+        return isVpinSigned(pin) ? (int)(int16_t)v : (int)v;
+    }
     // Virtual pins 100-115: IO expansion board
     if (pin >= IO_EXPAND_VPIN_BASE && pin < IO_EXPAND_VPIN_BASE + IO_EXPAND_MAX_PINS)
         return ioExpandRead(pin);
@@ -1557,7 +1951,14 @@ void sendHeartbeatWithFlags() {
     mesh.plcScans = plcStats.scanTicks;
     mesh.plcFires = plcStats.logicFires + plcStats.latchFires +
                     plcStats.scaleFires + plcStats.counterFires +
-                    plcStats.timerFires + plcStats.setpointFires;
+                    plcStats.timerFires + plcStats.setpointFires +
+                    plcStats.deltaFires;
+    // State-change generation for gateway reconciliation. Zero on fresh
+    // boot; increments in savePlcTables / saveDevicesTable when the user
+    // deploys or a runtime command mutates PLC/DEVICE state. Gateway
+    // treats "generation changed" as its cue to fetch the full
+    // fingerprint via PLC,STATUS. See recomputeStateFingerprint().
+    mesh.stateGeneration = stateGeneration;
     mesh.sendHeartbeat();
 
     // In gateway mode, publish our own battery to serial — remote nodes
@@ -2629,6 +3030,8 @@ void setupGPIO() {
 // than putting the impl with the other EEPROM code.
 void savePlcTables();
 void loadPlcTables();
+void saveDevicesTable();
+void loadDevicesTable();
 
 // Core timer logic — returns response string, used by both mesh and BLE paths
 String processTimerCommand(const String& args) {
@@ -2851,6 +3254,14 @@ String processSetpointCommand(const String& args) {
                 int sEnd = suffixes.indexOf(',', sComma + 1);
                 scaleOffset = (sEnd > sComma) ? suffixes.substring(sComma + 1, sEnd).toFloat()
                                               : suffixes.substring(sComma + 1).toFloat();
+                // Reject NaN/Inf (String.toFloat parses "nan"/"inf"
+                // literally) and zero factor (would make scaled = offset
+                // always, ignoring the sensor). Silently-broken setpoint
+                // is worse than a clear deploy error.
+                if (!isfinite(scaleFactor) || scaleFactor == 0.0f ||
+                    !isfinite(scaleOffset)) {
+                    return "ERR,SETPOINT,BADSCALE";
+                }
             }
         }
         if (debouncePos >= 0) {
@@ -3331,10 +3742,29 @@ void checkSetpoints() {
                 // which silently treated whole-number analog thresholds
                 // (e.g. 20.0°C) as boolean and broke chatter
                 // suppression on real sensors.
-                float margin = setpoints[i].booleanDomain
+                // Detect canonical boolean-domain setpoints at RUNTIME, not
+                // just from the booleanDomain flag set by binary-deploy's
+                // markSetpointBoolean. Reason: the flag defaults false and
+                // ASCII-deployed rules — or rules persisted in EEPROM by an
+                // older firmware that lacked the marker — silently get stuck
+                // triggered after their first fire because the 10%-margin
+                // hysteresis (threshold=1.0 → margin=0.1 → clear gate=1.1)
+                // can never be crossed by a digital 1.0 source. Asymmetric:
+                // GE,1 clears at scaled<0.9 (V=0 satisfies trivially) so
+                // "Gate Open" re-fires every cycle; LT,1 clears at
+                // scaled>=1.1 (V=1 never satisfies) so "Gate Close" fires
+                // once and is then permanently stuck triggered=true.
+                // Threshold==1.0 with op LT(1) or GE(3) is unambiguously
+                // boolean — that's the only shape the PLC compiler ever
+                // emits for Digital Read / state-vpin sources.
+                bool effectiveBoolean =
+                    setpoints[i].booleanDomain ||
+                    (setpoints[i].threshold == 1.0f &&
+                     (setpoints[i].op == 1 || setpoints[i].op == 3));
+                float margin = effectiveBoolean
                     ? 0.0f
                     : fabsf(setpoints[i].threshold) * 0.1f;
-                if (!setpoints[i].booleanDomain && margin < 0.1f) margin = 0.1f;
+                if (!effectiveBoolean && margin < 0.1f) margin = 0.1f;
                 bool clearCondition = false;
                 switch (setpoints[i].op) {
                     case 0: case 3: clearCondition = (scaled <  (setpoints[i].threshold - margin)); break;
@@ -3979,6 +4409,11 @@ String processScaleCommand(const String& args) {
 
         if (!(isStorageVpin(vpin) || isScratchVpin(vpin))) return "ERR,SCALE,BADVPIN";
         if (offset < -32768 || offset > 32767) return "ERR,SCALE,BADOFFSET";
+        // NaN/Inf factor would make `(long)((float)raw * factor)` undefined
+        // at checkScales (line 3938); zero factor makes output always = offset,
+        // ignoring the input. Reject both at deploy time rather than silently
+        // emit a dead rule.
+        if (!isfinite(factor) || factor == 0.0f) return "ERR,SCALE,BADFACTOR";
         // 0 is the sentinel for "unwired input — read as 0 every tick".
         // Any non-zero input pin must be measurable. Without this check,
         // a typo'd sensor pin produces a permanently-zero output vpin with
@@ -4020,6 +4455,173 @@ void handleScaleCmd(const String& args, const String& from) {
     bleSend(resp);
 }
 
+// ─── DELTA: rate-of-change primitive (deployable Delta-Rate) ────
+// Every `periodMs` this primitive samples the input, computes
+// `current - lastValue`, writes the delta to the output vpin as a
+// signed int16, and snapshots the current value + time for the next
+// period. Output can be negative when the input is decreasing, so
+// setVpinSigned() is called on the output vpin at install time — any
+// downstream Compare / LOGIC / SETPOINT sees the sign-extended value
+// via readSensorPin's isVpinSigned() check.
+//
+// This is the firmware-native counterpart to the gateway's Python-side
+// Delta-Rate block. Deploying it locally means the gateway no longer
+// needs to receive every sensor sample just to compute deltas — only
+// downstream primitives (like SETPOINT MSG on a threshold crossing)
+// put anything on the LoRa mesh, and only when they fire. That's a
+// ~172,000× reduction in vpin telemetry vs the gateway-side Delta-
+// Rate flow for a magnetometer vehicle detector.
+//
+// State semantics:
+//   lastTime == 0  → uninitialised. First checkDeltas() tick after
+//                    install snapshots the current value + time and
+//                    emits nothing. This matches the gateway-side
+//                    behaviour of returning None on the first sample
+//                    so downstream Compare doesn't see a spurious
+//                    "delta=huge" on startup.
+//   lastTime  > 0  → gated on (now - lastTime) >= periodMs. When
+//                    triggered, compute delta, clamp to int16 range,
+//                    bit-cast to uint16 for vpin storage, refresh the
+//                    snapshot.
+#define MAX_DELTA_RULES 4
+struct DeltaRule {
+    bool     active = false;
+    uint8_t  outputVpin;
+    uint8_t  inputPin;
+    uint16_t periodMs;      // 100..65500, validated at ADD
+    int16_t  lastValue;
+    uint32_t lastTime;      // millis() of last sample; 0 = uninitialised
+};
+DeltaRule deltaRules[MAX_DELTA_RULES];
+
+void checkDeltas() {
+    uint32_t now = millis();
+    for (int i = 0; i < MAX_DELTA_RULES; i++) {
+        DeltaRule& r = deltaRules[i];
+        if (!r.active) continue;
+        // First tick after install / reboot: snapshot current, emit
+        // nothing. The output vpin keeps its last value (or 0 on
+        // fresh boot) until the second tick.
+        if (r.lastTime == 0) {
+            r.lastValue = (int16_t)((r.inputPin > 0) ? readSensorPin(r.inputPin) : 0);
+            r.lastTime  = now;
+            continue;
+        }
+        if ((uint32_t)(now - r.lastTime) < r.periodMs) continue;
+
+        int cur   = (r.inputPin > 0) ? readSensorPin(r.inputPin) : 0;
+        long delta = (long)cur - (long)r.lastValue;
+        if (delta >  32767) delta =  32767;
+        if (delta < -32768) delta = -32768;
+        // Bit-cast into uint16 for storage. The signed-mask bit set
+        // at install time tells readSensorPin to sign-extend the
+        // stored value on read, so downstream primitives see the
+        // correct negative values.
+        setVpinValue(r.outputVpin, (uint16_t)(int16_t)delta);
+        r.lastValue = (int16_t)cur;
+        r.lastTime  = now;
+        plcStats.deltaFires++;
+    }
+}
+
+String processDeltaCommand(const String& args) {
+    String act = args;
+    int comma = act.indexOf(',');
+    String first = (comma >= 0) ? act.substring(0, comma) : act;
+    String rest  = (comma >= 0) ? act.substring(comma + 1) : "";
+    first.toUpperCase();
+
+    if (first == "CLEAR") {
+        for (int i = 0; i < MAX_DELTA_RULES; i++) deltaRules[i].active = false;
+        savePlcTables();
+        return "OK,DELTA,CLEAR";
+    }
+    if (first == "LIST") {
+        String resp = "DELTAS";
+        int count = 0;
+        for (int i = 0; i < MAX_DELTA_RULES; i++) {
+            if (!deltaRules[i].active) continue;
+            count++;
+            resp += "," + String(deltaRules[i].outputVpin) + ":" +
+                    "in=" + String(deltaRules[i].inputPin) + ":" +
+                    "p="  + String(deltaRules[i].periodMs) + "ms";
+        }
+        if (count == 0) resp += ",NONE";
+        return resp;
+    }
+    if (first == "DELETE") {
+        int vpin = rest.toInt();
+        for (int i = 0; i < MAX_DELTA_RULES; i++) {
+            if (deltaRules[i].active && deltaRules[i].outputVpin == vpin) {
+                deltaRules[i].active = false;
+                savePlcTables();
+                return "OK,DELTA,DELETE," + String(vpin);
+            }
+        }
+        return "ERR,DELTA,NOTFOUND";
+    }
+    if (first == "ADD") {
+        // <out_vpin>,<in_pin>,<period_ms>
+        int c1 = rest.indexOf(','); if (c1 < 0) return "ERR,DELTA,FORMAT";
+        int vpin = rest.substring(0, c1).toInt();
+        String tmp = rest.substring(c1 + 1);
+        int c2 = tmp.indexOf(','); if (c2 < 0) return "ERR,DELTA,FORMAT";
+        int inPin = tmp.substring(0, c2).toInt();
+        int period = tmp.substring(c2 + 1).toInt();
+
+        if (!(isStorageVpin(vpin) || isScratchVpin(vpin))) return "ERR,DELTA,BADVPIN";
+        // 0 is the sentinel for "unwired input" — mirrors SCALE's ADD
+        // path. Any non-zero pin must be measurable.
+        if (inPin != 0 && !isPinConfigurable(inPin)) return "ERR,DELTA,BADIN";
+        // Period bounds: min 100 ms (well below any realistic sensor
+        // cadence — sub-100 ms would burn CPU on the millis() gate for
+        // no benefit). Max 65500 ms leaves uint16 headroom.
+        if (period < 100 || period > 65500) return "ERR,DELTA,BADPERIOD";
+
+        int slot = -1;
+        for (int i = 0; i < MAX_DELTA_RULES; i++) {
+            if (deltaRules[i].active && deltaRules[i].outputVpin == vpin) { slot = i; break; }
+        }
+        if (slot < 0) {
+            for (int i = 0; i < MAX_DELTA_RULES; i++) {
+                if (!deltaRules[i].active) { slot = i; break; }
+            }
+        }
+        if (slot < 0) return "ERR,DELTA,FULL";
+
+        memset(&deltaRules[slot], 0, sizeof(DeltaRule));
+        deltaRules[slot].active     = true;
+        deltaRules[slot].outputVpin = (uint8_t)vpin;
+        deltaRules[slot].inputPin   = (uint8_t)inPin;
+        deltaRules[slot].periodMs   = (uint16_t)period;
+        // lastValue / lastTime stay 0 — checkDeltas will initialise
+        // on its first tick after install.
+
+        // DELTA output is inherently signed (can be negative when the
+        // input is decreasing). Mark the vpin signed so any downstream
+        // Compare/LOGIC/SETPOINT reads the sign-extended value via
+        // readSensorPin's isVpinSigned() check. Mirrors the discipline
+        // used in the magnetometer install path.
+        setVpinSigned(vpin, true);
+
+        savePlcTables();
+        return "OK,DELTA,ADD," + String(vpin) + "," + String(inPin) +
+               "," + String(period);
+    }
+    return "ERR,DELTA,UNKNOWN";
+}
+void handleDeltaBle(const String& args) { bleSend(processDeltaCommand(args)); }
+void handleDeltaCmd(const String& args, const String& from) {
+    String resp = processDeltaCommand(args);
+    mesh.cmdsExecuted++;
+    String mid = mesh.generateMsgID();
+    String hex = mesh.encryptMsg(resp);
+    String payload = String(mesh.localID) + "," + from + "," + mid + "," +
+                     String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+    mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+    bleSend(resp);
+}
+
 // ─── PLC,CLEAR / PLC,DEPLOY — batched rule deploy ──────────────
 // One firmware verb that bundles up to ~6 PLC primitives in a single
 // LoRa packet. Replaces the per-primitive CLEAR+ADD chatter (was 6
@@ -4040,6 +4642,7 @@ void handleScaleCmd(const String& args, const String& from) {
 //     K = LATCH    (wraps to 'LATCH,ADD,<args>')  — K not L since L is taken
 //     X = SCALE    (wraps to 'SCALE,ADD,<args>')
 //     T = TIMER    (raw args, same as 'TIMER,<args>')
+//     D = DELTA    (wraps to 'DELTA,ADD,<args>')
 //
 // Example:
 //   PLC,DEPLOY,R;T,200,PULSE,15,15,0;L,201,GT,200,1,0,0;S,201,GE,1,MSG,Open,Closed
@@ -4067,21 +4670,23 @@ String processPlcCommand(const String& args) {
     // landed (and didn't lose half its primitives to a dropped LoRa
     // packet). Much smaller reply than PLC,LIST.
     if (verb == "COUNT") {
-        int sp = 0, ct = 0, lg = 0, lt = 0, sc = 0, tm = 0;
-        for (int i = 0; i < MAX_SETPOINTS;   i++) if (setpoints[i].active)  sp++;
-        for (int i = 0; i < MAX_COUNTERS;    i++) if (counters[i].active)   ct++;
-        for (int i = 0; i < MAX_LOGIC_RULES; i++) if (logicRules[i].active) lg++;
-        for (int i = 0; i < MAX_LATCH_RULES; i++) if (latchRules[i].active) lt++;
-        for (int i = 0; i < MAX_SCALE_RULES; i++) if (scaleRules[i].active) sc++;
-        for (int i = 0; i < MAX_TIMERS;      i++) if (timers[i].active)     tm++;
-        int total = sp + ct + lg + lt + sc + tm;
+        int sp = 0, ct = 0, lg = 0, lt = 0, sc = 0, tm = 0, dl = 0;
+        for (int i = 0; i < MAX_SETPOINTS;    i++) if (setpoints[i].active)  sp++;
+        for (int i = 0; i < MAX_COUNTERS;     i++) if (counters[i].active)   ct++;
+        for (int i = 0; i < MAX_LOGIC_RULES;  i++) if (logicRules[i].active) lg++;
+        for (int i = 0; i < MAX_LATCH_RULES;  i++) if (latchRules[i].active) lt++;
+        for (int i = 0; i < MAX_SCALE_RULES;  i++) if (scaleRules[i].active) sc++;
+        for (int i = 0; i < MAX_TIMERS;       i++) if (timers[i].active)     tm++;
+        for (int i = 0; i < MAX_DELTA_RULES;  i++) if (deltaRules[i].active) dl++;
+        int total = sp + ct + lg + lt + sc + tm + dl;
         return String("OK,PLC,COUNT,total=") + String(total)
              + ",setpoint=" + String(sp)
              + ",counter="  + String(ct)
              + ",logic="    + String(lg)
              + ",latch="    + String(lt)
              + ",scale="    + String(sc)
-             + ",timer="    + String(tm);
+             + ",timer="    + String(tm)
+             + ",delta="    + String(dl);
     }
 
     // PERSIST — toggle the EEPROM-mirror bit for one storage vpin.
@@ -4113,10 +4718,25 @@ String processPlcCommand(const String& args) {
     if (verb == "STATUS") {
         uint32_t totalFires = plcStats.logicFires + plcStats.latchFires +
                               plcStats.scaleFires + plcStats.counterFires +
-                              plcStats.timerFires + plcStats.setpointFires;
+                              plcStats.timerFires + plcStats.setpointFires +
+                              plcStats.deltaFires;
+        // cap=4 signals fingerprint-reconciliation support:
+        //   ",G<hex2>" — 8-bit state-change generation counter (RAM-only,
+        //                resets on boot)
+        //   ",K<hex8>" — 32-bit BLAKE2s fingerprint of the installed
+        //                PLC + DEVICE tables with runtime fields zeroed
+        // Gateway uses cap≥4 as the gate for the new reconciliation path.
+        // cap=3 (previous) meant "understands DELTA primitive"; cap=2
+        // meant "understands binary PLC deploy". Older gateways reading
+        // cap>expected ignore the trailing fields.
+        char gHex[3];
+        snprintf(gHex, sizeof(gHex), "%02X", (unsigned)stateGeneration);
+        char kHex[9];
+        snprintf(kHex, sizeof(kHex), "%08X", (unsigned)stateFingerprint);
         return String("OK,PLC,STATUS,scans=") + String(plcStats.scanTicks)
              + ",fires="                       + String(totalFires)
-             + ",bin=1,cap=2";
+             + ",bin=1,cap=4,G"                + String(gHex)
+             + ",K"                            + String(kHex);
     }
 
     // CLEAR — wipes all 6 PLC tables in one shot. Each individual CLEAR is
@@ -4128,6 +4748,7 @@ String processPlcCommand(const String& args) {
         processLatchCommand("CLEAR");
         processScaleCommand("CLEAR");
         processTimerCommand("CLEAR");
+        processDeltaCommand("CLEAR");
         clearAllStorageVpins();
         clearAllScratchVpins();
         clearAllDevices();
@@ -4161,6 +4782,7 @@ String processPlcCommand(const String& args) {
         processLatchCommand("CLEAR");
         processScaleCommand("CLEAR");
         processTimerCommand("CLEAR");
+        processDeltaCommand("CLEAR");
         clearAllStorageVpins();
         clearAllScratchVpins();
         clearAllDevices();
@@ -4203,6 +4825,7 @@ String processPlcCommand(const String& args) {
             case 'K': resp = processLatchCommand("ADD," + tail); break;
             case 'X': resp = processScaleCommand("ADD," + tail); break;
             case 'T': resp = processTimerCommand(tail); break;
+            case 'D': resp = processDeltaCommand("ADD," + tail); break;
 
             // ── Compact setpoint shortcuts ──
             // 'p' / 'q': pulse-action setpoint on high/low. tail is
@@ -4338,6 +4961,10 @@ int b64decode(const char* in, size_t inLen, uint8_t* out, size_t outCap) {
 //   body     N × primitive records, each starting with a 1-byte tag:
 //
 //   0x10  TIMER PULSE       <vpin:1> <on_sec:2> <off_sec:2> <repeats:1>
+//   0x11  DELTA             <out:1> <in:1> <period_ms:2>
+//                           — deployable rate-of-change primitive.
+//                           Output vpin is auto-marked signed at install
+//                           (delta can be negative when input decreases).
 //   0x20  LOGIC AND         <out:1> <in1:1> <thr1:2> <in2:1> <thr2:2>
 //   0x21  LOGIC OR          <out:1> <in1:1> <thr1:2> <in2:1> <thr2:2>
 //   0x22  LOGIC NOT         <out:1> <in1:1> <thr1:2>
@@ -4379,6 +5006,7 @@ String processLogicCommand(const String& args);
 String processLatchCommand(const String& args);
 String processScaleCommand(const String& args);
 String processTimerCommand(const String& args);
+String processDeltaCommand(const String& args);
 void   saveBeaconRules();  // used by processBeaconBinary on REPLACE
 
 // Mark every SETPOINT slot matching (vpin, op) as boolean-domain.
@@ -4421,6 +5049,13 @@ String processPlcBinary(const uint8_t* data, size_t len) {
     size_t off = 3;
 
     bool replace = (flags & 0x01) != 0;
+    // Suspend per-primitive EEPROM commits for the duration of this batched
+    // deploy — one commit at the end instead of ~11. Prevents the reply-
+    // collision failure documented at plcPersistSuspended's definition.
+    // PlcCommitGuard's dtor unconditionally clears the flag + fires ONE
+    // commit on any exit path (OK, ERR, early-return TRUNC/BADTAG).
+    plcPersistSuspended = true;
+    PlcCommitGuard _plc_guard;
     if (replace) {
         processSetpointCommand("CLEAR");
         processCounterCommand("CLEAR");
@@ -4428,9 +5063,22 @@ String processPlcBinary(const uint8_t* data, size_t len) {
         processLatchCommand("CLEAR");
         processScaleCommand("CLEAR");
         processTimerCommand("CLEAR");
+        processDeltaCommand("CLEAR");
         clearAllStorageVpins();
         clearAllScratchVpins();
-        clearAllDevices();
+        // NB: clearAllDevices() intentionally NOT called here. The DEVICE
+        // table is a separate concern from PLC primitives — wiping it on
+        // every PLC,DEPLOY,R created a wire-order race: gateway sends
+        // DEVICE,ADD then PLC binary as separate packets, and any PLC
+        // RETRY (with REPLACE flag) wiped the peripheral just installed.
+        // Symptom: OK,DEVICE,ADD,QMC5883P at t=12:03:22 followed by PLC
+        // retry OK at t=12:03:37 → DEVICE table empty at PLC,COUNT time,
+        // magnetometer never reads, SETPOINTs fire against v236=0 forever.
+        // If the gateway wants a fresh device table, it sends DEVICE,CLEAR
+        // as its own explicit command. Undeploy_rule already does this
+        // via the CLEAR verb dispatch. Redeploy naturally overwrites the
+        // slot for the same device type via processDeviceCommand's slot
+        // reuse logic.
         plcResetStats();
     }
 
@@ -4452,8 +5100,28 @@ String processPlcBinary(const uint8_t* data, size_t len) {
                     String(off_s) + "," + String(reps));
                 break;
             }
+            case 0x11: {  // DELTA
+                // Payload is 4 bytes: out(1) + in(1) + period_ms(2 LE).
+                // Guard checks off+4 to include the ceiling — matches
+                // the fix applied to the SCALE / LOGIC guards above
+                // (off+N where N is the exact payload byte count).
+                if (off + 4 > len) return "ERR,PLC,BIN,DELTATRUNC";
+                uint8_t  out    = data[off];
+                uint8_t  in     = data[off + 1];
+                uint16_t period = binRd16LE(data + off + 2);
+                off += 4;
+                resp = processDeltaCommand(
+                    String("ADD,") + String(out) + "," + String(in) + "," +
+                    String(period));
+                break;
+            }
             case 0x20: case 0x21: case 0x23: {  // LOGIC AND/OR/XOR — needs in2
-                if (off + 8 > len) return "ERR,PLC,BIN,LOGICTRUNC";
+                // Payload is 7 bytes (out(1) + in1(1) + thr1(2) + in2(1) +
+                // thr2(2)). Previous check `off + 8 > len` rejected an
+                // exact-fit payload at the end of the buffer (too strict
+                // by one). Reading past the buffer was never a risk
+                // because off += 7 below stays within 7 bytes.
+                if (off + 7 > len) return "ERR,PLC,BIN,LOGICTRUNC";
                 const char* op = (tag == 0x20) ? "AND" : (tag == 0x21) ? "OR" : "XOR";
                 uint8_t  out   = data[off];
                 uint8_t  in1   = data[off + 1];
@@ -4501,7 +5169,13 @@ String processPlcBinary(const uint8_t* data, size_t len) {
                 break;
             }
             case 0x40: {  // SCALE
-                if (off + 7 > len) return "ERR,PLC,BIN,SCALETRUNC";
+                // Payload is 8 bytes: out(1) + in(1) + factor(4 LE float)
+                // + offs(2 LE int16). Previous check `off + 7 > len` let
+                // an exact-fit-by-one payload through and read 1 byte past
+                // the buffer at the binRd16LE(off+6) call — uninitialised
+                // memory got parsed as the offset and the SCALE installed
+                // with a corrupt offset value. Real bug, silent failure.
+                if (off + 8 > len) return "ERR,PLC,BIN,SCALETRUNC";
                 uint8_t  out    = data[off];
                 uint8_t  in     = data[off + 1];
                 float    factor = binRd32f_LE(data + off + 2);
@@ -4646,10 +5320,12 @@ String processPlcBinary(const uint8_t* data, size_t len) {
         }
 
         if (resp.startsWith("ERR,")) {
+            // Guard's dtor flushes the single accumulated commit on return.
             return "ERR,PLC,BIN,DEPLOY," + String(count) + "," + resp;
         }
         count++;
     }
+    // Guard's dtor flushes the single accumulated commit on return.
     return "OK,PLC,DEPLOY," + String(count);
 }
 
@@ -4872,7 +5548,8 @@ String processDeviceCommand(const String& args) {
         int count = 0;
         const char* names[] = {"NONE","DHT11","DHT22","HCSR04","DS18B20","I2C","OLED",
                                "BME280","SHT31","INA226","MCP9808",
-                               "VL53L0X","VL53L1X"};
+                               "VL53L0X","VL53L1X","THERMISTOR",
+                               "HMC5883L","QMC5883L","QMC5883P"};
         for (int i = 0; i < MAX_DEVICES; i++) {
             if (!devices[i].active) continue;
             count++;
@@ -4914,6 +5591,10 @@ String processDeviceCommand(const String& args) {
     else if (typeStr == "MCP9808") type = DEV_MCP9808;
     else if (typeStr == "VL53L0X") type = DEV_VL53L0X;
     else if (typeStr == "VL53L1X") type = DEV_VL53L1X;
+    else if (typeStr == "THERMISTOR") type = DEV_THERMISTOR;
+    else if (typeStr == "HMC5883L") type = DEV_HMC5883L;
+    else if (typeStr == "QMC5883L") type = DEV_QMC5883L;
+    else if (typeStr == "QMC5883P") type = DEV_QMC5883P;
     else return "ERR,DEVICE,BADTYPE";
 
     // Per-type parsing — each branch reads its args off tail and
@@ -5047,6 +5728,53 @@ String processDeviceCommand(const String& args) {
         tmp.i2cAddr = (uint8_t)a;
         tmp.outVpin[0] = (uint8_t)svT.toInt();
         tmp.intervalMs = 1000;
+    } else if (type == DEV_HMC5883L) {
+        // <vX>,<vY>,<vZ>[,<vMag>]   no address arg — HMC5883L fixed at 0x1E.
+        // The 4th vpin (magnitude) is optional for backward compat with
+        // pre-magnitude gateway builds; if absent, outVpin[3] stays 0
+        // and the service loop skips the magnitude write.
+        String svX   = nextTok(tail);
+        String svY   = nextTok(tail);
+        String svZ   = nextTok(tail);
+        String svMag = nextTok(tail);    // optional
+        if (svZ.length() == 0) return "ERR,DEVICE,FORMAT";
+        tmp.i2cAddr    = 0x1E;
+        tmp.outVpin[0] = (uint8_t)svX.toInt();
+        tmp.outVpin[1] = (uint8_t)svY.toInt();
+        tmp.outVpin[2] = (uint8_t)svZ.toInt();
+        tmp.outVpin[3] = (uint8_t)svMag.toInt();   // 0 if empty
+        tmp.intervalMs = 500;   // 2 Hz — fast enough to catch a passing
+                                // vehicle, slow enough not to flood the
+                                // I2C bus or burn battery on solar nodes
+    } else if (type == DEV_QMC5883L) {
+        // <vX>,<vY>,<vZ>[,<vMag>]   no address arg — QMC5883L fixed at 0x0D
+        // (different chip from HMC despite the lookalike name, so the
+        // address can't collide with HMC even on the same I2C bus).
+        // Optional 4th vpin = vector magnitude (rotation/vibration-immune).
+        String svX   = nextTok(tail);
+        String svY   = nextTok(tail);
+        String svZ   = nextTok(tail);
+        String svMag = nextTok(tail);    // optional
+        if (svZ.length() == 0) return "ERR,DEVICE,FORMAT";
+        tmp.i2cAddr    = 0x0D;
+        tmp.outVpin[0] = (uint8_t)svX.toInt();
+        tmp.outVpin[1] = (uint8_t)svY.toInt();
+        tmp.outVpin[2] = (uint8_t)svZ.toInt();
+        tmp.outVpin[3] = (uint8_t)svMag.toInt();
+        tmp.intervalMs = 500;
+    } else if (type == DEV_QMC5883P) {
+        // <vX>,<vY>,<vZ>[,<vMag>]   no address arg — QMC5883P fixed at 0x2C.
+        String svX   = nextTok(tail);
+        String svY   = nextTok(tail);
+        String svZ   = nextTok(tail);
+        String svMag = nextTok(tail);
+        if (svZ.length() == 0) return "ERR,DEVICE,FORMAT";
+        tmp.i2cAddr    = 0x2C;
+        tmp.outVpin[0] = (uint8_t)svX.toInt();
+        tmp.outVpin[1] = (uint8_t)svY.toInt();
+        tmp.outVpin[2] = (uint8_t)svZ.toInt();
+        tmp.outVpin[3] = (uint8_t)svMag.toInt();
+        tmp.intervalMs = 500;
     } else if (type == DEV_VL53L0X || type == DEV_VL53L1X) {
         // <vDistMm>   no address config (default 0x29; multi-sensor
         // support needs XSHUT pin handling which v1 doesn't do).
@@ -5058,6 +5786,39 @@ String processDeviceCommand(const String& args) {
         // VL53L1X: continuous mode, library buffers — service polls
         // dataReady() so polling at 100ms is fine, no extra work.
         tmp.intervalMs = (type == DEV_VL53L0X) ? 200 : 100;
+    } else if (type == DEV_THERMISTOR) {
+        // <adc_pin>,<beta>,<r0_ohm>,<pullup_ohm>,<vT>
+        // Beta = thermistor B coefficient (3000..5000 typical).
+        // r0_ohm = nominal resistance at 25°C (typically 10000 or 100000).
+        // pullup_ohm = the voltage-divider pullup resistor to VCC.
+        // vT = output vpin for temperature × 10 (deci-Celsius).
+        String spin    = nextTok(tail);
+        String sbeta   = nextTok(tail);
+        String sR0     = nextTok(tail);
+        String sPull   = nextTok(tail);
+        String svT     = nextTok(tail);
+        if (svT.length() == 0) return "ERR,DEVICE,FORMAT";
+        int pin    = spin.toInt();
+        int beta   = sbeta.toInt();
+        long r0    = sR0.toInt();
+        long pull  = sPull.toInt();
+        tmp.pin1 = (uint8_t)pin;
+        // Validate before claiming a slot. Bands chosen to bracket any
+        // realistic NTC + pullup combo; out-of-range almost certainly
+        // means a malformed deploy and we'd rather error than install
+        // a dead rule.
+        if (!isPinConfigurable(pin))       return "ERR,DEVICE,BADPIN";
+        if (beta < 2000 || beta > 6000)    return "ERR,DEVICE,BADBETA";
+        if (r0   < 100  || r0   > 1000000) return "ERR,DEVICE,BADR0";
+        if (pull < 100  || pull > 1000000) return "ERR,DEVICE,BADPULL";
+        tmp.cfgA = (int16_t)beta;
+        // Pack R₀ and pullup as units of 100Ω so each fits in uint16_t
+        // (max ~6.5MΩ). 100Ω resolution is well under the 1-5%
+        // tolerance of typical NTC thermistors and pullup resistors.
+        tmp.cfgB = (uint16_t)((r0   + 50) / 100);
+        tmp.cfgC = (uint16_t)((pull + 50) / 100);
+        tmp.outVpin[0] = (uint8_t)svT.toInt();
+        tmp.intervalMs = 1000;  // 1 Hz polling — temperature isn't fast
     }
 
     // Claim slot — replace-by-key on (type, pin1/addr) so re-deploys
@@ -5065,6 +5826,49 @@ String processDeviceCommand(const String& args) {
     int slot = allocDeviceSlot(type, tmp.pin1, tmp.i2cAddr);
     if (slot < 0) return "ERR,DEVICE,FULL";
     devices[slot] = tmp;
+    // Persist after every successful install so a reboot doesn't lose
+    // the peripheral config. Without this, the gateway had to re-emit
+    // every DEVICE,ADD after each node reboot even though the
+    // SETPOINT rules that consumed the device's output vpins already
+    // survived (via savePlcTables).
+    saveDevicesTable();
+    // Opt the output vpin into signed-domain reading for sources that
+    // can produce negative values. Temperatures can drop below 0°C in
+    // any outdoor / refrigeration / cold-storage deployment; INA226
+    // current is signed by definition. Without this flag the read path
+    // zero-extends uint16 → int32 and negative-threshold comparisons
+    // silently fail (e.g. "if temp < -5°C alert" never fires because
+    // the runtime sees 65436 not -100).
+    switch (type) {
+        case DEV_DHT11:
+        case DEV_DHT22:
+        case DEV_DS18B20:
+        case DEV_BME280:
+        case DEV_SHT31:
+        case DEV_MCP9808:
+        case DEV_THERMISTOR:
+            // outVpin[0] = temperature × 10 — can be negative
+            if (tmp.outVpin[0]) setVpinSigned(tmp.outVpin[0], true);
+            break;
+        case DEV_INA226:
+            // outVpin[0] = bus voltage (always positive); outVpin[1] =
+            // shunt current (can be negative when load reverses).
+            if (tmp.outVpin[1]) setVpinSigned(tmp.outVpin[1], true);
+            break;
+        case DEV_HMC5883L:
+        case DEV_QMC5883L:
+        case DEV_QMC5883P:
+            // All 3 axes signed — the chip outputs ±32767 raw counts
+            // and threshold comparisons ("X < -5000") only work
+            // correctly when the read path sign-extends.
+            if (tmp.outVpin[0]) setVpinSigned(tmp.outVpin[0], true);
+            if (tmp.outVpin[1]) setVpinSigned(tmp.outVpin[1], true);
+            if (tmp.outVpin[2]) setVpinSigned(tmp.outVpin[2], true);
+            break;
+        default:
+            // HCSR04, VL53*, OLED, I2C_READ — naturally unsigned.
+            break;
+    }
     return String("OK,DEVICE,ADD,") + typeStr;
 }
 
@@ -5144,6 +5948,26 @@ void executeAutoPoll() {
     bleSend(sdata);  // Also notify local BLE client
 }
 
+// Send a CMD,RSP-style reply over the mesh back to `from`, AND echo to
+// local USB serial. Used by the mesh-routable device-config commands
+// added below (HB_INTERVAL, NDLOC, BATT_HIBERNATE, BATT_CFG, etc.).
+// Mirrors the inline pattern used by SET/GET/PULSE for mesh-originated
+// callers, plus the from=="LOCAL" guard the LIST handler at line 5247
+// uses: a USB-originated CMD arrives with from="LOCAL", and we must
+// NOT transmit a unicast reply to strtol("LOCAL",16)=0 (would send
+// garbage to node 0x0000). USB caller still sees the bleSend echo on
+// the local serial port so the response surfaces either way.
+static void sendMeshReply(const String& from, const String& rsp) {
+    bleSend(rsp);
+    if (from == "LOCAL") return;
+    mesh.cmdsExecuted++;
+    String mid = mesh.generateMsgID();
+    String hex = mesh.encryptMsg(rsp);
+    String payload = String(mesh.localID) + "," + from + "," + mid + "," +
+                     String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+    mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+}
+
 // CMD handler — called by MeshCore when a CMD arrives for us
 void handleCmd(const String& from, const String& cmdBody) {
     int c1 = cmdBody.indexOf(',');
@@ -5181,10 +6005,16 @@ void handleCmd(const String& from, const String& cmdBody) {
 
     if (action == "SET") {
         int c2 = rest.indexOf(',');
-        if (c2 < 0) return;
+        if (c2 < 0) {
+            sendMeshReply(from, "CMD,RSP,SET,ERR,parse");
+            return;
+        }
         int pin = rest.substring(0, c2).toInt();
         int val = rest.substring(c2 + 1).toInt();
-        if (!isPinConfigurable(pin)) return;
+        if (!isPinConfigurable(pin)) {
+            sendMeshReply(from, "CMD,RSP,SET,ERR,badpin");
+            return;
+        }
         setupDigitalOutput(pin);
         setDigital(pin, val);
         // Deadman is a safety latch for HARDWARE OUTPUT relays — if
@@ -5210,7 +6040,10 @@ void handleCmd(const String& from, const String& cmdBody) {
     }
     else if (action == "GET") {
         int pin = rest.toInt();
-        if (!isPinConfigurable(pin)) return;
+        if (!isPinConfigurable(pin)) {
+            sendMeshReply(from, "CMD,RSP,GET,ERR,badpin");
+            return;
+        }
         int value = readSensorPin(pin);
         mesh.cmdsExecuted++;
         String mid = mesh.generateMsgID();
@@ -5223,15 +6056,24 @@ void handleCmd(const String& from, const String& cmdBody) {
     }
     else if (action == "PULSE") {
         int c2 = rest.indexOf(',');
-        if (c2 < 0) return;
+        if (c2 < 0) {
+            sendMeshReply(from, "CMD,RSP,PULSE,ERR,parse");
+            return;
+        }
         int pin = rest.substring(0, c2).toInt();
         int ms  = rest.substring(c2 + 1).toInt();
-        if (!isPinConfigurable(pin) || ms <= 0 || ms > PULSE_MAX_MS) return;
+        if (!isPinConfigurable(pin) || ms <= 0 || ms > PULSE_MAX_MS) {
+            sendMeshReply(from, "CMD,RSP,PULSE,ERR,badval");
+            return;
+        }
         setupDigitalOutput(pin);
         // Non-blocking: schedule the pulse and let checkPulseTimers() clear
         // the pin when the deadline expires. Firmware loop stays responsive
         // (heartbeats, mesh RX, etc. keep running during the pulse).
-        if (!startPulse((uint8_t)pin, (uint16_t)ms)) return;
+        if (!startPulse((uint8_t)pin, (uint16_t)ms)) {
+            sendMeshReply(from, "CMD,RSP,PULSE,ERR,bufful");
+            return;
+        }
         mesh.cmdsExecuted++;
         // Acknowledge immediately — the pulse is now in flight. The "0" in
         // the response is the *eventual* state once the pulse completes;
@@ -5332,11 +6174,150 @@ void handleCmd(const String& from, const String& cmdBody) {
     else if (action == "SCALE") {
         handleScaleCmd(rest, from);
     }
+    else if (action == "DELTA") {
+        handleDeltaCmd(rest, from);
+    }
     else if (action == "PLC") {
         handlePlcCmd(rest, from);
     }
     else if (action == "DEVICE") {
         handleDeviceCmd(rest, from);
+    }
+    // ─── Mesh-routable device-config commands ─────────────────────
+    // Parallels of HB_INTERVAL / NDLOC / BATT_* from handleSerialConfig so
+    // the GUI console can manage a remote node without USB access. Reply
+    // shape: "CMD,RSP,<verb>,..." — the gateway-side RX-unwrap path at
+    // [gateway_gui.py:3289-3301] routes these into the console output.
+    // Range checks mirror the USB-side parsers verbatim so failure modes
+    // are identical across the two surfaces.
+    else if (action == "HB_INTERVAL") {
+        if (rest.length() == 0) {
+            // Query
+            String rsp = "CMD,RSP,HB_INTERVAL,normal=" + String(mesh.hbIntervalMs) +
+                         "ms,solar=" + String(mesh.hbIntervalSolarMs) +
+                         "ms,source=" + String(hbCfgIsCustom ? "EEPROM" : "default");
+            sendMeshReply(from, rsp);
+        } else {
+            // Set: "<normalMs>" or "<normalMs>,<solarMs>"
+            long n = -1, s = -1;
+            int sp = rest.indexOf(',');
+            if (sp > 0) {
+                n = rest.substring(0, sp).toInt();
+                s = rest.substring(sp + 1).toInt();
+            } else {
+                n = rest.toInt();
+                s = (long)mesh.hbIntervalSolarMs;
+            }
+            if (n < 5000 || n > 3600000 || s < 5000 || s > 3600000) {
+                sendMeshReply(from, "CMD,RSP,HB_INTERVAL,ERR,range");
+            } else {
+                saveHbCfg((unsigned long)n, (unsigned long)s);
+                String rsp = "CMD,RSP,HB_INTERVAL,OK,normal=" + String(n) +
+                             "ms,solar=" + String(s) + "ms";
+                sendMeshReply(from, rsp);
+            }
+        }
+    }
+    else if (action == "HB_INTERVAL_RESET") {
+        resetHbCfg();
+        String rsp = "CMD,RSP,HB_INTERVAL,RESET,normal=" +
+                     String((unsigned long)HB_INTERVAL) +
+                     "ms,solar=" + String((unsigned long)HB_INTERVAL_SOLAR) + "ms";
+        sendMeshReply(from, rsp);
+    }
+    else if (action == "NDLOC") {
+        // Set node static location: "<lat>,<lon>" — lat -90..90, lon -180..180.
+        // Range-check (the USB parser doesn't; we tighten it here so a
+        // malformed mesh message can't write nonsense into EEPROM).
+        int sp = rest.indexOf(',');
+        if (sp <= 0) {
+            sendMeshReply(from, "CMD,RSP,NDLOC,ERR,format");
+        } else {
+            float lat = rest.substring(0, sp).toFloat();
+            float lon = rest.substring(sp + 1).toFloat();
+            if (lat < -90.0f || lat > 90.0f || lon < -180.0f || lon > 180.0f) {
+                sendMeshReply(from, "CMD,RSP,NDLOC,ERR,range");
+            } else {
+                nodeLat = lat;
+                nodeLon = lon;
+                EEPROM.put(EEPROM_NDLOC_ADDR, nodeLat);
+                EEPROM.put(EEPROM_NDLOC_ADDR + 4, nodeLon);
+                EEPROM.commit();
+                String rsp = "CMD,RSP,NDLOC,OK," +
+                             String(nodeLat, 6) + "," + String(nodeLon, 6);
+                sendMeshReply(from, rsp);
+            }
+        }
+    }
+    else if (action == "BATT_HIBERNATE") {
+#if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
+        if (rest.length() == 0) {
+            // Query
+            String rsp = String("CMD,RSP,BATT_HIBERNATE,") +
+                         (battHibernateEnabled ? "ON" : "OFF") +
+                         ",default=" +
+                         ((BATT_HIBERNATE_DEFAULT != 0) ? "ON" : "OFF");
+            sendMeshReply(from, rsp);
+        } else if (rest == "ON" || rest == "OFF") {
+            bool on = (rest == "ON");
+            saveBattHibernateFlag(on);
+            String rsp = String("CMD,RSP,BATT_HIBERNATE,OK,") +
+                         (on ? "ON" : "OFF");
+            sendMeshReply(from, rsp);
+        } else {
+            sendMeshReply(from, "CMD,RSP,BATT_HIBERNATE,ERR,format");
+        }
+#else
+        sendMeshReply(from, "CMD,RSP,BATT_HIBERNATE,ERR,no battery monitoring");
+#endif
+    }
+    else if (action == "BATT_CFG") {
+#if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
+        if (rest.length() == 0) {
+            // Query
+            String rsp = "CMD,RSP,BATT_CFG,div=" + String(battDivider, 3) +
+                         ",low=" + String((int)battLowMv) +
+                         ",recover=" + String((int)battRecoverMv) +
+                         ",hibernate=" + String(battHibernateEnabled ? "ON" : "OFF") +
+                         ",source=" + String(battCfgIsCustom ? "EEPROM" : "default");
+            sendMeshReply(from, rsp);
+        } else {
+            // Set: "<div>,<low>,<recover>" — three CSV floats/ints
+            int c2 = rest.indexOf(',');
+            int c3 = (c2 > 0) ? rest.indexOf(',', c2 + 1) : -1;
+            if (c2 <= 0 || c3 <= 0) {
+                sendMeshReply(from, "CMD,RSP,BATT_CFG,ERR,format");
+            } else {
+                float d = rest.substring(0, c2).toFloat();
+                int low = rest.substring(c2 + 1, c3).toInt();
+                int rec = rest.substring(c3 + 1).toInt();
+                if (d < 0.5f || d > 50.0f ||
+                    low < 1000 || low > 60000 ||
+                    rec <= low || rec > 60000) {
+                    sendMeshReply(from, "CMD,RSP,BATT_CFG,ERR,range");
+                } else {
+                    saveBattCfg(d, (uint16_t)low, (uint16_t)rec);
+                    String rsp = "CMD,RSP,BATT_CFG,OK,div=" + String(d, 3) +
+                                 ",low=" + String(low) +
+                                 ",recover=" + String(rec);
+                    sendMeshReply(from, rsp);
+                }
+            }
+        }
+#else
+        sendMeshReply(from, "CMD,RSP,BATT_CFG,ERR,no battery monitoring");
+#endif
+    }
+    else if (action == "BATT_CFG_RESET") {
+#if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
+        resetBattCfg();
+        String rsp = "CMD,RSP,BATT_CFG,RESET,div=" + String(battDivider, 3) +
+                     ",low=" + String((int)battLowMv) +
+                     ",recover=" + String((int)battRecoverMv);
+        sendMeshReply(from, rsp);
+#else
+        sendMeshReply(from, "CMD,RSP,BATT_CFG,ERR,no battery monitoring");
+#endif
     }
     else if (action == "B") {
         // Binary PLC deploy: rest is the base64-encoded binary blob. We
@@ -6227,6 +7208,9 @@ void processBleCommand(const String& line, bool fromSerial) {
     else if (line.startsWith("SCALE,")) {
         handleScaleBle(line.substring(6));
     }
+    else if (line.startsWith("DELTA,")) {
+        handleDeltaBle(line.substring(6));
+    }
     else if (line.startsWith("PLC,")) {
         handlePlcBle(line.substring(4));
     }
@@ -6357,6 +7341,61 @@ void handleSerialConfig() {
         Serial.println(pins);
     }
     else if (line == "SAVE") { saveConfig(); Serial.println("OK: Saved"); }
+    else if (line == "I2CSCAN") {
+        Serial.print("I2CSCAN,");
+        int found = 0;
+        for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
+            Wire.beginTransmission(addr);
+            if (Wire.endTransmission() == 0) {
+                if (found) Serial.print(",");
+                Serial.printf("0x%02X", addr);
+                found++;
+            }
+        }
+        if (!found) Serial.print("none");
+        Serial.printf(" (bus SDA=%d SCL=%d)\n", BOARD_I2C_SDA, BOARD_I2C_SCL);
+    }
+    else if (line.startsWith("I2CREAD ")) {
+        // I2CREAD <addr_hex> <reg_hex> <n>   — raw I2C probe
+        // e.g. "I2CREAD 0x2C 0x00 1" → reads 1 byte from reg 0x00 at 0x2C
+        String rest = line.substring(8); rest.trim();
+        int sp1 = rest.indexOf(' ');
+        int sp2 = rest.indexOf(' ', sp1 + 1);
+        if (sp1 < 0 || sp2 < 0) { Serial.println("ERR,I2CREAD,USAGE addr reg n"); return; }
+        uint8_t addr = (uint8_t)strtol(rest.substring(0, sp1).c_str(), nullptr, 0);
+        uint8_t reg  = (uint8_t)strtol(rest.substring(sp1 + 1, sp2).c_str(), nullptr, 0);
+        uint8_t n    = (uint8_t)strtol(rest.substring(sp2 + 1).c_str(), nullptr, 0);
+        if (n == 0 || n > 16) { Serial.println("ERR,I2CREAD,BADLEN"); return; }
+        Wire.beginTransmission(addr);
+        Wire.write(reg);
+        uint8_t txres = Wire.endTransmission(false);
+        if (txres != 0) { Serial.printf("I2CREAD,0x%02X,0x%02X,NACK(%d)\n", addr, reg, txres); return; }
+        Wire.requestFrom((int)addr, (int)n);
+        Serial.printf("I2CREAD,0x%02X,0x%02X,", addr, reg);
+        int got = 0;
+        while (Wire.available() && got < n) {
+            if (got) Serial.print(",");
+            Serial.printf("0x%02X", Wire.read());
+            got++;
+        }
+        Serial.printf(" (%d/%d bytes)\n", got, n);
+    }
+    else if (line.startsWith("I2CWRITE ")) {
+        // I2CWRITE <addr_hex> <reg_hex> <val_hex>   — raw I2C register write
+        String rest = line.substring(9); rest.trim();
+        int sp1 = rest.indexOf(' ');
+        int sp2 = rest.indexOf(' ', sp1 + 1);
+        if (sp1 < 0 || sp2 < 0) { Serial.println("ERR,I2CWRITE,USAGE addr reg val"); return; }
+        uint8_t addr = (uint8_t)strtol(rest.substring(0, sp1).c_str(), nullptr, 0);
+        uint8_t reg  = (uint8_t)strtol(rest.substring(sp1 + 1, sp2).c_str(), nullptr, 0);
+        uint8_t val  = (uint8_t)strtol(rest.substring(sp2 + 1).c_str(), nullptr, 0);
+        Wire.beginTransmission(addr);
+        Wire.write(reg);
+        Wire.write(val);
+        uint8_t r = Wire.endTransmission();
+        Serial.printf("I2CWRITE,0x%02X,0x%02X<-0x%02X,%s\n", addr, reg, val,
+                      r == 0 ? "OK" : "NACK");
+    }
     else if (line == "BATT") {
 #if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
         int mv = readBatteryMv();
@@ -6747,6 +7786,7 @@ void handleSerialConfig() {
              line.startsWith("BEACON,") || line.startsWith("BLEPIN,") ||
              line.startsWith("COUNTER,") || line.startsWith("LOGIC,") ||
              line.startsWith("LATCH,") || line.startsWith("SCALE,") ||
+             line.startsWith("DELTA,") || line.startsWith("DEVICE,") ||
              line.startsWith("PLC,")) {
         processBleCommand(line, true);  // fromSerial=true: skip BLE PIN check
     }
@@ -6880,24 +7920,47 @@ void loadBeaconRules() {
 // offsets / type sizes. Versions:
 //   1 — initial layout (SETPOINT/LOGIC/COUNTER/LATCH/SCALE/TIMER)
 //   2 — SetpointRule gained `cooldownMs` (per-rule action_gap override)
-#define EEPROM_PLC_LAYOUT_VER   2
+//   3 — DELTA primitive added (7th persisted table + 7th size byte)
+#define EEPROM_PLC_LAYOUT_VER   3
+
+// ─── DEVICE peripheral persistence ──────────────────────────
+// Mirrors the PLC table pattern but with its OWN magic byte and
+// version so it stays backward-compatible with EEPROM blobs from
+// firmware versions that didn't persist devices. Placed immediately
+// AFTER the PLC table block (eeprom_dev_addr = eeprom_plc_end_addr)
+// so it naturally adapts when the PLC tables grow. Runtime overflow
+// guard skips the save if the combined region exceeds EEPROM_SIZE.
+// Distinct magic from EEPROM_PLC_MAGIC_VAL so the two regions can't
+// be confused if a future refactor moves addresses around.
+#define EEPROM_DEV_MAGIC_VAL    0xCD
+// Layout versions:
+//   1 — initial DEVICE persistence (commit 2a1b8fb)
+//   2 — Device struct gained cfgB+cfgC fields for THERMISTOR R₀ / pullup
+#define EEPROM_DEV_LAYOUT_VER   2
 // Header layout starting at EEPROM_PLC_BASE:
 //   0       magic    (1 B)
 //   1       version  (1 B)
-//   2..7    table sizes: [setpoints, logicRules, counters,
-//                         latchRules, scaleRules, timers] × 1 B each
-//                         — only the LOW byte of each sizeof() so a
-//                         silent struct-size change between firmware
-//                         builds is detected as a mismatch and the
-//                         blob discarded rather than miss-decoded.
-#define EEPROM_PLC_HEADER_LEN   8
+//   2..8    table sizes: [setpoints, logicRules, counters,
+//                         latchRules, scaleRules, timers, deltaRules]
+//                         × 1 B each — only the LOW byte of each
+//                         sizeof() so a silent struct-size change
+//                         between firmware builds is detected as a
+//                         mismatch and the blob discarded rather than
+//                         miss-decoded.
+#define EEPROM_PLC_HEADER_LEN   9
 static int eeprom_plc_setpoint_addr = 0;
 static int eeprom_plc_logic_addr    = 0;
 static int eeprom_plc_counter_addr  = 0;
 static int eeprom_plc_latch_addr    = 0;
 static int eeprom_plc_scale_addr    = 0;
 static int eeprom_plc_timer_addr    = 0;
+static int eeprom_plc_delta_addr    = 0;
 static int eeprom_plc_end_addr      = 0;
+// Device persistence region — header(3 bytes: magic+ver+sizeof) + array.
+// Computed inside plcOffsetsInit() so the dynamic placement adapts
+// automatically when PLC table sizes change between firmware builds.
+static int eeprom_dev_addr          = 0;
+static int eeprom_dev_end_addr      = 0;
 
 static void plcOffsetsInit() {
     if (eeprom_plc_setpoint_addr) return;  // already computed
@@ -6907,10 +7970,92 @@ static void plcOffsetsInit() {
     eeprom_plc_latch_addr    = eeprom_plc_counter_addr  + sizeof(counters);
     eeprom_plc_scale_addr    = eeprom_plc_latch_addr    + sizeof(latchRules);
     eeprom_plc_timer_addr    = eeprom_plc_scale_addr    + sizeof(scaleRules);
-    eeprom_plc_end_addr      = eeprom_plc_timer_addr    + sizeof(timers);
+    eeprom_plc_delta_addr    = eeprom_plc_timer_addr    + sizeof(timers);
+    eeprom_plc_end_addr      = eeprom_plc_delta_addr    + sizeof(deltaRules);
+    // DEVICE region starts immediately after PLC tables. Header is 3
+    // bytes (magic + version + sizeof low byte) followed by the array.
+    eeprom_dev_addr          = eeprom_plc_end_addr;
+    eeprom_dev_end_addr      = eeprom_dev_addr + 3 + sizeof(devices);
+}
+
+// Walk every persisted PLC / DEVICE table, sanitise the runtime-only
+// fields (must stay identical across reboots — otherwise the fingerprint
+// drifts every tick and the gateway would redeploy continuously), and
+// BLAKE2s-hash the sanitised bytes. Truncated to low 4 bytes → uint32_t.
+//
+// Runtime-only fields per table:
+//   SetpointRule  triggered, holdLatched, lastFired, debounceStart
+//   CounterRule   lastUp, lastDown, lastPreset, lastReset
+//   LatchRule     lastSet, lastReset
+//   RelayTimer    phase, nextAt, remaining
+//   DeltaRule     lastValue, lastTime
+//   Device        lastServiceMs
+//   LogicRule / ScaleRule — no runtime fields; hash raw struct
+// These match the sanitiser list in loadPlcTables() at ~line 8025. If
+// that list changes, this one MUST too.
+static void recomputeStateFingerprint() {
+    BLAKE2s h;
+    h.reset(4);   // 4-byte output
+    for (int i = 0; i < MAX_SETPOINTS; i++) {
+        SetpointRule t = setpoints[i];
+        t.triggered = false;
+        t.holdLatched = false;
+        t.lastFired = 0;
+        t.debounceStart = 0;
+        h.update(&t, sizeof(t));
+    }
+    for (int i = 0; i < MAX_COUNTERS; i++) {
+        CounterRule t = counters[i];
+        t.lastUp = t.lastDown = t.lastPreset = t.lastReset = 0;
+        h.update(&t, sizeof(t));
+    }
+    for (int i = 0; i < MAX_LOGIC_RULES; i++) {
+        LogicRule t = logicRules[i];  // no runtime fields
+        h.update(&t, sizeof(t));
+    }
+    for (int i = 0; i < MAX_LATCH_RULES; i++) {
+        LatchRule t = latchRules[i];
+        t.lastSet = t.lastReset = 0;
+        h.update(&t, sizeof(t));
+    }
+    for (int i = 0; i < MAX_SCALE_RULES; i++) {
+        ScaleRule t = scaleRules[i];  // no runtime fields
+        h.update(&t, sizeof(t));
+    }
+    for (int i = 0; i < MAX_TIMERS; i++) {
+        RelayTimer t = timers[i];
+        t.phase = 0;
+        t.nextAt = 0;
+        t.remaining = 0;
+        h.update(&t, sizeof(t));
+    }
+    for (int i = 0; i < MAX_DELTA_RULES; i++) {
+        DeltaRule t = deltaRules[i];
+        t.lastValue = 0;
+        t.lastTime = 0;
+        h.update(&t, sizeof(t));
+    }
+    for (int i = 0; i < MAX_DEVICES; i++) {
+        Device t = devices[i];
+        t.lastServiceMs = 0;
+        h.update(&t, sizeof(t));
+    }
+    uint8_t buf[4];
+    h.finalize(buf, 4);
+    stateFingerprint = ((uint32_t)buf[0] << 24) |
+                       ((uint32_t)buf[1] << 16) |
+                       ((uint32_t)buf[2] <<  8) |
+                       (uint32_t)buf[3];
 }
 
 void savePlcTables() {
+    // During a batched deploy (processPlcBinary REPLACE), every ADD calls
+    // savePlcTables() individually. That's ~11 EEPROM commits per rule
+    // (7 CLEARs + 4 ADDs on a typical 4-primitive rule). Each commit stalls
+    // the CPU and blocks radio TX, and the accumulated delay was collapsing
+    // the OK,PLC,DEPLOY reply into a collision window with the gateway hub.
+    // Suspend flag lets the caller batch a single commit at the end.
+    if (plcPersistSuspended) return;
     plcOffsetsInit();
     if (eeprom_plc_end_addr > EEPROM_SIZE) {
         // Tables grew beyond the EEPROM region. Caller has no good
@@ -6931,13 +8076,21 @@ void savePlcTables() {
     EEPROM.write(EEPROM_PLC_BASE + 5, (uint8_t)(sizeof(latchRules)  & 0xFF));
     EEPROM.write(EEPROM_PLC_BASE + 6, (uint8_t)(sizeof(scaleRules)  & 0xFF));
     EEPROM.write(EEPROM_PLC_BASE + 7, (uint8_t)(sizeof(timers)      & 0xFF));
+    EEPROM.write(EEPROM_PLC_BASE + 8, (uint8_t)(sizeof(deltaRules)  & 0xFF));
     EEPROM.put(eeprom_plc_setpoint_addr, setpoints);
     EEPROM.put(eeprom_plc_logic_addr,    logicRules);
     EEPROM.put(eeprom_plc_counter_addr,  counters);
     EEPROM.put(eeprom_plc_latch_addr,    latchRules);
     EEPROM.put(eeprom_plc_scale_addr,    scaleRules);
     EEPROM.put(eeprom_plc_timer_addr,    timers);
+    EEPROM.put(eeprom_plc_delta_addr,    deltaRules);
     EEPROM.commit();
+    // Reconciliation signal: increment the RAM-only generation counter and
+    // recompute the fingerprint. PlcCommitGuard ensures this fires exactly
+    // once at the end of a batched deploy (via plcPersistSuspended), not
+    // per-primitive during the install loop.
+    stateGeneration++;
+    recomputeStateFingerprint();
 }
 
 void loadPlcTables() {
@@ -6973,12 +8126,14 @@ void loadPlcTables() {
     uint8_t s_la = EEPROM.read(EEPROM_PLC_BASE + 5);
     uint8_t s_sc = EEPROM.read(EEPROM_PLC_BASE + 6);
     uint8_t s_tm = EEPROM.read(EEPROM_PLC_BASE + 7);
+    uint8_t s_dl = EEPROM.read(EEPROM_PLC_BASE + 8);
     if (s_sp != (uint8_t)(sizeof(setpoints)   & 0xFF) ||
         s_lg != (uint8_t)(sizeof(logicRules)  & 0xFF) ||
         s_co != (uint8_t)(sizeof(counters)    & 0xFF) ||
         s_la != (uint8_t)(sizeof(latchRules)  & 0xFF) ||
         s_sc != (uint8_t)(sizeof(scaleRules)  & 0xFF) ||
-        s_tm != (uint8_t)(sizeof(timers)      & 0xFF)) {
+        s_tm != (uint8_t)(sizeof(timers)      & 0xFF) ||
+        s_dl != (uint8_t)(sizeof(deltaRules)  & 0xFF)) {
         debugPrint("PLC: EEPROM struct-size mismatch — discarding");
         return;
     }
@@ -6988,6 +8143,7 @@ void loadPlcTables() {
     EEPROM.get(eeprom_plc_latch_addr,    latchRules);
     EEPROM.get(eeprom_plc_scale_addr,    scaleRules);
     EEPROM.get(eeprom_plc_timer_addr,    timers);
+    EEPROM.get(eeprom_plc_delta_addr,    deltaRules);
     // Sanitise runtime-only state. Persisted structs contain BOTH the
     // user's rule config (op, threshold, msgTrue, …) AND volatile
     // runtime fields (triggered, lastFired, edge-detect lastUp, …)
@@ -7021,7 +8177,89 @@ void loadPlcTables() {
         timers[i].phase = 0;
         timers[i].nextAt = 0;
     }
+    // DeltaRule.lastValue / lastTime are runtime state. Reset lastTime
+    // to 0 so checkDeltas() treats the first post-boot tick as an
+    // initialisation (snapshot current value, emit nothing) rather
+    // than trying to compute a delta against a stale snapshot.
+    for (int i = 0; i < MAX_DELTA_RULES; i++) {
+        if (!deltaRules[i].active) continue;
+        deltaRules[i].lastValue = 0;
+        deltaRules[i].lastTime  = 0;
+    }
     debugPrint("PLC: loaded tables from EEPROM");
+    // Recompute fingerprint from freshly-loaded tables. Do NOT bump
+    // generation — see comment in loadDevicesTable's matching hook.
+    recomputeStateFingerprint();
+}
+
+// ─── DEVICE persistence ─────────────────────────────────────
+// Persist the peripheral device table (DHT, BME280, OLED, I2C, ToF,
+// etc.) so it survives reboot the same way SETPOINT/LOGIC/COUNTER
+// already do. Before this, every node reboot meant the gateway had
+// to redeploy every DEVICE,ADD even though the SETPOINT rules that
+// depended on those peripherals' output vpins WERE already persisted.
+// Result: sensor vpins fed stale data after reboot until the gateway
+// noticed and redeployed.
+//
+// Stored as a separate region (own magic + version) immediately after
+// the PLC tables. Independent of EEPROM_PLC_LAYOUT_VER so adding this
+// doesn't invalidate existing PLC blobs.
+void saveDevicesTable() {
+    plcOffsetsInit();
+    if (eeprom_dev_end_addr > EEPROM_SIZE) {
+        debugPrint("DEV: persist SKIPPED — region exceeds EEPROM_SIZE");
+        return;
+    }
+    EEPROM.write(eeprom_dev_addr + 0, EEPROM_DEV_MAGIC_VAL);
+    EEPROM.write(eeprom_dev_addr + 1, EEPROM_DEV_LAYOUT_VER);
+    EEPROM.write(eeprom_dev_addr + 2, (uint8_t)(sizeof(devices) & 0xFF));
+    EEPROM.put(eeprom_dev_addr + 3, devices);
+    EEPROM.commit();
+    // Reconciliation signal — DEVICE table changes count as state changes.
+    stateGeneration++;
+    recomputeStateFingerprint();
+}
+
+void loadDevicesTable() {
+    plcOffsetsInit();
+    if (eeprom_dev_end_addr > EEPROM_SIZE) {
+        debugPrint("DEV: persist DISABLED — region exceeds EEPROM_SIZE");
+        return;
+    }
+    uint8_t magic   = EEPROM.read(eeprom_dev_addr + 0);
+    uint8_t version = EEPROM.read(eeprom_dev_addr + 1);
+    if (magic != EEPROM_DEV_MAGIC_VAL) {
+        // Fresh EEPROM (or older firmware that didn't persist devices).
+        // Leave the in-RAM defaults (all `active = false`) untouched.
+        return;
+    }
+    if (version != EEPROM_DEV_LAYOUT_VER) {
+        debugPrint("DEV: EEPROM blob version mismatch — discarding");
+        return;
+    }
+    uint8_t s_dev = EEPROM.read(eeprom_dev_addr + 2);
+    if (s_dev != (uint8_t)(sizeof(devices) & 0xFF)) {
+        debugPrint("DEV: EEPROM struct-size mismatch — discarding");
+        return;
+    }
+    EEPROM.get(eeprom_dev_addr + 3, devices);
+    // Reset transient runtime state. lastServiceMs is a millis()-based
+    // timestamp — it's meaningless after reboot (millis() restarts at
+    // 0) and must clear so the first scan tick triggers a real service
+    // call. Also reset the ToF init flags so VL53L0X/L1X re-init on
+    // first read (in case the sensor was power-cycled with the node).
+    for (int i = 0; i < MAX_DEVICES; i++) {
+        if (!devices[i].active) continue;
+        devices[i].lastServiceMs = 0;
+    }
+    vl53ResetState();
+    debugPrint("DEV: loaded peripheral table from EEPROM");
+    // Recompute (but do NOT bump generation): loading from EEPROM isn't a
+    // "change" from the gateway's perspective — the state was there all
+    // along. Generation stays at whatever it was (0 on first boot). The
+    // gateway will see generation=0 in the first HB, query PLC,STATUS,
+    // see the fingerprint matches its desired hash, and do nothing.
+    recomputeStateFingerprint();
 }
 
 // Helper — serialise a single beacon rule by index. Used by both BEACON,GET
@@ -7659,10 +8897,12 @@ void setup() {
     // still thought the rule was confirmed but the firmware tables were
     // empty. Beacon rules already persist; this brings PLC to parity.
     loadPlcTables();
+    loadDevicesTable();
     // Storage vpin persistence: read the opt-in bitmap first, then load
     // values only for vpins the user has marked persistent. Non-persistent
     // vpins stay at 0 in RAM (and never hit EEPROM during this session).
     loadPersistMask();
+    loadSignedMask();
     loadPersistentStorageVpins();
 
     // Wire up MeshCore callbacks
@@ -7886,6 +9126,7 @@ void loop() {
         checkLogic();
         checkLatches();
         checkScales();
+        checkDeltas();
         serviceDevices();
         plcStats.scanTicks++;
         readGPS();
@@ -8034,6 +9275,8 @@ void loop() {
     checkLogic();
     checkLatches();
     checkScales();
+    checkDeltas();
+    serviceDevices();
 
     // 9. GPS read + broadcast
     readGPS();
