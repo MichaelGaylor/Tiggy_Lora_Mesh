@@ -702,5 +702,14 @@ void MeshCore::sendHeartbeat() {
     uint32_t effSec = (uint32_t)(effMs / 1000UL);
     if (effSec == 0) effSec = 1;   // defensive — never emit ,H0
     hb += ",H" + String(effSec);
+    // Reconciliation counter (Option A). 2 hex chars zero-padded. Adds 4
+    // chars to the HB — worth ~9 ms extra airtime at SF9/BW125. Gateway
+    // treats a change in this value as "state may have changed on this
+    // node" and issues a single PLC,STATUS query to fetch the full
+    // fingerprint. See the plan in
+    // .claude/plans/there-seems-to-be-cryptic-shore.md for the design.
+    hb += ",G";
+    if (stateGeneration < 0x10) hb += "0";
+    hb += String(stateGeneration, HEX);
     transmitPacket(0xFFFF, hb);
 }

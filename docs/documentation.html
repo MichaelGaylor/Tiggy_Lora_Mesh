@@ -4887,11 +4887,132 @@ OK: BATT_CFG cleared, using Pins.h defaults
 <p>Chip thresholds above are for the default 3 S LiPo profile. For a different chemistry (12 V SLA, 7 S LiPo, 8 S LiFePO4) set thresholds via <code>BATT_CFG</code> and the chip colour will track them.</p>
 </section>
 
+<!-- ═══════════════════════════════════════════════════════════ -->
+<section id="peripherals-reference">
+<h2>50. Peripherals Reference (Deployable Sensor Blocks)</h2>
+
+<p>Every peripheral in the table below is a <strong>Logic Builder block</strong> that compiles to a firmware <code>DEVICE,ADD,&hellip;</code> command and is <strong>serviced autonomously on the node</strong>. Once deployed, readings land in one or more virtual pins (vpins) at the peripheral's own cadence — no gateway polling required. Downstream Logic Builder blocks (Compare, Delta/Rate, Latch, Scale, SETPOINT, Broadcast) read those vpins and can trigger actions locally, even when the mesh gateway is offline.</p>
+
+<div class="info-box cyan" style="margin:0 0 16px 0;">
+  <p style="color:var(--white); font-weight:700; margin-bottom:6px;">Deployment model</p>
+  <p style="color:var(--dim); margin:0;">Peripherals ride the <em>same</em> deploy pipeline as PLC primitives &mdash; one binary packet installs the full rule graph (PLC primitives + DEVICE,ADD lines) atomically, with fingerprint reconciliation catching any drift. Restarts survive automatically because the tables live in EEPROM. Bench-flashed nodes on a laptop's second COM port can be provisioned before physical deployment via the <strong>Bench</strong> port selector next to the Deploy button.</p>
+</div>
+
+<h3>Supported Peripherals</h3>
+<table>
+  <tr>
+    <th>Peripheral</th>
+    <th>Interface</th>
+    <th>Output ports (each pinnable to Storage Vpin V200-V231)</th>
+    <th>DEVICE,ADD command</th>
+  </tr>
+  <tr><td><strong>DHT11 / DHT22</strong></td>
+      <td>1-wire, digital (single GPIO)</td>
+      <td><code>temp</code> (&deg;C &times;10), <code>humidity</code> (% &times;10)</td>
+      <td><code>DEVICE,ADD,DHT11,&lt;pin&gt;,&lt;vT&gt;,&lt;vH&gt;</code> (or <code>DHT22</code>)</td></tr>
+  <tr><td><strong>HC-SR04</strong></td>
+      <td>Two GPIO (trig + echo)</td>
+      <td><code>distance_cm</code> (0-400 cm)</td>
+      <td><code>DEVICE,ADD,HCSR04,&lt;trig&gt;,&lt;echo&gt;,&lt;vCm&gt;</code></td></tr>
+  <tr><td><strong>DS18B20</strong></td>
+      <td>1-wire, digital (single GPIO)</td>
+      <td><code>temp</code> (&deg;C &times;10, -40 to +125 &deg;C)</td>
+      <td><code>DEVICE,ADD,DS18B20,&lt;pin&gt;,&lt;vT&gt;</code></td></tr>
+  <tr><td><strong>Generic I2C register</strong></td>
+      <td>I2C (user addr + reg)</td>
+      <td><code>value</code> (1 or 2 raw bytes)</td>
+      <td><code>DEVICE,ADD,I2C,&lt;addr&gt;,&lt;reg&gt;,&lt;bytes&gt;,&lt;vOut&gt;</code></td></tr>
+  <tr><td><strong>BME280</strong></td>
+      <td>I2C 0x76 / 0x77</td>
+      <td><code>temp</code> (&deg;C &times;10), <code>pressure</code> (hPa &times;10), <code>humidity</code> (% &times;10)</td>
+      <td><code>DEVICE,ADD,BME280,&lt;addr&gt;,&lt;vT&gt;,&lt;vP&gt;,&lt;vH&gt;</code></td></tr>
+  <tr><td><strong>SHT31</strong></td>
+      <td>I2C 0x44 / 0x45</td>
+      <td><code>temp</code> (&deg;C &times;10), <code>humidity</code> (% &times;10)</td>
+      <td><code>DEVICE,ADD,SHT31,&lt;addr&gt;,&lt;vT&gt;,&lt;vH&gt;</code></td></tr>
+  <tr><td><strong>INA226</strong></td>
+      <td>I2C 0x40-0x4F</td>
+      <td><code>voltage_mv</code> (mV), <code>current_ma</code> (mA, bidirectional)</td>
+      <td><code>DEVICE,ADD,INA226,&lt;addr&gt;,&lt;shunt_m&Omega;&gt;,&lt;vV&gt;,&lt;vI&gt;</code></td></tr>
+  <tr><td><strong>MCP9808</strong></td>
+      <td>I2C 0x18-0x1F</td>
+      <td><code>temp</code> (&deg;C &times;10, -40 to +125 &deg;C, high precision)</td>
+      <td><code>DEVICE,ADD,MCP9808,&lt;addr&gt;,&lt;vT&gt;</code></td></tr>
+  <tr><td><strong>VL53L0X</strong></td>
+      <td>I2C 0x29 (fixed)</td>
+      <td><code>distance_mm</code> (0-1200 mm, ToF)</td>
+      <td><code>DEVICE,ADD,VL53L0X,&lt;v&gt;</code></td></tr>
+  <tr><td><strong>VL53L1X</strong></td>
+      <td>I2C 0x29 (fixed)</td>
+      <td><code>distance_mm</code> (0-4000 mm, ToF long range)</td>
+      <td><code>DEVICE,ADD,VL53L1X,&lt;v&gt;</code></td></tr>
+  <tr><td><strong>NTC Thermistor</strong></td>
+      <td>Analog (single ADC pin + pullup)</td>
+      <td><code>temp</code> (&deg;C &times;10, Beta-equation converted from raw ADC)</td>
+      <td><code>DEVICE,ADD,THERMISTOR,&lt;pin&gt;,&lt;beta&gt;,&lt;r0&gt;,&lt;pullup&gt;,&lt;vT&gt;</code></td></tr>
+  <tr><td><strong>HMC5883L</strong></td>
+      <td>I2C 0x1E (fixed) &mdash; legacy 3-axis magnetometer</td>
+      <td><code>mag_x</code>, <code>mag_y</code>, <code>mag_z</code> (raw int16 LSB, &plusmn;2000 typical),<br><code>magnitude</code> (rotation-invariant &radic;(x&sup2;+y&sup2;+z&sup2;))</td>
+      <td><code>DEVICE,ADD,HMC5883L,&lt;vX&gt;,&lt;vY&gt;,&lt;vZ&gt;,&lt;vMag&gt;</code></td></tr>
+  <tr><td><strong>QMC5883L</strong></td>
+      <td>I2C 0x0D (fixed) &mdash; older GY-273 silicon</td>
+      <td><code>mag_x</code>, <code>mag_y</code>, <code>mag_z</code>, <code>magnitude</code> (8G full-scale)</td>
+      <td><code>DEVICE,ADD,QMC5883L,&lt;vX&gt;,&lt;vY&gt;,&lt;vZ&gt;,&lt;vMag&gt;</code></td></tr>
+  <tr><td><strong>QMC5883P</strong> (new v4.5)</td>
+      <td>I2C 0x2C (fixed) &mdash; current GY-273 silicon (QST)</td>
+      <td><code>mag_x</code>, <code>mag_y</code>, <code>mag_z</code>, <code>magnitude</code> (200 Hz ODR, 8G)</td>
+      <td><code>DEVICE,ADD,QMC5883P,&lt;vX&gt;,&lt;vY&gt;,&lt;vZ&gt;,&lt;vMag&gt;</code></td></tr>
+  <tr><td><strong>OLED Display</strong></td>
+      <td>I2C 0x3C / 0x3D &mdash; output-only, consumes upstream vpins</td>
+      <td>(no output ports &mdash; leaf node)</td>
+      <td><code>DEVICE,ADD,OLED,&lt;fmt_b64&gt;[,&lt;vpin1&gt;,&hellip;]</code></td></tr>
+</table>
+
+<h3>Making Readings Visible on the Dashboard</h3>
+<p>By default, peripheral outputs land on <strong>scratch vpins (V232-V255)</strong> — RAM-only, not polled, not visible to the Sensor Dashboard or Web Gauge. To pin a specific output to a <strong>storage vpin (V200-V231)</strong> that <em>is</em> polled and dashboard-visible:</p>
+<ol>
+  <li>Drag a <strong>Storage Vpin</strong> block onto the canvas.</li>
+  <li>Set its vpin number in the range V200-V231 (pick one not used by another rule on the same node).</li>
+  <li>Wire the peripheral's output port (e.g. <code>magnitude</code>, <code>temp</code>, <code>voltage_mv</code>) to the Storage Vpin block's <code>in</code> port.</li>
+  <li>Deploy the rule. The compiler retargets the peripheral to write directly to your chosen storage vpin &mdash; not a scratch pin &mdash; and the widget starts showing live values immediately.</li>
+</ol>
+
+<div class="info-box orange" style="margin:0 0 16px 0;">
+  <p style="color:var(--white); font-weight:700; margin-bottom:6px;">Multi-output peripherals</p>
+  <p style="color:var(--dim); margin:0;">BME280 (temp / pressure / humidity), DHT (temp / humidity), SHT31, INA226, and the three magnetometers have <strong>multiple output ports</strong>. Each port can independently be pinned to its own Storage Vpin &mdash; drop one Storage Vpin block per port you want visible. Ports you don't wire to a Storage Vpin fall back to scratch (invisible) as before.</p>
+</div>
+
+<h3>Reading Rules for Signed Data</h3>
+<p>Magnetometer axis readings (<code>mag_x/y/z</code>) are signed int16 values bit-cast into the vpin slot. The firmware's Compare / SETPOINT logic sign-extends on read so threshold rules work correctly on negatives (e.g. <code>Compare &lt; -500</code> to detect southward field). The <code>magnitude</code> port is unsigned (always &ge; 0) &mdash; it's the vibration-immune signal for vehicle detection where wind sway would shuffle the axis readings but preserve field strength.</p>
+
+<h3>Delta/Rate + Compare Pattern</h3>
+<p>Most environmental sensors want <em>change detection</em>, not absolute thresholds. Wire the peripheral output &rarr; <strong>Delta/Rate</strong> block (with a period like 1000&nbsp;ms) &rarr; <strong>Compare</strong> block (with a threshold on the delta) &rarr; <strong>Broadcast Msg</strong> or <strong>Set Relay</strong>. This catches "something changed by X units per second" without false triggers on slow drift or absolute-value offsets. See <a href="#logic-builder" style="color:var(--cyan);">Logic Builder &sect;22</a> for the block gallery.</p>
+
+</section>
+
 <!-- ═══════════════ APPENDIX: CHANGELOG ═══════════════ -->
 <section id="changelog">
 <h2>Appendix &mdash; Release Changelog</h2>
 
 <p>Per-release summary of what changed since the previous version. Most recent at the top.</p>
+
+<div class="info-box green" style="margin:0 0 16px 0;">
+  <p style="color:var(--white); font-weight:700; font-size:1.05em; margin-bottom:8px;">v4.5</p>
+  <ul style="color:var(--dim); padding-left:22px; margin:0;">
+    <li><strong>Firmware: fingerprint reconciliation.</strong> Every heartbeat now carries an 8-bit <em>state generation</em> counter (<code>,G7A</code>) that increments whenever the node's PLC or DEVICE tables change. On generation change the gateway sends one <code>PLC,STATUS</code> query and receives back a 32-bit BLAKE2s <em>fingerprint</em> (<code>,K0801A839</code>) of the installed state with runtime fields zeroed. Gateway compares the fingerprint against the desired-state hash it computed from the rule graph; if they match &mdash; zero traffic. If they differ &mdash; one deploy fires to bring the node back to spec. <strong>Steady-state airtime cost:</strong> +3 chars per HB (~9 ms extra channel occupation) instead of the old count-based verify-by-poll's 3-packet round-trip per deploy. Scales cleanly to ~80 nodes. Version-gated by <code>cap=4</code> in the <code>PLC,STATUS</code> reply; gateway refuses deploys after 3 HBs without a G-tag (legacy firmware, reflash required).</li>
+    <li><strong>Firmware: DELTA (rate-of-change) primitive.</strong> Deployable PLC block that computes <code>(current - previous)</code> over a user-configured period and writes the delta to a vpin. Combined with a Compare block on the delta output, this catches rate-of-change events (metallic mass moving into a QMC5883P's field, water level rising fast, etc.) instead of raw amplitude thresholds. Firmware-side implementation at <code>servicePlc()</code>; binary encoded as opcode <code>0x11</code>.</li>
+    <li><strong>Firmware: QMC5883P magnetometer driver.</strong> QST QMC5883P is what current "GY-273" modules ship (I2C address 0x2C, distinct from QMC5883L at 0x0D). New peripheral block type <code>SENSOR_QMC5883P</code> emits <code>mag_x</code>, <code>mag_y</code>, <code>mag_z</code>, and a rotation-invariant <code>magnitude = &radic;(x&sup2;+y&sup2;+z&sup2;)</code>. Magnitude is the vibration-immune signal for outdoor vehicle detection where wind sway would shuffle the axis readings but preserve the field strength.</li>
+    <li><strong>Firmware: PlcCommitGuard batches EEPROM writes.</strong> A binary PLC deploy used to fire 11 individual <code>EEPROM.commit()</code> calls back-to-back, blocking the radio for ~1&nbsp;s. On 4-primitive rules this caused half-duplex collisions where the <code>OK,PLC,DEPLOY,4</code> reply landed while the gateway's ACK was still in flight, both got lost, and the deploy silently retried until rollback. The RAII guard suspends persistence during a deploy and issues one batched commit on scope exit &mdash; 11 commits &rarr; 1.</li>
+    <li><strong>Firmware: PLC REPLACE no longer wipes the DEVICE table.</strong> A retry of the PLC binary packet was calling <code>clearAllDevices()</code>, so the peripheral table survived the first deploy but disappeared on any retry &mdash; sensors went silent. Fixed by moving the wipe to a dedicated <code>DEVICE,CLEAR</code> path used only by explicit undeploy.</li>
+    <li><strong>Firmware wire format: <code>CMD,</code> prefix required for <code>B,</code> and <code>DEVICE,</code> from USB.</strong> The <code>handleSerialConfig</code> router forwards <code>PLC, / DEVICE, / DELTA, / SETPOINT,</code> etc. to <code>processBleCommand</code> &mdash; but <code>processBleCommand</code> only has bare-prefix handlers for a subset (<code>PLC, / DELTA, / SETPOINT, / COUNTER, / LOGIC, / LATCH, / SCALE, / TIMER,</code>). Bare <code>DEVICE,ADD,QMC5883P,232,233,234,235</code> is <em>echoed</em> (BLE CMD:) but silently dropped &mdash; no <code>OK,DEVICE,ADD</code> reply. Bare <code>B,&lt;base64&gt;</code> isn't in the router prefix list at all &mdash; falls into the "Commands:" help text. Both are only reachable via <code>CMD,</code> &rarr; <code>handleCmd</code> dispatch. Gateway now wraps local (USB direct / bench) deploys with <code>CMD,</code>; mesh sends already carry it as part of the <code>MSG,&lt;target&gt;,CMD,&hellip;</code> wrap.</li>
+    <li><strong>Gateway: bench-mode deploy.</strong> New port dropdown next to the Deploy button in the Logic Builder. Select a second USB serial port (a bench-flashed node) and the next click deploys the rule <em>directly over USB</em> to that node instead of over the mesh. Firmware accepts the same commands PIN-free from serial (<code>fromSerial=true</code> skips the BLE PIN check). Bench port stays locked across deploys and gateway restarts; hit <strong>X</strong> to unlock. When the node is later moved onto the mesh, its persisted state matches the desired-state hash so the fingerprint reconciler sees zero drift and doesn't re-deploy &mdash; provisioning survives the bench&nbsp;&rarr;&nbsp;field move automatically.</li>
+    <li><strong>Gateway: Storage Vpin retarget for peripherals.</strong> Placing a <em>Storage Vpin</em> block (V200-V231) wired to a peripheral output now emits the peripheral directly to that user-chosen pin instead of an auto-allocated scratch vpin (V232+). Scratch vpins are RAM-only and invisible to the dashboard; storage vpins are polled and show live values on the dashboard widget. Previously the Storage Vpin block was a silent no-op for peripheral sources &mdash; the widget stayed at 0. Fix covers all 14 peripheral types: DHT11/22, HCSR04, DS18B20, I2C generic, BME280, SHT31, INA226, MCP9808, VL53L0X, VL53L1X, Thermistor, HMC5883L, QMC5883L, QMC5883P. Multi-output peripherals (BME280, DHT, magnetometers, etc.) retarget per-port so you can pin any subset of outputs.</li>
+    <li><strong>Gateway: verb-matched pending-deploy queue.</strong> The old FIFO fallback let a stray <code>OK,DEVICE,ADD</code> reply consume a pending <code>PLC,DEPLOY</code> entry (and vice versa) when both were in flight for the same rule. Symptom: gateway believed the PLC packet succeeded, but the firmware had zero primitives installed &mdash; a phantom empty-deploy. Now every pending entry is tagged with its verb (<code>PLC</code> / <code>DEVICE</code> / <code>SETPOINT</code>) and a reply MUST verb-match. Unmatched replies are dropped, not FIFO-attributed.</li>
+    <li><strong>Gateway: Compare-operator dialog no longer corrupts cfg on open.</strong> The Compare block editor was overwriting <code>cfg["operator"]</code> with the display label (<code>"&gt;   Greater than"</code>) at dialog open, expecting the on-OK handler to normalise it back to the code (<code>"GT"</code>). Any autosave or deploy fired between open and OK persisted the display label. The compiler then read the label back, couldn't match <code>"&gt;   GREATER THAN"</code> against <code>{GE,LE,GT,LT,EQ,NE}</code>, kicked Compare to gui-only, and the SETPOINT never emitted &mdash; rule silently never fired. Fixed by leaving cfg alone and overriding the widget display directly. Defense-in-depth in the compiler tolerates already-corrupted rule JSON via a symbol-to-code alias (<code>"&gt;" &rarr; "GT"</code>).</li>
+    <li><strong>Gateway: retry timeout dropped 25 s &rarr; 8 s.</strong> Reconciliation now catches drift regardless, so app-level retries are defense-in-depth rather than the primary correctness channel. Faster feedback on a genuinely offline node.</li>
+    <li><strong>Firmware &amp; gateway: HB parser extended.</strong> HB now carries mixed positional + tagged fields: <code>HB,&lt;id&gt;,&lt;board&gt;,&lt;flags&gt;,B&lt;mv&gt;,P&lt;scans&gt;:&lt;fires&gt;,H&lt;sec&gt;,G&lt;hex2&gt;</code>. Order-independent parsing (strict prefix + type check per tag), backward-compat with legacy HBs that have neither <code>P</code> nor <code>H</code> nor <code>G</code>. <code>P</code> replaces the old gateway <code>STATUS,PLC</code> auto-poll; <code>H</code> lets gateway size per-node offline detection to the node's actual HB cadence; <code>G</code> is the fingerprint-reconciliation trigger.</li>
+  </ul>
+</div>
 
 <div class="info-box green" style="margin:0 0 16px 0;">
   <p style="color:var(--white); font-weight:700; font-size:1.05em; margin-bottom:8px;">v4.4</p>

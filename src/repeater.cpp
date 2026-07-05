@@ -18,6 +18,10 @@
 #include <Wire.h>
 #include <EEPROM.h>
 #include <RadioLib.h>
+// BLAKE2s (from the same lib/Crypto/ that provides GCM via MeshCore) —
+// used for the 32-bit state fingerprint fed to gateway reconciliation.
+// One-shot API on a small stack buffer; ~30 µs on ESP32-S3.
+#include <BLAKE2s.h>
 // VL53L0X / VL53L1X laser time-of-flight distance sensors. Pololu's
 // libraries are smaller than Adafruit's (~5KB vs ~30KB) and have a
 // cleaner API for our use case (one-shot read from a service loop).
@@ -503,6 +507,32 @@ inline void plcResetStats() {
 // the pre-reply block to ~50-100 ms, well under the collision window.
 // See workflow wf_bd9837dc-1e2.
 static bool plcPersistSuspended = false;
+
+// ─── State fingerprint for gateway reconciliation ────────────────────
+// Gateway-side reconciliation ("device shadow" pattern) uses two values:
+//   stateGeneration — 8-bit RAM-only counter, increments on every state
+//                     change (savePlcTables / saveDevicesTable). Rides
+//                     in every heartbeat as ",G<hex2>". Cheap change
+//                     signal; resets to 0 on reboot which is fine — the
+//                     gateway then issues ONE PLC,STATUS query, sees the
+//                     fingerprint matches its desired state, and moves
+//                     on. No auto-redeploy on powerup: rules already
+//                     persist in EEPROM via loadPlcTables/loadDevicesTable.
+//   stateFingerprint — 32-bit BLAKE2s truncation of the installed PLC
+//                     + DEVICE tables with runtime fields zeroed. NOT
+//                     broadcast in HB (too expensive at mesh scale);
+//                     returned on demand via PLC,STATUS ",K<hex8>".
+//                     Byte-identical to the gateway's desired-state hash
+//                     computed over the same canonical table bytes.
+static uint8_t  stateGeneration  = 0;
+static uint32_t stateFingerprint = 0;
+
+// Recompute the fingerprint by walking every persisted PLC / DEVICE table
+// entry, copying to a stack-local temporary, zeroing the runtime-only
+// fields listed in the loadPlcTables() sanitiser at ~line 8025, and
+// updating a BLAKE2s hash. Truncate the 32-byte digest to the low 4
+// bytes → uint32_t.
+static void recomputeStateFingerprint();
 
 // Forward-decl so PlcCommitGuard's dtor can call it.
 void savePlcTables();
@@ -1923,6 +1953,12 @@ void sendHeartbeatWithFlags() {
                     plcStats.scaleFires + plcStats.counterFires +
                     plcStats.timerFires + plcStats.setpointFires +
                     plcStats.deltaFires;
+    // State-change generation for gateway reconciliation. Zero on fresh
+    // boot; increments in savePlcTables / saveDevicesTable when the user
+    // deploys or a runtime command mutates PLC/DEVICE state. Gateway
+    // treats "generation changed" as its cue to fetch the full
+    // fingerprint via PLC,STATUS. See recomputeStateFingerprint().
+    mesh.stateGeneration = stateGeneration;
     mesh.sendHeartbeat();
 
     // In gateway mode, publish our own battery to serial — remote nodes
@@ -4684,13 +4720,23 @@ String processPlcCommand(const String& args) {
                               plcStats.scaleFires + plcStats.counterFires +
                               plcStats.timerFires + plcStats.setpointFires +
                               plcStats.deltaFires;
-        // cap=3 signals to the gateway that this firmware understands
-        // the DELTA primitive (bumped from cap=2 when DELTA was added).
-        // A gateway that sees cap<3 can fall back to the gateway-side
-        // Delta-Rate evaluator for compatibility with older firmware.
+        // cap=4 signals fingerprint-reconciliation support:
+        //   ",G<hex2>" — 8-bit state-change generation counter (RAM-only,
+        //                resets on boot)
+        //   ",K<hex8>" — 32-bit BLAKE2s fingerprint of the installed
+        //                PLC + DEVICE tables with runtime fields zeroed
+        // Gateway uses cap≥4 as the gate for the new reconciliation path.
+        // cap=3 (previous) meant "understands DELTA primitive"; cap=2
+        // meant "understands binary PLC deploy". Older gateways reading
+        // cap>expected ignore the trailing fields.
+        char gHex[3];
+        snprintf(gHex, sizeof(gHex), "%02X", (unsigned)stateGeneration);
+        char kHex[9];
+        snprintf(kHex, sizeof(kHex), "%08X", (unsigned)stateFingerprint);
         return String("OK,PLC,STATUS,scans=") + String(plcStats.scanTicks)
              + ",fires="                       + String(totalFires)
-             + ",bin=1,cap=3";
+             + ",bin=1,cap=4,G"                + String(gHex)
+             + ",K"                            + String(kHex);
     }
 
     // CLEAR — wipes all 6 PLC tables in one shot. Each individual CLEAR is
@@ -7932,6 +7978,76 @@ static void plcOffsetsInit() {
     eeprom_dev_end_addr      = eeprom_dev_addr + 3 + sizeof(devices);
 }
 
+// Walk every persisted PLC / DEVICE table, sanitise the runtime-only
+// fields (must stay identical across reboots — otherwise the fingerprint
+// drifts every tick and the gateway would redeploy continuously), and
+// BLAKE2s-hash the sanitised bytes. Truncated to low 4 bytes → uint32_t.
+//
+// Runtime-only fields per table:
+//   SetpointRule  triggered, holdLatched, lastFired, debounceStart
+//   CounterRule   lastUp, lastDown, lastPreset, lastReset
+//   LatchRule     lastSet, lastReset
+//   RelayTimer    phase, nextAt, remaining
+//   DeltaRule     lastValue, lastTime
+//   Device        lastServiceMs
+//   LogicRule / ScaleRule — no runtime fields; hash raw struct
+// These match the sanitiser list in loadPlcTables() at ~line 8025. If
+// that list changes, this one MUST too.
+static void recomputeStateFingerprint() {
+    BLAKE2s h;
+    h.reset(4);   // 4-byte output
+    for (int i = 0; i < MAX_SETPOINTS; i++) {
+        SetpointRule t = setpoints[i];
+        t.triggered = false;
+        t.holdLatched = false;
+        t.lastFired = 0;
+        t.debounceStart = 0;
+        h.update(&t, sizeof(t));
+    }
+    for (int i = 0; i < MAX_COUNTERS; i++) {
+        CounterRule t = counters[i];
+        t.lastUp = t.lastDown = t.lastPreset = t.lastReset = 0;
+        h.update(&t, sizeof(t));
+    }
+    for (int i = 0; i < MAX_LOGIC_RULES; i++) {
+        LogicRule t = logicRules[i];  // no runtime fields
+        h.update(&t, sizeof(t));
+    }
+    for (int i = 0; i < MAX_LATCH_RULES; i++) {
+        LatchRule t = latchRules[i];
+        t.lastSet = t.lastReset = 0;
+        h.update(&t, sizeof(t));
+    }
+    for (int i = 0; i < MAX_SCALE_RULES; i++) {
+        ScaleRule t = scaleRules[i];  // no runtime fields
+        h.update(&t, sizeof(t));
+    }
+    for (int i = 0; i < MAX_TIMERS; i++) {
+        RelayTimer t = timers[i];
+        t.phase = 0;
+        t.nextAt = 0;
+        t.remaining = 0;
+        h.update(&t, sizeof(t));
+    }
+    for (int i = 0; i < MAX_DELTA_RULES; i++) {
+        DeltaRule t = deltaRules[i];
+        t.lastValue = 0;
+        t.lastTime = 0;
+        h.update(&t, sizeof(t));
+    }
+    for (int i = 0; i < MAX_DEVICES; i++) {
+        Device t = devices[i];
+        t.lastServiceMs = 0;
+        h.update(&t, sizeof(t));
+    }
+    uint8_t buf[4];
+    h.finalize(buf, 4);
+    stateFingerprint = ((uint32_t)buf[0] << 24) |
+                       ((uint32_t)buf[1] << 16) |
+                       ((uint32_t)buf[2] <<  8) |
+                       (uint32_t)buf[3];
+}
+
 void savePlcTables() {
     // During a batched deploy (processPlcBinary REPLACE), every ADD calls
     // savePlcTables() individually. That's ~11 EEPROM commits per rule
@@ -7969,6 +8085,12 @@ void savePlcTables() {
     EEPROM.put(eeprom_plc_timer_addr,    timers);
     EEPROM.put(eeprom_plc_delta_addr,    deltaRules);
     EEPROM.commit();
+    // Reconciliation signal: increment the RAM-only generation counter and
+    // recompute the fingerprint. PlcCommitGuard ensures this fires exactly
+    // once at the end of a batched deploy (via plcPersistSuspended), not
+    // per-primitive during the install loop.
+    stateGeneration++;
+    recomputeStateFingerprint();
 }
 
 void loadPlcTables() {
@@ -8065,6 +8187,9 @@ void loadPlcTables() {
         deltaRules[i].lastTime  = 0;
     }
     debugPrint("PLC: loaded tables from EEPROM");
+    // Recompute fingerprint from freshly-loaded tables. Do NOT bump
+    // generation — see comment in loadDevicesTable's matching hook.
+    recomputeStateFingerprint();
 }
 
 // ─── DEVICE persistence ─────────────────────────────────────
@@ -8090,6 +8215,9 @@ void saveDevicesTable() {
     EEPROM.write(eeprom_dev_addr + 2, (uint8_t)(sizeof(devices) & 0xFF));
     EEPROM.put(eeprom_dev_addr + 3, devices);
     EEPROM.commit();
+    // Reconciliation signal — DEVICE table changes count as state changes.
+    stateGeneration++;
+    recomputeStateFingerprint();
 }
 
 void loadDevicesTable() {
@@ -8126,6 +8254,12 @@ void loadDevicesTable() {
     }
     vl53ResetState();
     debugPrint("DEV: loaded peripheral table from EEPROM");
+    // Recompute (but do NOT bump generation): loading from EEPROM isn't a
+    // "change" from the gateway's perspective — the state was there all
+    // along. Generation stays at whatever it was (0 on first boot). The
+    // gateway will see generation=0 in the first HB, query PLC,STATUS,
+    // see the fingerprint matches its desired hash, and do nothing.
+    recomputeStateFingerprint();
 }
 
 // Helper — serialise a single beacon rule by index. Used by both BEACON,GET
