@@ -6080,6 +6080,32 @@ String processBeaconBinary(const uint8_t* data, size_t len, const String& from) 
 // vpin outputs (V232-V255) live in scratchSignedMask which is RAM-only,
 // so this call re-establishes the flag after every reboot (same class
 // of bug as DELTA fix 2583e52).
+//
+// ============================================================
+// !!! READ BEFORE ADDING A NEW PERIPHERAL TYPE !!!
+// ============================================================
+// If your new device emits ANY value that can go negative
+// (temperatures, currents that can reverse, magnetometer axes,
+// signed ADC channels, thermocouple °C, delta between samples,
+// etc.), you MUST add a case here for it. The install path in
+// processDeviceCommand() no longer has its own switch — this
+// helper is the single source of truth for signed peripheral
+// outputs.
+//
+// Symptom of forgetting: negative readings from your sensor
+// bit-cast to huge uint16 values (~65000) after any reboot,
+// silently tripping downstream Compare/LOGIC/SETPOINT rules.
+// The failure is invisible on the happy-path bench (positive
+// values only) and only surfaces the first time a user's
+// sensor reads negative after a reboot — exactly the class of
+// bug that produced the DELTA "pressent/clear" flakiness in
+// 2583e52 and the follow-up DEVICE fix in 47a9e1f.
+//
+// Rule of thumb: if the driver code stores the reading as
+// int16_t before writing to the vpin, add it here. If it's
+// uint16_t (COUNTER, BH1750 lux, HCSR04 cm, SGP41 index,
+// distance mm), don't — that would break Compare > 32767.
+// ============================================================
 static void applyDeviceSignedFlags(const Device& d) {
     if (!d.active) return;
     switch (d.type) {
