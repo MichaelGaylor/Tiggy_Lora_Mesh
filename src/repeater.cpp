@@ -6071,6 +6071,52 @@ String processBeaconBinary(const uint8_t* data, size_t len, const String& from) 
 //   DEVICE,ADD,OLED,<base64_format>,<vp1>,...    OLED display block
 //                                                  format string base64'd
 //                                                  to escape commas
+
+// Re-mark signed outputs for a peripheral. Kept in one place so a new
+// signed-emitting device type can't be added to the install path
+// (processDeviceCommand) without also being handled by the reload
+// path (loadDevicesTable). Storage-vpin outputs (V200-V231) are
+// idempotent — storageSignedMask is already loaded from EEPROM. Scratch-
+// vpin outputs (V232-V255) live in scratchSignedMask which is RAM-only,
+// so this call re-establishes the flag after every reboot (same class
+// of bug as DELTA fix 2583e52).
+static void applyDeviceSignedFlags(const Device& d) {
+    if (!d.active) return;
+    switch (d.type) {
+        case DEV_DHT11:
+        case DEV_DHT22:
+        case DEV_DS18B20:
+        case DEV_BME280:
+        case DEV_SHT31:
+        case DEV_MCP9808:
+        case DEV_THERMISTOR:
+            if (d.outVpin[0]) setVpinSigned(d.outVpin[0], true);
+            break;
+        case DEV_INA226:
+            if (d.outVpin[1]) setVpinSigned(d.outVpin[1], true);
+            break;
+        case DEV_HMC5883L:
+        case DEV_QMC5883L:
+        case DEV_QMC5883P:
+            if (d.outVpin[0]) setVpinSigned(d.outVpin[0], true);
+            if (d.outVpin[1]) setVpinSigned(d.outVpin[1], true);
+            if (d.outVpin[2]) setVpinSigned(d.outVpin[2], true);
+            break;
+        case DEV_ADS1115:
+            if (d.outVpin[0]) setVpinSigned(d.outVpin[0], true);
+            if (d.outVpin[1]) setVpinSigned(d.outVpin[1], true);
+            if (d.outVpin[2]) setVpinSigned(d.outVpin[2], true);
+            if (d.outVpin[3]) setVpinSigned(d.outVpin[3], true);
+            break;
+        case DEV_MAX31855:
+            if (d.outVpin[0]) setVpinSigned(d.outVpin[0], true);
+            if (d.outVpin[1]) setVpinSigned(d.outVpin[1], true);
+            break;
+        default:
+            break;
+    }
+}
+
 String processDeviceCommand(const String& args) {
     String act = args;
     int comma = act.indexOf(',');
@@ -6491,54 +6537,9 @@ String processDeviceCommand(const String& args) {
     // current is signed by definition. Without this flag the read path
     // zero-extends uint16 → int32 and negative-threshold comparisons
     // silently fail (e.g. "if temp < -5°C alert" never fires because
-    // the runtime sees 65436 not -100).
-    switch (type) {
-        case DEV_DHT11:
-        case DEV_DHT22:
-        case DEV_DS18B20:
-        case DEV_BME280:
-        case DEV_SHT31:
-        case DEV_MCP9808:
-        case DEV_THERMISTOR:
-            // outVpin[0] = temperature × 10 — can be negative
-            if (tmp.outVpin[0]) setVpinSigned(tmp.outVpin[0], true);
-            break;
-        case DEV_INA226:
-            // outVpin[0] = bus voltage (always positive); outVpin[1] =
-            // shunt current (can be negative when load reverses).
-            if (tmp.outVpin[1]) setVpinSigned(tmp.outVpin[1], true);
-            break;
-        case DEV_HMC5883L:
-        case DEV_QMC5883L:
-        case DEV_QMC5883P:
-            // All 3 axes signed — the chip outputs ±32767 raw counts
-            // and threshold comparisons ("X < -5000") only work
-            // correctly when the read path sign-extends.
-            if (tmp.outVpin[0]) setVpinSigned(tmp.outVpin[0], true);
-            if (tmp.outVpin[1]) setVpinSigned(tmp.outVpin[1], true);
-            if (tmp.outVpin[2]) setVpinSigned(tmp.outVpin[2], true);
-            break;
-        case DEV_ADS1115:
-            // All 4 channels published as signed int16 millivolts. Even
-            // in single-ended mode a slightly-negative reading is
-            // common near ground (small offset error) and Compare
-            // thresholds like "> -100 mV" must sign-extend correctly.
-            if (tmp.outVpin[0]) setVpinSigned(tmp.outVpin[0], true);
-            if (tmp.outVpin[1]) setVpinSigned(tmp.outVpin[1], true);
-            if (tmp.outVpin[2]) setVpinSigned(tmp.outVpin[2], true);
-            if (tmp.outVpin[3]) setVpinSigned(tmp.outVpin[3], true);
-            break;
-        case DEV_MAX31855:
-            // temp_c and cold_junction_c are signed °C×10; fault is a
-            // 3-bit mask (unsigned) so it stays in the default branch.
-            if (tmp.outVpin[0]) setVpinSigned(tmp.outVpin[0], true);
-            if (tmp.outVpin[1]) setVpinSigned(tmp.outVpin[1], true);
-            break;
-        default:
-            // HCSR04, VL53*, OLED, I2C_READ, SGP41 (raw uint counts),
-            // BH1750 (lux, unsigned) — naturally unsigned.
-            break;
-    }
+    // the runtime sees 65436 not -100). Delegated to a shared helper
+    // so loadDevicesTable() re-applies the same flags after reboot.
+    applyDeviceSignedFlags(devices[slot]);
     return String("OK,DEVICE,ADD,") + typeStr;
 }
 
@@ -8862,8 +8863,11 @@ void loadPlcTables() {
     // for reasonable N. Storage vpin signed bits are already persisted
     // to EEPROM (storageSignedMask lives at EEPROM_SIGNED_MASK_ADDR),
     // but scratch bits aren't — so we restore them from primitive
-    // config here. Only DELTA is affected because it's the only
-    // scratch-writing primitive that emits signed values today.
+    // config here. DEVICE peripherals emit signed values into scratch
+    // vpins too (temp sensors, magnetometers, INA226, ADS1115,
+    // MAX31855) — their loader (loadDevicesTable) does the equivalent
+    // re-apply via applyDeviceSignedFlags. Keep both loaders in sync
+    // with their install paths.
     for (int i = 0; i < MAX_DELTA_RULES; i++) {
         if (!deltaRules[i].active) continue;
         deltaRules[i].lastValue = 0;
@@ -8932,9 +8936,20 @@ void loadDevicesTable() {
     // 0) and must clear so the first scan tick triggers a real service
     // call. Also reset the ToF init flags so VL53L0X/L1X re-init on
     // first read (in case the sensor was power-cycled with the node).
+    // Also re-apply setVpinSigned for every restored peripheral output.
+    // scratchSignedMask is RAM-only and starts at 0 on boot, so a
+    // DEVICE restored from EEPROM had UNSIGNED outputs until the next
+    // DEVICE,ADD (which callers never re-issue after reboot because
+    // the config already survived). Negative readings (sub-zero temp,
+    // reverse current, negative magnetometer axis, small negative ADC
+    // offset) bit-cast to huge uint16 (~65000) and trip any downstream
+    // Compare threshold — same class of bug as the DELTA one fixed in
+    // 2583e52. For storage-range vpins (V200-V231) this is idempotent
+    // (already flagged from persisted storageSignedMask).
     for (int i = 0; i < MAX_DEVICES; i++) {
         if (!devices[i].active) continue;
         devices[i].lastServiceMs = 0;
+        applyDeviceSignedFlags(devices[i]);
     }
     vl53ResetState();
     debugPrint("DEV: loaded peripheral table from EEPROM");
