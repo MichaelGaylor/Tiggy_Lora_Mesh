@@ -1269,6 +1269,18 @@ static GasIndexAlgorithmParams sgp41NoxState[MAX_SGP41_INSTANCES];
 static int8_t sgp41SlotToInst[MAX_DEVICES] = {
     -1,-1,-1,-1,-1,-1,-1,-1   // MAX_DEVICES = 8
 };
+// Post-warming sample count per algorithm instance. The Sensirion
+// algorithm has a 45 s INITIAL_BLACKOUT window where it internally
+// returns 0 (the caller-provided out variable is left untouched).
+// A raw 0 from us to the widget would look identical to a "very
+// clean air" reading, so we track sample count and refuse to publish
+// index values until the algorithm has actually converged past
+// blackout. 50 gives a small safety margin over the 45 s official
+// window; at 1 Hz service cadence this is ~50 s of "no data" on
+// the widget after boot — user sees the last known value or nothing
+// rather than a misleading 0.
+static uint8_t sgp41SamplesReady[MAX_SGP41_INSTANCES] = {0, 0};
+#define SGP41_ALGO_BLACKOUT_SAMPLES 50
 static uint8_t sgp41Crc8(const uint8_t* d, size_t n) {
     // Sensirion CRC-8: poly 0x31, init 0xFF, no reflection
     uint8_t crc = 0xFF;
@@ -1709,17 +1721,23 @@ void serviceDevices() {
                 if (!sgp41Read(rhCounts, tCounts, &sVoc, &sNox, &warming)) {
                     break;  // I2C failure — leave vpins stale, retry next tick
                 }
-                // Raw SRAW: publish immediately (users watching for
-                // spike detection want unfiltered data).
+                // NEVER publish SRAW during the 10 s heater
+                // conditioning window — sVoc/sNox come back as literal
+                // 0 during that phase, and 0 is indistinguishable from
+                // "extremely polluted air" (SRAW = 0 is way below the
+                // ~30000 typical clean-air baseline). A Compare rule
+                // like "sraw_voc < 20000 → alert" would fire falsely
+                // for the first 10 s after every boot. Leave vpins
+                // stale (widget shows last-known / "no data") until
+                // sensor is truly reading. Same rule for feeding the
+                // adaptive algorithm — Sensirion's app note explicitly
+                // forbids zero-poisoning the baseline.
+                if (warming) break;
+                // Sensor is now returning valid SRAW — publish raw
+                // counts immediately (users watching for spike
+                // detection want unfiltered data).
                 if (d.outVpin[0]) setVpinValue(d.outVpin[0], sVoc);
                 if (d.outVpin[1]) setVpinValue(d.outVpin[1], sNox);
-                // Gas Index Algorithm: NEVER feed the algorithm
-                // during the 10 s heater conditioning window —
-                // sVoc/sNox come back as 0 during that phase and
-                // zero-poisoning the adaptive baseline corrupts the
-                // whole session (Sensirion app note explicitly
-                // forbids this — verifier issue #2 fix).
-                if (warming) break;
                 // Lazy-allocate an algorithm instance for this slot
                 // on first non-warming tick.
                 int8_t inst = sgp41SlotToInst[i];
@@ -1747,6 +1765,22 @@ void serviceDevices() {
                                           (int32_t)sVoc, &vocIdx);
                 GasIndexAlgorithm_process(&sgp41NoxState[inst],
                                           (int32_t)sNox, &noxIdx);
+                // During the algorithm's own 45 s INITIAL_BLACKOUT
+                // window it doesn't write to vocIdx/noxIdx — they
+                // stay at whatever we initialised them to (0). But
+                // 0 is a VALID index value in normal operation
+                // ("very clean, below running baseline"), so
+                // publishing 0 during blackout would be
+                // indistinguishable from "excellent air quality".
+                // Track sample count per instance and refuse to
+                // publish the index outputs until the algorithm
+                // has actually converged past the blackout window.
+                // Widget shows stale/no-data until then, then
+                // starts populating with real values.
+                if (sgp41SamplesReady[inst] < SGP41_ALGO_BLACKOUT_SAMPLES) {
+                    sgp41SamplesReady[inst]++;
+                    break;
+                }
                 if (d.outVpin[2]) setVpinValue(d.outVpin[2], (uint16_t)vocIdx);
                 if (d.outVpin[3]) setVpinValue(d.outVpin[3], (uint16_t)noxIdx);
                 break;
