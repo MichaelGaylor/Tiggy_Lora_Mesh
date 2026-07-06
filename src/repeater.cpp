@@ -589,6 +589,43 @@ enum DeviceType : uint8_t {
                           // Newer GY-273 boards ship this — different
                           // register map from QMC5883L, so also its own
                           // first-class driver.
+    // Tier 6 — air quality + light + precision analog + high-temp probe.
+    // Values 17..20 APPENDED to preserve backward-compat with saved
+    // Device slots: EEPROM stores type as raw uint8, so inserting mid-
+    // enum would silently rebrand every persisted slot at its old
+    // number. Only add at the tail; the size-byte check in
+    // saveDevicesTable/loadDevicesTable stays satisfied because the
+    // Device struct layout is unchanged.
+    DEV_SGP41      = 17,  // Sensirion SGP41 VOC + NOx gas sensor, I2C
+                          // 0x59 fixed. Publishes raw SRAW counts —
+                          // Sensirion's Gas Index Algorithm is
+                          // deliberately NOT bundled here (would add
+                          // ~1000 lines of vendor code). Post-process
+                          // to VOC Index on the gateway if needed.
+                          // Optional humidity/temp compensation vpins
+                          // stored in cfgB/cfgC as (vpin+1); 0 = use
+                          // default 50%RH / 25°C fallback constants.
+    DEV_ADS1115    = 18,  // TI ADS1115 16-bit 4-channel I2C ADC,
+                          // addr 0x48..0x4B (ADDR pin selects). All
+                          // 4 channels published as signed int16 raw
+                          // counts. Gain (PGA) code 0..5 stored in
+                          // cfgA; 0=6.144V full-scale, 5=0.256V. User
+                          // converts to volts on gateway via
+                          // V = raw × pgaRange / 32767.
+    DEV_BH1750     = 19,  // ROHM BH1750 ambient light I2C, addr 0x23
+                          // (ADDR=GND, default) or 0x5C (ADDR=VCC).
+                          // Continuous H-Resolution Mode (1 lx res,
+                          // 120 ms integration). Firmware divides
+                          // raw counts by 1.2 so the vpin reads
+                          // directly in lux.
+    DEV_MAX31855   = 20,  // Maxim MAX31855 K-type thermocouple SPI,
+                          // read-only. Uses SoftSPI on user-picked
+                          // pins so it can't collide with the LoRa
+                          // hardware SPI bus. pin1=SCK, pin2=MISO,
+                          // i2cAddr repurposed as CS (any GPIO). Range
+                          // -270..+1372°C with 0.25°C LSB, published
+                          // as signed int16 °C×10. Cold-junction
+                          // temp + fault-bit register also exposed.
 };
 struct Device {
     bool      active;
@@ -602,14 +639,25 @@ struct Device {
     // Per-device extra config:
     //   INA226       → cfgA = shunt resistance in milliohms (e.g. 100 for 0.1Ω)
     //   THERMISTOR   → cfgA = Beta coefficient (3000..5000 typical, e.g. 3950)
+    //   ADS1115      → cfgA = PGA gain code 0..5 (0=6.144V, 1=4.096V,
+    //                  2=2.048V, 3=1.024V, 4=0.512V, 5=0.256V). Applied
+    //                  identically to all 4 channels on that chip.
     //   others       → unused
     int16_t   cfgA;
-    // THERMISTOR-only extras (would be `union` material but the struct
-    // is dumped to EEPROM whole so plain fields keep the layout stable
+    // Per-device extras (would be `union` material but the struct is
+    // dumped to EEPROM whole so plain fields keep the layout stable
     // across types):
-    //   cfgB         → R₀ (nominal resistance at 25°C) in units of 100Ω,
-    //                  so 10kΩ → 100, 100kΩ → 1000. Max ~6.5MΩ.
-    //   cfgC         → pullup resistor in units of 100Ω (same encoding).
+    //   THERMISTOR   → cfgB = R₀ (nominal resistance at 25°C) in units
+    //                  of 100Ω, so 10kΩ → 100, 100kΩ → 1000. Max ~6.5MΩ.
+    //                  cfgC = pullup resistor in units of 100Ω (same
+    //                  encoding).
+    //   SGP41        → cfgB = optional humidity-source vpin PLUS ONE
+    //                  (0 = disabled, use default 50%RH). Plus-one
+    //                  offset lets 0 encode "no source" without losing
+    //                  vpin V0 as a legitimate slot.
+    //                  cfgC = optional temperature-source vpin PLUS ONE
+    //                  (0 = disabled, use default 25°C).
+    //   others       → unused
     uint16_t  cfgB;
     uint16_t  cfgC;
     uint16_t  intervalMs;    // service interval
@@ -1168,6 +1216,233 @@ static bool qmc5883pRead(uint8_t addr, int16_t* xRaw, int16_t* yRaw,
     return true;
 }
 
+// ─── SGP41 driver (Sensirion VOC + NOx gas sensor, I2C 0x59) ─────
+// Publishes RAW SRAW counts (uint16, "measure_raw_signals" command
+// output). SRAW is inversely proportional to gas concentration — bigger
+// number = cleaner air. The polished 0-500 VOC / NOx Index requires
+// Sensirion's Gas Index Algorithm which is ~1000 lines of vendor
+// state-machine code; deliberately out of scope this pass. Users who
+// need the index can either post-process SRAW on the gateway OR flash
+// a later firmware release that bundles the algorithm on-node.
+//
+// State machine on the chip:
+//   1. Boot / power-on: 10 s minimum warm-up before the heater is
+//      ready. During this window we run the "execute_conditioning"
+//      command (0x2612) which primes the heater without publishing
+//      valid SRAW. sgp41BootMs tracks the deadline.
+//   2. Normal read: "measure_raw_signals" (0x2619) with humidity+temp
+//      compensation args (2 bytes each, big-endian, with CRC-8 byte
+//      after each pair). Response: 6 bytes (SRAW_VOC hi/lo/crc,
+//      SRAW_NOX hi/lo/crc) after ~50ms. Cadence 1 Hz.
+//
+// Compensation source: optional Device.cfgB / cfgC hold (vpin+1) for
+// humidity / temperature source vpins. 0 = disabled → default 50%RH,
+// 25°C. When set, we read the source vpins each service tick and pack
+// them into the command args.
+static uint32_t sgp41BootMs = 0;   // millis() when first serviced
+static uint8_t sgp41Crc8(const uint8_t* d, size_t n) {
+    // Sensirion CRC-8: poly 0x31, init 0xFF, no reflection
+    uint8_t crc = 0xFF;
+    for (size_t i = 0; i < n; i++) {
+        crc ^= d[i];
+        for (int b = 0; b < 8; b++) crc = (crc & 0x80) ? (crc << 1) ^ 0x31 : (crc << 1);
+    }
+    return crc;
+}
+static bool sgp41Read(uint16_t rhCounts, uint16_t tCounts,
+                     uint16_t* sRawVoc, uint16_t* sRawNox) {
+    // Choose conditioning (warm-up) vs measurement based on
+    // 10-second boot gate.
+    bool warming = (sgp41BootMs == 0) || ((millis() - sgp41BootMs) < 10000);
+    uint16_t cmd = warming ? 0x2612 : 0x2619;
+    // Command + 6 arg bytes (RH hi/lo/crc, T hi/lo/crc)
+    uint8_t buf[8];
+    buf[0] = cmd >> 8;
+    buf[1] = cmd & 0xFF;
+    buf[2] = rhCounts >> 8;
+    buf[3] = rhCounts & 0xFF;
+    buf[4] = sgp41Crc8(&buf[2], 2);
+    buf[5] = tCounts >> 8;
+    buf[6] = tCounts & 0xFF;
+    buf[7] = sgp41Crc8(&buf[5], 2);
+    Wire.beginTransmission(0x59);
+    Wire.write(buf, 8);
+    if (Wire.endTransmission() != 0) return false;
+    if (sgp41BootMs == 0) sgp41BootMs = millis();
+    if (warming) { *sRawVoc = 0; *sRawNox = 0; return true; }
+    delay(50);  // measure_raw_signals takes ~50 ms
+    // Read 6 bytes: VOC hi/lo/crc, NOX hi/lo/crc
+    if (Wire.requestFrom((int)0x59, 6) != 6) return false;
+    uint8_t r[6];
+    for (int i = 0; i < 6; i++) r[i] = Wire.read();
+    if (sgp41Crc8(&r[0], 2) != r[2]) return false;
+    if (sgp41Crc8(&r[3], 2) != r[5]) return false;
+    *sRawVoc = ((uint16_t)r[0] << 8) | r[1];
+    *sRawNox = ((uint16_t)r[3] << 8) | r[4];
+    return true;
+}
+
+// ─── ADS1115 driver (TI 16-bit 4-channel I2C ADC) ────────────────
+// Publishes MILLIVOLTS (signed int16) for each channel — the node
+// does the raw → mV conversion using the PGA range so the gateway
+// widget shows values in millivolts directly, no downstream Scale
+// block needed. Config register 0x01 selects channel + PGA + mode;
+// conversion register 0x00 holds the result.
+//
+// PGA (gain) codes packed into Device.cfgA (0..5):
+//   0 = ±6.144 V (default, widest range for 3.3 V signals + margin)
+//   1 = ±4.096 V
+//   2 = ±2.048 V
+//   3 = ±1.024 V
+//   4 = ±0.512 V
+//   5 = ±0.256 V
+// Full-scale count = 32767 → 1 LSB = pgaRange µV / 32767. Millivolt
+// output = raw × pgaFullScaleMv / 32768, rounded (right-shift after
+// multiplying by mV constant fits in int32 without overflow).
+static const int16_t ads1115_pga_mv[6] = { 6144, 4096, 2048, 1024, 512, 256 };
+static bool ads1115Read(uint8_t addr, uint8_t gainCode, uint8_t chan,
+                        int16_t* mvOut) {
+    if (gainCode > 5) gainCode = 0;
+    if (chan > 3) chan = 0;
+    // Config: OS=1 (start conv), MUX=100+chan (single-ended AINx vs GND),
+    // PGA=gainCode, MODE=1 (single-shot), DR=100 (128 SPS), COMP disabled.
+    uint16_t cfg = 0x8000
+                 | ((0x4 | chan) << 12)        // MUX
+                 | ((uint16_t)gainCode << 9)   // PGA
+                 | (1 << 8)                    // MODE=single-shot
+                 | (0x4 << 5)                  // DR=128 SPS (fast + stable)
+                 | 0x0003;                     // COMP disabled
+    // Write config
+    Wire.beginTransmission(addr);
+    Wire.write(0x01);
+    Wire.write(cfg >> 8);
+    Wire.write(cfg & 0xFF);
+    if (Wire.endTransmission() != 0) return false;
+    // Conversion takes ~8 ms @ 128 SPS. Poll OS bit — cheaper than
+    // fixed sleep, keeps things responsive if we later drop to 8 SPS.
+    for (int i = 0; i < 20; i++) {
+        delay(1);
+        Wire.beginTransmission(addr);
+        Wire.write(0x01);
+        if (Wire.endTransmission() != 0) return false;
+        if (Wire.requestFrom((int)addr, 2) != 2) return false;
+        uint16_t c = ((uint16_t)Wire.read() << 8) | Wire.read();
+        if (c & 0x8000) break;  // OS=1 means conversion complete
+    }
+    // Read conversion register
+    Wire.beginTransmission(addr);
+    Wire.write(0x00);
+    if (Wire.endTransmission() != 0) return false;
+    if (Wire.requestFrom((int)addr, 2) != 2) return false;
+    int16_t raw = (int16_t)(((uint16_t)Wire.read() << 8) | Wire.read());
+    // raw × full-scale-mV / 32768 → int16 mV. Use int32 for the
+    // multiply to avoid overflow (32767 × 6144 = 2.0e8 fits int32).
+    int32_t mv = ((int32_t)raw * (int32_t)ads1115_pga_mv[gainCode]) >> 15;
+    if (mv >  32767) mv =  32767;
+    if (mv < -32768) mv = -32768;
+    *mvOut = (int16_t)mv;
+    return true;
+}
+
+// ─── BH1750 driver (ROHM ambient light I2C) ──────────────────────
+// Simple command-only interface: send mode byte once at init,
+// then read 2 bytes per service tick for the raw count. Firmware
+// divides by 1.2 so the vpin reads directly in lux (Continuous
+// H-Resolution Mode = 1 lx resolution). Non-blocking init: the
+// integration window is 120 ms, so we set a "next-service-after"
+// deadline in the service dispatch and skip reads until then —
+// no delay() in the driver itself.
+static bool bh1750Init(uint8_t addr) {
+    Wire.beginTransmission(addr);
+    Wire.write(0x10);  // Continuous H-Resolution Mode (1 lx res, 120 ms)
+    return Wire.endTransmission() == 0;
+}
+static bool bh1750Read(uint8_t addr, uint16_t* lux) {
+    if (Wire.requestFrom((int)addr, 2) != 2) return false;
+    uint16_t raw = ((uint16_t)Wire.read() << 8) | Wire.read();
+    // 1.2 divisor from datasheet — H-Res gives count/1.2 = lux.
+    // Use integer math: raw * 10 / 12 keeps precision without float.
+    uint32_t lx = ((uint32_t)raw * 10u) / 12u;
+    if (lx > 65535) lx = 65535;
+    *lux = (uint16_t)lx;
+    return true;
+}
+
+// ─── MAX31855 K-type thermocouple SoftSPI driver ─────────────────
+// The chip is SPI-only read (32-bit shift-out on falling clock edge
+// while CS is low). We use bit-banged SoftSPI on user-picked GPIO
+// pins so this can NEVER collide with the LoRa hardware SPI bus
+// arbitration. At ~100 kHz software clock, one 32-bit read is
+// ~320 µs — trivially non-blocking at the 1 Hz cadence peak
+// thermocouple thermal response actually needs.
+//
+// 32-bit word layout (MSB first per datasheet):
+//   [31:18] TC temperature, int14 signed, LSB 0.25°C  (range -270..+1372)
+//   [17]    reserved (0)
+//   [16]    FAULT flag (any of OC/SCG/SCV)
+//   [15:4]  cold-junction temp, int12 signed, LSB 0.0625°C
+//   [3]     reserved (0)
+//   [2]     SCV — short to VCC
+//   [1]     SCG — short to GND
+//   [0]     OC  — open circuit (no thermocouple)
+//
+// Published outputs:
+//   temp_c            int16 signed °C ×10 (0.1°C resolution — coarser
+//                     than the 0.25°C native but matches the standard
+//                     for temp vpins in this codebase, and downstream
+//                     Compare thresholds are easier to type as int)
+//   cold_junction_c   int16 signed °C ×10 (same convention)
+//   fault             uint16 bitmask: bit0=OC, bit1=SCG, bit2=SCV;
+//                     0 = healthy, non-zero = thermocouple issue
+static uint32_t max31855ReadRaw(uint8_t sck, uint8_t miso, uint8_t cs) {
+    digitalWrite(cs, LOW);
+    delayMicroseconds(2);
+    uint32_t v = 0;
+    for (int i = 0; i < 32; i++) {
+        digitalWrite(sck, HIGH);
+        delayMicroseconds(1);
+        v <<= 1;
+        if (digitalRead(miso)) v |= 1;
+        digitalWrite(sck, LOW);
+        delayMicroseconds(1);
+    }
+    digitalWrite(cs, HIGH);
+    return v;
+}
+static bool max31855Read(uint8_t sck, uint8_t miso, uint8_t cs,
+                        int16_t* tempC10, int16_t* coldJunctionC10,
+                        uint16_t* fault) {
+    uint32_t w = max31855ReadRaw(sck, miso, cs);
+    // Sanity: an all-zeros or all-ones read is a wiring problem
+    // (miso floating or shorted) — return false so the vpin isn't
+    // updated with a bogus 0°C.
+    if (w == 0 || w == 0xFFFFFFFFu) return false;
+    // Thermocouple: bits 31..18, signed int14, LSB 0.25°C.
+    int32_t tRaw = (int32_t)(w >> 18);
+    if (tRaw & 0x2000) tRaw |= 0xFFFFC000;  // sign-extend from bit13
+    // 0.25°C LSB → to °C×10: multiply by 25 then divide by 10 (or
+    // just multiply by 2.5 in int math: value = tRaw * 5 / 2)
+    int32_t tempTenths = tRaw * 25 / 10;
+    // Cold junction: bits 15..4, signed int12, LSB 0.0625°C.
+    int32_t cRaw = (int32_t)((w >> 4) & 0x0FFF);
+    if (cRaw & 0x0800) cRaw |= 0xFFFFF000;  // sign-extend from bit11
+    // 0.0625°C LSB → °C×10: multiply by 625 then divide by 1000.
+    int32_t coldTenths = cRaw * 625 / 1000;
+    // Clamp to int16 (temp_c ×10 spans ~-2700..+13720 → fits; cold
+    // junction ±550 fits with huge margin).
+    if (tempTenths >  32767) tempTenths =  32767;
+    if (tempTenths < -32768) tempTenths = -32768;
+    if (coldTenths >  32767) coldTenths =  32767;
+    if (coldTenths < -32768) coldTenths = -32768;
+    *tempC10 = (int16_t)tempTenths;
+    *coldJunctionC10 = (int16_t)coldTenths;
+    // Fault detail: bit16 is the summary flag; bits 0..2 are the
+    // specific fault type. Publish just the low 3 bits for
+    // interpretation on the widget side.
+    *fault = (uint16_t)(w & 0x07);
+    return true;
+}
+
 // ─── Vector magnitude helper (rotation-invariant, vibration-immune) ─
 // |⃗v| = sqrt(x² + y² + z²). For magnetometers, this is the killer
 // feature: pure rotation of the sensor (wind sway of an outdoor box,
@@ -1372,6 +1647,87 @@ void serviceDevices() {
                     if (d.outVpin[3]) {
                         setVpinValue(d.outVpin[3], magnitude3(xRaw, yRaw, zRaw));
                     }
+                }
+                break;
+            }
+            case DEV_SGP41: {
+                // Optional compensation sources: cfgB/cfgC hold vpin+1
+                // (0 = disabled → default 50%RH, 25°C). Convert to
+                // Sensirion tick format: RH ticks = %RH × 65535 / 100,
+                // T ticks = (°C + 45) × 65535 / 175.
+                uint16_t rhCounts = 0x8000;   // default 50 %RH
+                uint16_t tCounts  = 0x6666;   // default 25 °C
+                if (d.cfgB) {
+                    uint16_t rhPct = getVpinValue(d.cfgB - 1);
+                    if (rhPct > 100) rhPct = 100;
+                    rhCounts = (uint16_t)((uint32_t)rhPct * 65535 / 100);
+                }
+                if (d.cfgC) {
+                    int32_t tC = (int32_t)(int16_t)getVpinValue(d.cfgC - 1);
+                    if (tC < -45)  tC = -45;
+                    if (tC > 130)  tC = 130;
+                    tCounts = (uint16_t)((uint32_t)(tC + 45) * 65535 / 175);
+                }
+                uint16_t sVoc = 0, sNox = 0;
+                if (sgp41Read(rhCounts, tCounts, &sVoc, &sNox)) {
+                    if (d.outVpin[0]) setVpinValue(d.outVpin[0], sVoc);
+                    if (d.outVpin[1]) setVpinValue(d.outVpin[1], sNox);
+                }
+                break;
+            }
+            case DEV_ADS1115: {
+                // Read all 4 channels each service tick. Each read is
+                // ~10 ms at 128 SPS (config write + poll + read); 4
+                // channels = ~40 ms per full cycle. If that's too heavy
+                // at high intervalMs cadences a future revision can
+                // round-robin one channel per tick instead.
+                uint8_t gain = (uint8_t)(d.cfgA & 0x07);
+                for (int ch = 0; ch < 4; ch++) {
+                    if (!d.outVpin[ch]) continue;
+                    int16_t mv = 0;
+                    if (ads1115Read(d.i2cAddr, gain, (uint8_t)ch, &mv)) {
+                        setVpinValue(d.outVpin[ch], (uint16_t)mv);
+                    }
+                }
+                break;
+            }
+            case DEV_BH1750: {
+                // Non-blocking init: try once, gate subsequent reads
+                // on success. Per-slot state is keyed off outVpin[3]
+                // as a "have I sent the mode command" flag (unused
+                // field on BH1750 so we can borrow it safely). Better
+                // than a parallel bh1750_initTried[] table since it
+                // survives loadDevicesTable() automatically.
+                if (d.outVpin[3] == 0) {
+                    if (bh1750Init(d.i2cAddr)) {
+                        d.outVpin[3] = 1;  // "init done" marker
+                    } else {
+                        break;  // sensor absent; retry on next tick
+                    }
+                }
+                uint16_t lux = 0;
+                if (bh1750Read(d.i2cAddr, &lux)) {
+                    if (d.outVpin[0]) setVpinValue(d.outVpin[0], lux);
+                }
+                break;
+            }
+            case DEV_MAX31855: {
+                // SoftSPI on pin1=SCK, pin2=MISO, i2cAddr=CS. Set pin
+                // directions on first read (pin state is cheap to
+                // check — pinMode() is idempotent). MAX31855 needs
+                // ~100 ms between reads for conversion; the service
+                // interval (default 1000ms) is well above that.
+                pinMode(d.pin1, OUTPUT);       // SCK
+                pinMode(d.pin2, INPUT);        // MISO
+                pinMode(d.i2cAddr, OUTPUT);    // CS (repurposed field)
+                digitalWrite(d.i2cAddr, HIGH);
+                int16_t tempC10 = 0, cjC10 = 0;
+                uint16_t fault = 0;
+                if (max31855Read(d.pin1, d.pin2, d.i2cAddr,
+                                  &tempC10, &cjC10, &fault)) {
+                    if (d.outVpin[0]) setVpinValue(d.outVpin[0], (uint16_t)tempC10);
+                    if (d.outVpin[1]) setVpinValue(d.outVpin[1], (uint16_t)cjC10);
+                    if (d.outVpin[2]) setVpinValue(d.outVpin[2], fault);
                 }
                 break;
             }
@@ -5615,7 +5971,8 @@ String processDeviceCommand(const String& args) {
         const char* names[] = {"NONE","DHT11","DHT22","HCSR04","DS18B20","I2C","OLED",
                                "BME280","SHT31","INA226","MCP9808",
                                "VL53L0X","VL53L1X","THERMISTOR",
-                               "HMC5883L","QMC5883L","QMC5883P"};
+                               "HMC5883L","QMC5883L","QMC5883P",
+                               "SGP41","ADS1115","BH1750","MAX31855"};
         for (int i = 0; i < MAX_DEVICES; i++) {
             if (!devices[i].active) continue;
             count++;
@@ -5661,6 +6018,10 @@ String processDeviceCommand(const String& args) {
     else if (typeStr == "HMC5883L") type = DEV_HMC5883L;
     else if (typeStr == "QMC5883L") type = DEV_QMC5883L;
     else if (typeStr == "QMC5883P") type = DEV_QMC5883P;
+    else if (typeStr == "SGP41")    type = DEV_SGP41;
+    else if (typeStr == "ADS1115")  type = DEV_ADS1115;
+    else if (typeStr == "BH1750")   type = DEV_BH1750;
+    else if (typeStr == "MAX31855") type = DEV_MAX31855;
     else return "ERR,DEVICE,BADTYPE";
 
     // Per-type parsing — each branch reads its args off tail and
@@ -5841,6 +6202,90 @@ String processDeviceCommand(const String& args) {
         tmp.outVpin[2] = (uint8_t)svZ.toInt();
         tmp.outVpin[3] = (uint8_t)svMag.toInt();
         tmp.intervalMs = 500;
+    } else if (type == DEV_SGP41) {
+        // <vSrawVoc>,<vSrawNox>[,<vRhSrc>,<vTSrc>]
+        //   Fixed I2C addr 0x59, no addr arg. Optional RH/T source
+        //   vpins for compensation — stored as vpin+1 so 0 encodes
+        //   "no source, use defaults 50%RH / 25°C".
+        String svVoc = nextTok(tail);
+        String svNox = nextTok(tail);
+        String svRh  = nextTok(tail);
+        String svT   = nextTok(tail);
+        if (svNox.length() == 0) return "ERR,DEVICE,FORMAT";
+        tmp.i2cAddr    = 0x59;
+        tmp.outVpin[0] = (uint8_t)svVoc.toInt();
+        tmp.outVpin[1] = (uint8_t)svNox.toInt();
+        // vpin+1 encoding: user typed 0 (or omitted) → we store 0 = disabled
+        int rhSrc = svRh.length() ? svRh.toInt() : 0;
+        int tSrc  = svT.length()  ? svT.toInt()  : 0;
+        tmp.cfgB = (rhSrc > 0 && rhSrc < 256) ? (uint16_t)(rhSrc + 1) : 0;
+        tmp.cfgC = (tSrc  > 0 && tSrc  < 256) ? (uint16_t)(tSrc  + 1) : 0;
+        tmp.intervalMs = 1000;
+    } else if (type == DEV_ADS1115) {
+        // <addr>,<gainCode>,<vCh0>,<vCh1>,<vCh2>,<vCh3>
+        //   addr: 0x48..0x4B (I2C address, ADDR pin selects)
+        //   gainCode: 0=6.144V, 1=4.096V, 2=2.048V, 3=1.024V,
+        //             4=0.512V, 5=0.256V (published as int16 mV,
+        //             conversion done in the driver)
+        String saddr = nextTok(tail);
+        String sgain = nextTok(tail);
+        String sc0   = nextTok(tail);
+        String sc1   = nextTok(tail);
+        String sc2   = nextTok(tail);
+        String sc3   = nextTok(tail);
+        if (sc3.length() == 0) return "ERR,DEVICE,FORMAT";
+        long addr = strtol(saddr.c_str(), nullptr, 0);  // hex/dec tolerant
+        int  gain = sgain.toInt();
+        if (addr < 0x48 || addr > 0x4B) return "ERR,DEVICE,BADADDR";
+        if (gain < 0 || gain > 5)       return "ERR,DEVICE,BADGAIN";
+        tmp.i2cAddr    = (uint8_t)addr;
+        tmp.cfgA       = (int16_t)gain;
+        tmp.outVpin[0] = (uint8_t)sc0.toInt();
+        tmp.outVpin[1] = (uint8_t)sc1.toInt();
+        tmp.outVpin[2] = (uint8_t)sc2.toInt();
+        tmp.outVpin[3] = (uint8_t)sc3.toInt();
+        tmp.intervalMs = 500;   // 4-channel cycle takes ~40ms, so 500ms is
+                                // comfortably above the read time
+    } else if (type == DEV_BH1750) {
+        // <addr>,<vLux>
+        //   addr: 0x23 (ADDR=GND, default) or 0x5C (ADDR=VCC)
+        String saddr = nextTok(tail);
+        String svLux = nextTok(tail);
+        if (svLux.length() == 0) return "ERR,DEVICE,FORMAT";
+        long addr = strtol(saddr.c_str(), nullptr, 0);
+        if (addr != 0x23 && addr != 0x5C) return "ERR,DEVICE,BADADDR";
+        tmp.i2cAddr    = (uint8_t)addr;
+        tmp.outVpin[0] = (uint8_t)svLux.toInt();
+        tmp.outVpin[3] = 0;  // "init done" marker — cleared, driver
+                             // sends the mode byte on first service tick
+        tmp.intervalMs = 200;   // >= 120ms integration window
+    } else if (type == DEV_MAX31855) {
+        // <sck>,<miso>,<cs>,<vTempC10>,<vColdJunctionC10>,<vFault>
+        //   SoftSPI on user-chosen GPIO pins so it can't collide with
+        //   the LoRa hardware SPI bus. Reject pins the isPinSafe()
+        //   guard forbids (radio SPI, power rails, boot straps).
+        String ssck  = nextTok(tail);
+        String smiso = nextTok(tail);
+        String scs   = nextTok(tail);
+        String svT   = nextTok(tail);
+        String svCJ  = nextTok(tail);
+        String svF   = nextTok(tail);
+        if (svF.length() == 0) return "ERR,DEVICE,FORMAT";
+        int sck  = ssck.toInt();
+        int miso = smiso.toInt();
+        int cs   = scs.toInt();
+        if (!isPinSafe(sck) || !isPinSafe(miso) || !isPinSafe(cs))
+            return "ERR,DEVICE,PIN_UNSAFE";
+        if (sck == miso || sck == cs || miso == cs)
+            return "ERR,DEVICE,PIN_DUP";
+        tmp.pin1       = (uint8_t)sck;
+        tmp.pin2       = (uint8_t)miso;
+        tmp.i2cAddr    = (uint8_t)cs;
+        tmp.outVpin[0] = (uint8_t)svT.toInt();
+        tmp.outVpin[1] = (uint8_t)svCJ.toInt();
+        tmp.outVpin[2] = (uint8_t)svF.toInt();
+        tmp.intervalMs = 1000;   // thermocouples have slow physical
+                                 // response; 1 Hz plenty
     } else if (type == DEV_VL53L0X || type == DEV_VL53L1X) {
         // <vDistMm>   no address config (default 0x29; multi-sensor
         // support needs XSHUT pin handling which v1 doesn't do).
@@ -5931,8 +6376,25 @@ String processDeviceCommand(const String& args) {
             if (tmp.outVpin[1]) setVpinSigned(tmp.outVpin[1], true);
             if (tmp.outVpin[2]) setVpinSigned(tmp.outVpin[2], true);
             break;
+        case DEV_ADS1115:
+            // All 4 channels published as signed int16 millivolts. Even
+            // in single-ended mode a slightly-negative reading is
+            // common near ground (small offset error) and Compare
+            // thresholds like "> -100 mV" must sign-extend correctly.
+            if (tmp.outVpin[0]) setVpinSigned(tmp.outVpin[0], true);
+            if (tmp.outVpin[1]) setVpinSigned(tmp.outVpin[1], true);
+            if (tmp.outVpin[2]) setVpinSigned(tmp.outVpin[2], true);
+            if (tmp.outVpin[3]) setVpinSigned(tmp.outVpin[3], true);
+            break;
+        case DEV_MAX31855:
+            // temp_c and cold_junction_c are signed °C×10; fault is a
+            // 3-bit mask (unsigned) so it stays in the default branch.
+            if (tmp.outVpin[0]) setVpinSigned(tmp.outVpin[0], true);
+            if (tmp.outVpin[1]) setVpinSigned(tmp.outVpin[1], true);
+            break;
         default:
-            // HCSR04, VL53*, OLED, I2C_READ — naturally unsigned.
+            // HCSR04, VL53*, OLED, I2C_READ, SGP41 (raw uint counts),
+            // BH1750 (lux, unsigned) — naturally unsigned.
             break;
     }
     return String("OK,DEVICE,ADD,") + typeStr;

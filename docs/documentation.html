@@ -4962,6 +4962,22 @@ OK: BATT_CFG cleared, using Pins.h defaults
       <td>I2C 0x2C (fixed) &mdash; current GY-273 silicon (QST)</td>
       <td><code>mag_x</code>, <code>mag_y</code>, <code>mag_z</code>, <code>magnitude</code> (200 Hz ODR, 8G)</td>
       <td><code>DEVICE,ADD,QMC5883P,&lt;vX&gt;,&lt;vY&gt;,&lt;vZ&gt;,&lt;vMag&gt;</code></td></tr>
+  <tr><td><strong>SGP41</strong> (new v4.6)</td>
+      <td>I2C 0x59 (fixed) &mdash; Sensirion VOC + NOx gas sensor</td>
+      <td><code>sraw_voc</code>, <code>sraw_nox</code> (uint16 raw counts &mdash; bigger = cleaner air; ~10 s heater warmup on power-up; optional RH/T compensation vpins improve accuracy)</td>
+      <td><code>DEVICE,ADD,SGP41,&lt;vVoc&gt;,&lt;vNox&gt;[,&lt;vRhSrc&gt;,&lt;vTSrc&gt;]</code></td></tr>
+  <tr><td><strong>ADS1115</strong> (new v4.6)</td>
+      <td>I2C 0x48-0x4B &mdash; TI 16-bit 4-channel single-ended ADC</td>
+      <td><code>ch0</code>, <code>ch1</code>, <code>ch2</code>, <code>ch3</code> (signed int16 <strong>millivolts</strong> &mdash; firmware does raw&rarr;mV using PGA gain 0..5; typical use 1 = &plusmn;4.096 V range for 3.3 V rigs)</td>
+      <td><code>DEVICE,ADD,ADS1115,&lt;addr&gt;,&lt;gainCode&gt;,&lt;vCh0&gt;,&lt;vCh1&gt;,&lt;vCh2&gt;,&lt;vCh3&gt;</code></td></tr>
+  <tr><td><strong>BH1750</strong> (new v4.6)</td>
+      <td>I2C 0x23 (ADDR=GND, default) or 0x5C (ADDR=VCC) &mdash; ROHM ambient light</td>
+      <td><code>lux</code> (uint16 lux directly &mdash; firmware divides raw counts by 1.2; Continuous H-Resolution Mode, 1 lx res, 120 ms integration &rarr; ~8 Hz max)</td>
+      <td><code>DEVICE,ADD,BH1750,&lt;addr&gt;,&lt;vLux&gt;</code></td></tr>
+  <tr><td><strong>MAX31855</strong> (new v4.6)</td>
+      <td>SoftSPI on 3 user-picked GPIO pins &mdash; Maxim K-type thermocouple. Never uses the LoRa SPI bus.</td>
+      <td><code>temp_c</code> signed &deg;C&times;10, <code>cold_junction_c</code> signed &deg;C&times;10, <code>fault</code> bitmask (bit0=OC, bit1=SCG, bit2=SCV). Range -270..+1372 &deg;C, 0.25 &deg;C native LSB (published at 0.1 &deg;C for consistency with other temp vpins).</td>
+      <td><code>DEVICE,ADD,MAX31855,&lt;sck&gt;,&lt;miso&gt;,&lt;cs&gt;,&lt;vTempC10&gt;,&lt;vColdJunctionC10&gt;,&lt;vFault&gt;</code></td></tr>
   <tr><td><strong>OLED Display</strong></td>
       <td>I2C 0x3C / 0x3D &mdash; output-only, consumes upstream vpins</td>
       <td>(no output ports &mdash; leaf node)</td>
@@ -4995,6 +5011,25 @@ OK: BATT_CFG cleared, using Pins.h defaults
 <h2>Appendix &mdash; Release Changelog</h2>
 
 <p>Per-release summary of what changed since the previous version. Most recent at the top.</p>
+
+<div class="info-box green" style="margin:0 0 16px 0;">
+  <p style="color:var(--white); font-weight:700; font-size:1.05em; margin-bottom:8px;">v4.6</p>
+  <ul style="color:var(--dim); padding-left:22px; margin:0;">
+    <li><strong>Four new peripheral blocks &mdash; all run entirely on the node.</strong> No gateway-side math required for any of them:
+      <ul style="color:var(--dim); padding-left:22px; margin:6px 0;">
+        <li><strong>SGP41</strong> &mdash; Sensirion VOC + NOx gas sensor (I2C 0x59). Publishes raw SRAW counts (uint16 &mdash; bigger = cleaner air). 10-second heater warmup gated in firmware. Optional humidity/temp compensation source vpins improve accuracy (leave 0 for default 50%RH / 25 &deg;C). Full Sensirion Gas Index Algorithm is not bundled this pass &mdash; SRAW is the raw output that the algorithm consumes.</li>
+        <li><strong>ADS1115</strong> &mdash; TI 16-bit 4-channel I2C ADC (0x48-0x4B). Publishes signed <strong>millivolts</strong> per channel &mdash; firmware does the raw-count &rarr; mV conversion using the selected PGA gain (0=&plusmn;6.144V, 1=&plusmn;4.096V, 2=&plusmn;2.048V, 3=&plusmn;1.024V, 4=&plusmn;0.512V, 5=&plusmn;0.256V). Downstream <code>Compare "ch0 > 3300"</code> reads intuitively as 3.3 V. Gain is settable from the block config dialog before deploy. Enables any 0-5 V transducer, pressure sensor, current shunt, load cell (with amp), etc.</li>
+        <li><strong>BH1750</strong> &mdash; ROHM ambient light sensor (I2C 0x23 or 0x5C). Firmware divides raw counts by 1.2 so the vpin reads <strong>directly in lux</strong> (0-54612 range). Continuous H-Resolution Mode: 1 lx resolution, 120 ms integration. Non-blocking init (mode byte sent on first service tick, then just reads).</li>
+        <li><strong>MAX31855</strong> &mdash; Maxim K-type thermocouple (SoftSPI on user-picked GPIOs). <strong>SoftSPI deliberately &mdash; will NEVER collide with the LoRa hardware SPI bus.</strong> Any 3 unused GPIOs (SCK / MISO / CS) can carry it; firmware's <code>isPinSafe()</code> gate rejects LoRa SPI pins, power rails, and strap pins at deploy time. Range -270 to +1372 &deg;C with 0.25 &deg;C native LSB (published at 0.1 &deg;C for consistency with other temp vpins). Cold-junction temp + fault-bit register (OC/SCG/SCV) also exposed so you can wire a downstream Compare to detect thermocouple disconnection.</li>
+      </ul>
+    </li>
+    <li><strong>Shared per-port Storage Vpin retargeting for all 4 new blocks.</strong> Every output port on each new peripheral can be independently pinned to a V200-V231 slot via a Storage Vpin block wired to that port &mdash; same pattern as BME280 temp/humidity or QMC5883P mag_x/y/z/magnitude. Ports you don't wire fall back to scratch (invisible to the dashboard) as before.</li>
+    <li><strong>Firmware refactor: shared driver-implementation for OLED + SETPOINT MSG + BEACON MSG {Vnnn} substitution</strong> already landed in v4.5 &mdash; the 4 new peripherals piggy-back on the same infrastructure (their vpin values are what {V201} etc. resolve to when a broadcast fires).</li>
+    <li><strong>Broadcast Msg <em>attach_vpin</em> now accepts comma-separated multiple vpins</strong> ("201,202" or "201, V202" or even "V201,v236"). Emits <code>V201={V201} V202={V202}</code> suffix on both edges so a single broadcast carries multi-channel diagnostic telemetry &mdash; edge-triggered, zero-polling. Compile-time error names the offender if the input is non-empty but all-invalid (typo protection). Practical limit: 2 storage vpins per broadcast at the current 32-char firmware buffer.</li>
+    <li><strong>Gateway receive parser auto-populates <code>sensor_data[&lt;from&gt;:&lt;n&gt;]</code></strong> when a received broadcast contains <code>V&lt;n&gt;=&lt;value&gt;</code> tokens. Storage format is the <code>[(timestamp, value), ...]</code> list matching what SDATA/POLL populate &mdash; the web dashboard, Sensors tab, and Logic Builder Sensor Read all see the value the moment the broadcast arrives. Bare int overwrite bug that caused "no data" widgets is fixed.</li>
+    <li><strong>Widget picker labels always show the raw <code>ED53:201</code></strong> alongside any friendly SENSOR_METADATA name. Fixes "friendly name only" mode from v4.5 that made non-peripheral vpins (Delta output, Compare output, storage vpins) invisible in the dropdown.</li>
+  </ul>
+</div>
 
 <div class="info-box green" style="margin:0 0 16px 0;">
   <p style="color:var(--white); font-weight:700; font-size:1.05em; margin-bottom:8px;">v4.5</p>
