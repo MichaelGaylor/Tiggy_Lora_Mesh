@@ -869,12 +869,26 @@
 #ifndef STORAGE_VPIN_RESERVED
   #define STORAGE_VPIN_RESERVED 32    // Slots backed by EEPROM (RAM array size)
 #endif
-// Default to 8 vpins. POLL responses are now auto-split into multiple
-// SDATA packets when the total would overflow the LoRa packet size
-// limit, so the previous 4-vpin cap (chosen defensively when the
-// firmware emitted everything in one packet) no longer applies.
-// Bump per-board via #define before this point if you need more or
-// fewer for a specific board.
+// Default to all 32 storage vpins (200-231). Gateway hardcodes this
+// full range at automation_engine.py:_STORAGE_VPIN_MAX so any Storage
+// Vpin block placed on the canvas can target any of the 32 slots —
+// keeping VIRTUAL_PINS at a smaller subset made V208-V231 functional
+// but silently invisible on POLL / dashboard (RAM slot exists, but
+// pin not in sensor list → SDATA doesn't include it → widget shows
+// no data). POLL responses auto-split into multiple SDATA packets
+// when the total would overflow the LoRa packet size limit, so the
+// larger list is safe on the air.
+//
+// Airtime cost is zero unless AUTOPOLL is on: POLL is user-triggered,
+// and edge-triggered broadcast telemetry (attach_vpin V<n>=<value>)
+// bypasses POLL entirely. Nodes on tight duty budgets can trim the
+// list at runtime with the SENSOR command.
+//
+// Per-board override still works — #define VIRTUAL_PINS before this
+// point in a board's #elif block to shrink or omit for weird cases.
 #ifndef VIRTUAL_PINS
-  #define VIRTUAL_PINS          { 200, 201, 202, 203, 204, 205, 206, 207 }
+  #define VIRTUAL_PINS          { 200, 201, 202, 203, 204, 205, 206, 207, \
+                                   208, 209, 210, 211, 212, 213, 214, 215, \
+                                   216, 217, 218, 219, 220, 221, 222, 223, \
+                                   224, 225, 226, 227, 228, 229, 230, 231 }
 #endif

@@ -65,8 +65,15 @@ bool oledAvailable = false;
 // bumped PIN_CONFIG_VERSION forces a reload from DEFAULT_*_PINS on next boot.
 #define EEPROM_GPIO_ADDR 1700
 #define EEPROM_SOLAR_ADDR 430
-#define MAX_RELAY_PINS_CFG 16   // was 8 — fits physical relays + 8 storage vpins
-#define MAX_SENSOR_PINS_CFG 16  // was 6 — fits physical sensors + 8 storage vpins
+#define MAX_RELAY_PINS_CFG 48   // was 16 (8 phys + 8 vpins) — bumped to fit
+                                // ALL 32 storage vpins after VIRTUAL_PINS
+                                // was widened to 200-231. Max physical
+                                // relay pin count across boards is 4 (TM1)
+                                // so 48 gives ~12 slots of headroom.
+#define MAX_SENSOR_PINS_CFG 48  // was 16 (7 phys + 8 vpins) — bumped same
+                                // reason. Max physical sensor pin count
+                                // is 7 (TM1) so 48 gives ~9 slots of
+                                // headroom for future board additions.
 #define SOLAR_OLED_WAKE_MS 10000
 
 #ifndef DEBUG
@@ -1931,8 +1938,9 @@ void serviceDevices() {
 }
 
 // Append VIRTUAL_PINS (defined per-board or globally in Pins.h, default
-// {200..207}) onto BOTH relayPins[] and sensorPins[], skipping duplicates
-// and respecting MAX_*_CFG. Called from loadConfig on first boot and after
+// {200..231} = all 32 storage vpins) onto BOTH relayPins[] and
+// sensorPins[], skipping duplicates and respecting MAX_*_CFG. Called
+// from loadConfig on first boot and after
 // a PIN_CONFIG_VERSION bump so storage vpins always show up in the gateway's
 // pin dropdowns and POLL responses, without each board having to remember
 // to list them in its DEFAULT_*_PINS. Boards that don't want vpins can
@@ -9318,7 +9326,14 @@ void loadConfig() {
 
     // Pin config version check — if version doesn't match, reset to defaults
     // This catches old EEPROM with wrong pins (e.g., 19/20/33 on ESP32-S3)
-    #define PIN_CONFIG_VERSION 10 // v10: TiggyOpenMesh V1 sensor list += GPIO40 (J9
+    #define PIN_CONFIG_VERSION 11 // v11: VIRTUAL_PINS widened from 200-207 to
+                                  //      200-231 (all 32 storage vpins auto-added
+                                  //      to the sensor + relay lists so gateway's
+                                  //      hardcoded 200-231 range is honoured on
+                                  //      POLL / SDATA — v208-v231 were functional
+                                  //      but silently invisible). MAX_*_CFG bumped
+                                  //      16 -> 48 to fit ALL vpins + physical pins.
+                                  //      v10: TiggyOpenMesh V1 sensor list += GPIO40 (J9
                                   //      direct-connect for DHT22/DS18B20/HC-SR04);
                                   //      v9: storage vpins 200-207 baked into DEFAULT_*_PINS,
                                   //      MAX_*_CFG bumped 8/6 -> 16/16, EEPROM addr 410 -> 1700
