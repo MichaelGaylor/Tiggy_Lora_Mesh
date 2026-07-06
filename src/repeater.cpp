@@ -8851,10 +8851,24 @@ void loadPlcTables() {
     // to 0 so checkDeltas() treats the first post-boot tick as an
     // initialisation (snapshot current value, emit nothing) rather
     // than trying to compute a delta against a stale snapshot.
+    //
+    // Also re-apply setVpinSigned for the DELTA output. This was the
+    // culprit behind post-reboot spurious "pressent/clear" fires on
+    // Rule 2: scratchSignedMask is RAM-only and starts at 0 on boot,
+    // so a DELTA rule restored from EEPROM had an UNSIGNED output
+    // until manually re-added via DELTA,ADD (which calls setVpinSigned).
+    // Negative deltas (e.g. magnitude briefly dips) bit-cast to a
+    // huge uint16 (~65000), tripping any downstream `Compare > N`
+    // for reasonable N. Storage vpin signed bits are already persisted
+    // to EEPROM (storageSignedMask lives at EEPROM_SIGNED_MASK_ADDR),
+    // but scratch bits aren't — so we restore them from primitive
+    // config here. Only DELTA is affected because it's the only
+    // scratch-writing primitive that emits signed values today.
     for (int i = 0; i < MAX_DELTA_RULES; i++) {
         if (!deltaRules[i].active) continue;
         deltaRules[i].lastValue = 0;
         deltaRules[i].lastTime  = 0;
+        setVpinSigned(deltaRules[i].outputVpin, true);
     }
     debugPrint("PLC: loaded tables from EEPROM");
     // Recompute fingerprint from freshly-loaded tables. Do NOT bump
