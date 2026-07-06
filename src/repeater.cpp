@@ -1218,12 +1218,12 @@ static bool qmc5883pRead(uint8_t addr, int16_t* xRaw, int16_t* yRaw,
 
 // ─── SGP41 driver (Sensirion VOC + NOx gas sensor, I2C 0x59) ─────
 // Publishes RAW SRAW counts (uint16, "measure_raw_signals" command
-// output). SRAW is inversely proportional to gas concentration — bigger
-// number = cleaner air. The polished 0-500 VOC / NOx Index requires
-// Sensirion's Gas Index Algorithm which is ~1000 lines of vendor
-// state-machine code; deliberately out of scope this pass. Users who
-// need the index can either post-process SRAW on the gateway OR flash
-// a later firmware release that bundles the algorithm on-node.
+// output) plus the fully-processed VOC Index and NOx Index (0-500)
+// via Sensirion's on-node Gas Index Algorithm — vendored under
+// src/vendor/gas_index_algorithm/ (BSD-3-Clause). Raw SRAW alone
+// is inversely proportional to gas concentration; the index adds
+// dual-timescale baseline tracking + sigmoid mapping so 100 ≈
+// "typical for this space", 200+ = elevated, 400+ = strong event.
 //
 // State machine on the chip:
 //   1. Boot / power-on: 10 s minimum warm-up before the heater is
@@ -1234,12 +1234,41 @@ static bool qmc5883pRead(uint8_t addr, int16_t* xRaw, int16_t* yRaw,
 //      compensation args (2 bytes each, big-endian, with CRC-8 byte
 //      after each pair). Response: 6 bytes (SRAW_VOC hi/lo/crc,
 //      SRAW_NOX hi/lo/crc) after ~50ms. Cadence 1 Hz.
+//   3. Gas Index Algorithm: Sensirion's dual-timescale adaptive
+//      baseline + sigmoid mapping. Runs entirely on-node — no
+//      gateway processing needed. Fresh state on every reboot
+//      (no EEPROM persistence per user's flash-wear stance);
+//      algorithm's own 45 s initial-blackout output = 0 until the
+//      running stats stabilise, then converges over ~12 h to the
+//      "typical clean air for THIS space" baseline.
 //
 // Compensation source: optional Device.cfgB / cfgC hold (vpin+1) for
 // humidity / temperature source vpins. 0 = disabled → default 50%RH,
 // 25°C. When set, we read the source vpins each service tick and pack
 // them into the command args.
+// Vendored under lib/GasIndexAlgorithm — PlatformIO auto-compiles
+// lib/*/*.c so no build_src_filter changes needed. BSD-3-Clause.
+#include <sensirion_gas_index_algorithm.h>
+
 static uint32_t sgp41BootMs = 0;   // millis() when first serviced
+
+// Per-instance algorithm state. A single node realistically has ONE
+// SGP41 (fixed I2C 0x59), but MAX_SGP41_INSTANCES=2 gives a bit of
+// headroom for future multi-bus expansion. If a user tries to install
+// >2 SGP41s the DEVICE,ADD parser rejects with ERR,DEVICE,SGP41_FULL
+// so we never walk off the array (verifier issue #1).
+//
+// Slot-to-instance mapping table (indexed by Device slot 0..MAX_DEVICES-1;
+// value -1 = "no algo instance allocated to this slot"). Populated
+// lazily on first service tick of each SGP41 slot so the algorithm
+// doesn't allocate state for slots that get parsed but fail I2C
+// probe later.
+#define MAX_SGP41_INSTANCES 2
+static GasIndexAlgorithmParams sgp41VocState[MAX_SGP41_INSTANCES];
+static GasIndexAlgorithmParams sgp41NoxState[MAX_SGP41_INSTANCES];
+static int8_t sgp41SlotToInst[MAX_DEVICES] = {
+    -1,-1,-1,-1,-1,-1,-1,-1   // MAX_DEVICES = 8
+};
 static uint8_t sgp41Crc8(const uint8_t* d, size_t n) {
     // Sensirion CRC-8: poly 0x31, init 0xFF, no reflection
     uint8_t crc = 0xFF;
@@ -1249,11 +1278,18 @@ static uint8_t sgp41Crc8(const uint8_t* d, size_t n) {
     }
     return crc;
 }
+// Read the SGP41. `warmingOut` reports the 10 s heater-conditioning
+// window so callers can gate downstream processing — critical for the
+// gas-index algorithm which must NOT be fed the sVoc=sNox=0 zeros
+// returned during conditioning (Sensirion app note explicitly forbids
+// zero-poisoning the adaptive baseline).
 static bool sgp41Read(uint16_t rhCounts, uint16_t tCounts,
-                     uint16_t* sRawVoc, uint16_t* sRawNox) {
+                     uint16_t* sRawVoc, uint16_t* sRawNox,
+                     bool* warmingOut = nullptr) {
     // Choose conditioning (warm-up) vs measurement based on
     // 10-second boot gate.
     bool warming = (sgp41BootMs == 0) || ((millis() - sgp41BootMs) < 10000);
+    if (warmingOut) *warmingOut = warming;
     uint16_t cmd = warming ? 0x2612 : 0x2619;
     // Command + 6 arg bytes (RH hi/lo/crc, T hi/lo/crc)
     uint8_t buf[8];
@@ -1669,10 +1705,50 @@ void serviceDevices() {
                     tCounts = (uint16_t)((uint32_t)(tC + 45) * 65535 / 175);
                 }
                 uint16_t sVoc = 0, sNox = 0;
-                if (sgp41Read(rhCounts, tCounts, &sVoc, &sNox)) {
-                    if (d.outVpin[0]) setVpinValue(d.outVpin[0], sVoc);
-                    if (d.outVpin[1]) setVpinValue(d.outVpin[1], sNox);
+                bool warming = false;
+                if (!sgp41Read(rhCounts, tCounts, &sVoc, &sNox, &warming)) {
+                    break;  // I2C failure — leave vpins stale, retry next tick
                 }
+                // Raw SRAW: publish immediately (users watching for
+                // spike detection want unfiltered data).
+                if (d.outVpin[0]) setVpinValue(d.outVpin[0], sVoc);
+                if (d.outVpin[1]) setVpinValue(d.outVpin[1], sNox);
+                // Gas Index Algorithm: NEVER feed the algorithm
+                // during the 10 s heater conditioning window —
+                // sVoc/sNox come back as 0 during that phase and
+                // zero-poisoning the adaptive baseline corrupts the
+                // whole session (Sensirion app note explicitly
+                // forbids this — verifier issue #2 fix).
+                if (warming) break;
+                // Lazy-allocate an algorithm instance for this slot
+                // on first non-warming tick.
+                int8_t inst = sgp41SlotToInst[i];
+                if (inst < 0) {
+                    for (int8_t j = 0; j < MAX_SGP41_INSTANCES; j++) {
+                        // Check if this instance is claimed by another
+                        // slot. sgp41SlotToInst is initialised to -1
+                        // globally so unused instances have no owner.
+                        bool taken = false;
+                        for (int k = 0; k < MAX_DEVICES; k++) {
+                            if (sgp41SlotToInst[k] == j) { taken = true; break; }
+                        }
+                        if (!taken) { inst = j; sgp41SlotToInst[i] = j; break; }
+                    }
+                    if (inst < 0) break;  // shouldn't happen — parser caps
+                    GasIndexAlgorithm_init_with_sampling_interval(
+                        &sgp41VocState[inst],
+                        GasIndexAlgorithm_ALGORITHM_TYPE_VOC, 1.0f);
+                    GasIndexAlgorithm_init_with_sampling_interval(
+                        &sgp41NoxState[inst],
+                        GasIndexAlgorithm_ALGORITHM_TYPE_NOX, 1.0f);
+                }
+                int32_t vocIdx = 0, noxIdx = 0;
+                GasIndexAlgorithm_process(&sgp41VocState[inst],
+                                          (int32_t)sVoc, &vocIdx);
+                GasIndexAlgorithm_process(&sgp41NoxState[inst],
+                                          (int32_t)sNox, &noxIdx);
+                if (d.outVpin[2]) setVpinValue(d.outVpin[2], (uint16_t)vocIdx);
+                if (d.outVpin[3]) setVpinValue(d.outVpin[3], (uint16_t)noxIdx);
                 break;
             }
             case DEV_ADS1115: {
@@ -6203,18 +6279,42 @@ String processDeviceCommand(const String& args) {
         tmp.outVpin[3] = (uint8_t)svMag.toInt();
         tmp.intervalMs = 500;
     } else if (type == DEV_SGP41) {
-        // <vSrawVoc>,<vSrawNox>[,<vRhSrc>,<vTSrc>]
+        // <vSrawVoc>,<vSrawNox>[,<vRhSrc>,<vTSrc>[,<vVocIdx>,<vNoxIdx>]]
         //   Fixed I2C addr 0x59, no addr arg. Optional RH/T source
         //   vpins for compensation — stored as vpin+1 so 0 encodes
-        //   "no source, use defaults 50%RH / 25°C".
-        String svVoc = nextTok(tail);
-        String svNox = nextTok(tail);
-        String svRh  = nextTok(tail);
-        String svT   = nextTok(tail);
+        //   "no source, use defaults 50%RH / 25°C". Optional VOC/NOx
+        //   Index vpins (Sensirion Gas Index Algorithm output, 0-500).
+        //   Missing index vpins → 0 → service loop skips publishing
+        //   but still runs the algorithm for continuity, so a later
+        //   ADD update can start publishing without a warmup gap.
+        //   Backward compat: old gateway emitting the 4-token form
+        //   → svVocIdx/svNoxIdx empty → outVpin[2]/[3] default 0 →
+        //   identical to pre-index behaviour (verifier confirmed).
+        String svVoc    = nextTok(tail);
+        String svNox    = nextTok(tail);
+        String svRh     = nextTok(tail);
+        String svT      = nextTok(tail);
+        String svVocIdx = nextTok(tail);
+        String svNoxIdx = nextTok(tail);
         if (svNox.length() == 0) return "ERR,DEVICE,FORMAT";
+        // Enforce the algorithm-instance cap BEFORE claiming a Device
+        // slot — otherwise a 3rd SGP41 ADD would take a Device slot,
+        // then the service loop's lazy-alloc would silently no-op
+        // (verifier issue #1). We count currently-active SGP41 slots
+        // instead of the mapping table because activation happens
+        // AFTER this parser succeeds.
+        int existingSgp41 = 0;
+        for (int i = 0; i < MAX_DEVICES; i++) {
+            if (devices[i].active && devices[i].type == DEV_SGP41) existingSgp41++;
+        }
+        if (existingSgp41 >= MAX_SGP41_INSTANCES) {
+            return "ERR,DEVICE,SGP41_FULL";
+        }
         tmp.i2cAddr    = 0x59;
         tmp.outVpin[0] = (uint8_t)svVoc.toInt();
         tmp.outVpin[1] = (uint8_t)svNox.toInt();
+        tmp.outVpin[2] = svVocIdx.length() ? (uint8_t)svVocIdx.toInt() : 0;
+        tmp.outVpin[3] = svNoxIdx.length() ? (uint8_t)svNoxIdx.toInt() : 0;
         // vpin+1 encoding: user typed 0 (or omitted) → we store 0 = disabled
         int rhSrc = svRh.length() ? svRh.toInt() : 0;
         int tSrc  = svT.length()  ? svT.toInt()  : 0;

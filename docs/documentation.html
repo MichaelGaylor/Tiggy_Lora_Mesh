@@ -4962,10 +4962,10 @@ OK: BATT_CFG cleared, using Pins.h defaults
       <td>I2C 0x2C (fixed) &mdash; current GY-273 silicon (QST)</td>
       <td><code>mag_x</code>, <code>mag_y</code>, <code>mag_z</code>, <code>magnitude</code> (200 Hz ODR, 8G)</td>
       <td><code>DEVICE,ADD,QMC5883P,&lt;vX&gt;,&lt;vY&gt;,&lt;vZ&gt;,&lt;vMag&gt;</code></td></tr>
-  <tr><td><strong>SGP41</strong> (new v4.6)</td>
+  <tr><td><strong>SGP41</strong> (new v4.6, extended v4.6.1)</td>
       <td>I2C 0x59 (fixed) &mdash; Sensirion VOC + NOx gas sensor</td>
-      <td><code>sraw_voc</code>, <code>sraw_nox</code> (uint16 raw counts &mdash; bigger = cleaner air; ~10 s heater warmup on power-up; optional RH/T compensation vpins improve accuracy)</td>
-      <td><code>DEVICE,ADD,SGP41,&lt;vVoc&gt;,&lt;vNox&gt;[,&lt;vRhSrc&gt;,&lt;vTSrc&gt;]</code></td></tr>
+      <td><code>sraw_voc</code>, <code>sraw_nox</code> (uint16 raw counts &mdash; bigger = cleaner air; ~10 s heater warmup on power-up); <code>voc_index</code>, <code>nox_index</code> (0-500 Sensirion Gas Index, computed on-node via BSD-3 vendored algorithm &mdash; 100 &asymp; typical for this space after ~12 h learning). Optional RH/T compensation vpins improve accuracy.</td>
+      <td><code>DEVICE,ADD,SGP41,&lt;vVoc&gt;,&lt;vNox&gt;[,&lt;vRhSrc&gt;,&lt;vTSrc&gt;[,&lt;vVocIdx&gt;,&lt;vNoxIdx&gt;]]</code></td></tr>
   <tr><td><strong>ADS1115</strong> (new v4.6)</td>
       <td>I2C 0x48-0x4B &mdash; TI 16-bit 4-channel single-ended ADC</td>
       <td><code>ch0</code>, <code>ch1</code>, <code>ch2</code>, <code>ch3</code> (signed int16 <strong>millivolts</strong> &mdash; firmware does raw&rarr;mV using PGA gain 0..5; typical use 1 = &plusmn;4.096 V range for 3.3 V rigs)</td>
