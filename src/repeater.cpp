@@ -459,6 +459,52 @@ void loadSignedMask() {
     if (storageSignedMask == 0xFFFFFFFFu) storageSignedMask = 0;
 }
 
+// ─── First-real-sample tracking (vpin live bitmap) ─────────────────
+// One bit per vpin, sized to cover both the storage range (V200-V231)
+// and the scratch range (V232-V255) with room to spare. A vpin bit
+// stays 0 from boot until the FIRST time setVpinValue() writes to it —
+// so consumers can distinguish "this vpin's writer has actually
+// published a value" from "the vpin still holds its post-boot default
+// zero because nothing has ever written to it yet".
+//
+// Why this exists: every edge-triggered PLC primitive (DELTA / COUNTER
+// / LATCH / SETPOINT) memsets its edge-detect state to 0 at install
+// time. Without the live bitmap, the primitive can't tell the
+// difference between "I've seen the input at 0" and "I've never
+// observed the input at all" — so when the input's real source
+// (peripheral driver, upstream primitive) comes online AFTER the rule
+// was installed and publishes its first non-zero reading, the primitive
+// misreads that first sample as a huge rising edge and phantom-fires.
+//
+// The bitmap is RAM-only. Boot always starts every vpin unmarked, and
+// peripherals re-mark them as they publish — so post-reboot behaviour
+// is identical to a fresh deploy (which is what we want: rules
+// re-baseline against post-boot publisher output, not stale-from-EEPROM
+// ghosts of what the vpin used to hold).
+//
+// Deliberately hooked at setVpinValue() (not the two inner setters)
+// so EEPROM restore paths that call setStorageVpin() / setScratchVpin()
+// directly during loadPlcTables() etc. do NOT mark vpins live.
+static uint8_t vpinLiveBits[32] = {0};   // 256 bits = one per vpin id
+
+static inline void markVpinLive(int pin) {
+    if (pin < 0 || pin > 255) return;
+    if (!isStorageVpin(pin) && !isScratchVpin(pin)) return;
+    vpinLiveBits[pin >> 3] |= (uint8_t)(1u << (pin & 7));
+}
+
+// True iff `pin` names a vpin (storage or scratch) that has never
+// received a setVpinValue() write since boot. Returns false for
+// physical pins, for the `pin == 0` "unwired" sentinel, and for any
+// vpin the runtime has already written to. Consumers gate on this to
+// avoid mistaking a memset-zero default for a real "input reads 0"
+// observation.
+static inline bool isPinAwaitingFirstSample(uint8_t pin) {
+    if (pin == 0) return false;
+    if (!isStorageVpin(pin) && !isScratchVpin(pin)) return false;
+    return (vpinLiveBits[pin >> 3] & (uint8_t)(1u << (pin & 7))) == 0;
+}
+
 // Unified vpin set/get. Callers don't need to know which range they're
 // hitting; this dispatches based on pin number. Anything outside both
 // ranges is a no-op for set, returns 0 for get — that's safe because the
@@ -466,6 +512,10 @@ void loadSignedMask() {
 inline void setVpinValue(int pin, uint16_t val) {
     if (isScratchVpin(pin))       setScratchVpin(pin, val);
     else if (isStorageVpin(pin))  setStorageVpin(pin, val);
+    else return;
+    // Mark the vpin live so any downstream primitive gated on
+    // isPinAwaitingFirstSample() knows a real publisher has spoken.
+    markVpinLive(pin);
 }
 
 inline uint16_t getVpinValue(int pin) {
@@ -2395,6 +2445,13 @@ struct SetpointRule {
 };
 SetpointRule setpoints[MAX_SETPOINTS];
 
+// Bootstrap prime flag — false while the rule's sensor vpin has never
+// been published to (isPinAwaitingFirstSample()). Once the first real
+// reading lands, checkSetpoints() flips this true and normal edge
+// evaluation begins. See vpinLiveBits[] block above for the full
+// rationale.
+static bool setpointPrimed[MAX_SETPOINTS] = {false};
+
 // ─── Counter primitive (PLC-style) ──────────────────────────
 // Modifies a target storage virtual pin on rising-edge events at up to
 // four trigger inputs (up, down, preset, reset). Persistence is FREE
@@ -2434,6 +2491,12 @@ struct CounterRule {
     int lastReset;
 };
 CounterRule counters[MAX_COUNTERS];
+
+// Bootstrap prime flag — false while ANY of this counter's four wired
+// inputs (up / down / preset / reset) hasn't been published to yet.
+// All-inputs-live is the correct invariant: a partial prime risks a
+// phantom reset firing on the tick resetPin first goes live.
+static bool counterPrimed[MAX_COUNTERS] = {false};
 
 // ─── Solar Mode ─────────────────────────────────────────────
 // Deep low-power mode: OLED off, BLE deinited, ESP32 light-sleeps
@@ -3864,6 +3927,7 @@ String processSetpointCommand(const String& args) {
     if (slot < 0) return "ERR,SETPOINT,FULL";
 
     memset(&setpoints[slot], 0, sizeof(SetpointRule));
+    setpointPrimed[slot] = false;   // Wait for first real sensor sample
     setpoints[slot].active = true;
     setpoints[slot].sensorPin = sensorPin;
     setpoints[slot].op = op;
@@ -4220,6 +4284,24 @@ void checkSetpoints() {
         // protects against ringing on the rising side; falling-edge
         // and hold-latch clearance should evaluate every tick.
 
+        // Bootstrap prime gate — wait until the sensor vpin has been
+        // published to before evaluating the threshold condition.
+        // Otherwise, op/threshold shapes that satisfy at V=0 (LT/LE
+        // with positive threshold, EQ 0, NE ≠0, any rule with non-zero
+        // scaleOffset) rising-edge fire immediately on install with no
+        // real sensor event — user sees a phantom "alarm" broadcast
+        // the moment they deploy the rule. Sits AFTER the hold-revert
+        // block so timing-driven state stays evaluated every tick.
+        if (!setpointPrimed[i]) {
+            if (isPinAwaitingFirstSample(setpoints[i].sensorPin)) continue;
+            // First real sample seen. Prime the flag but do NOT
+            // evaluate this tick — the next tick will run the normal
+            // condition check against the real reading, and any rising
+            // edge from that point onward is a genuine user event.
+            setpointPrimed[i] = true;
+            continue;
+        }
+
         int rawValue = readSensorPin(setpoints[i].sensorPin);
         float scaled;
         bool condition = evalSetpointCondition(setpoints[i], rawValue, scaled);
@@ -4394,6 +4476,35 @@ void checkCounters() {
         CounterRule& c = counters[i];
         if (!c.active) continue;
 
+        // Bootstrap prime gate — wait until EVERY wired input has been
+        // published to at least once. The counterEdgeRose() helper
+        // treats `lastVal == 0` as both "uninitialised" AND "last
+        // observed value was 0" — indistinguishable before priming.
+        // Without this: a phantom edge on presetPin/resetPin can
+        // silently load / zero a persisted counter value the user
+        // cares about (gate-open tally, water-pulse totaliser, etc.)
+        // the first time any of the four input drivers publishes.
+        //
+        // All-inputs-live rather than per-input is deliberate: a
+        // partial prime would risk a phantom reset firing on the tick
+        // resetPin first goes live even though upPin has been sitting
+        // stable at a real value for a while.
+        if (!counterPrimed[i]) {
+            if (isPinAwaitingFirstSample(c.upPin))     continue;
+            if (isPinAwaitingFirstSample(c.downPin))   continue;
+            if (isPinAwaitingFirstSample(c.presetPin)) continue;
+            if (isPinAwaitingFirstSample(c.resetPin))  continue;
+            // Snapshot current inputs into edge-detect state so the
+            // NEXT real transition (not the memset→first-value jump)
+            // is what counterEdgeRose sees as a rising edge.
+            c.lastUp     = (c.upPin > 0)     ? readSensorPin(c.upPin)     : 0;
+            c.lastDown   = (c.downPin > 0)   ? readSensorPin(c.downPin)   : 0;
+            c.lastPreset = (c.presetPin > 0) ? readSensorPin(c.presetPin) : 0;
+            c.lastReset  = (c.resetPin > 0)  ? readSensorPin(c.resetPin)  : 0;
+            counterPrimed[i] = true;
+            continue;
+        }
+
         // Up / down deltas — mode gates whether the input is honoured.
         // UP   (mode 0): only upPin matters.
         // DOWN (mode 1): only downPin matters.
@@ -4521,6 +4632,7 @@ String processCounterCommand(const String& args) {
         if (slot < 0) return "ERR,COUNTER,FULL";
 
         memset(&counters[slot], 0, sizeof(CounterRule));
+        counterPrimed[slot] = false;   // Wait until every wired input is live
         counters[slot].active      = true;
         counters[slot].targetVpin  = (uint8_t)vpin;
         counters[slot].mode        = mode;
@@ -4761,10 +4873,33 @@ struct LatchRule {
 };
 LatchRule latchRules[MAX_LATCH_RULES];
 
+// Bootstrap prime flag — false while either the set input or the reset
+// input hasn't been published to yet. Reset-priority means a phantom-
+// hot reset would silently clobber a persisted latch state, so we
+// wait for BOTH inputs to be live before enabling edge detection.
+static bool latchPrimed[MAX_LATCH_RULES] = {false};
+
 void checkLatches() {
     for (int i = 0; i < MAX_LATCH_RULES; i++) {
         LatchRule& r = latchRules[i];
         if (!r.active) continue;
+
+        // Bootstrap prime gate — wait until BOTH inputs are live
+        // before enabling edge detection. Same shape of bug as the
+        // COUNTER gate above; here the failure mode is even nastier
+        // because reset-priority means a phantom-hot reset silently
+        // clobbers a persisted output (an alarm-latched-since-last-
+        // acknowledge state going from 1 back to 0 with no user
+        // action).
+        if (!latchPrimed[i]) {
+            if (isPinAwaitingFirstSample(r.setPin))   continue;
+            if (isPinAwaitingFirstSample(r.resetPin)) continue;
+            r.lastSet   = (r.setPin > 0)   ? readSensorPin(r.setPin)   : 0;
+            r.lastReset = (r.resetPin > 0) ? readSensorPin(r.resetPin) : 0;
+            latchPrimed[i] = true;
+            continue;
+        }
+
         int sNow = (r.setPin > 0)   ? readSensorPin(r.setPin)   : 0;
         int rNow = (r.resetPin > 0) ? readSensorPin(r.resetPin) : 0;
         bool sRose = (r.lastSet   <  (int)r.setThresh)   && (sNow >= (int)r.setThresh);
@@ -4845,6 +4980,7 @@ String processLatchCommand(const String& args) {
         if (slot < 0) return "ERR,LATCH,FULL";
 
         memset(&latchRules[slot], 0, sizeof(LatchRule));
+        latchPrimed[slot] = false;   // Wait for both set + reset to go live
         latchRules[slot].active      = true;
         latchRules[slot].outputVpin  = (uint8_t)vpin;
         latchRules[slot].setPin      = (uint8_t)vals[1];
@@ -5034,17 +5170,41 @@ struct DeltaRule {
 };
 DeltaRule deltaRules[MAX_DELTA_RULES];
 
+// Bootstrap prime flag — false while the DELTA rule's input vpin has
+// never been published to. checkDeltas() waits, snapshots lastValue
+// from the first real reading, THEN starts emitting deltas. This
+// closes the race where a DELTA rule installed before its peripheral
+// comes online captures V=0 as its baseline and then interprets the
+// first real reading (e.g. QMC5883P magnitude ~2000) as a huge
+// spurious edge. See vpinLiveBits[] block for the full rationale.
+static bool deltaPrimed[MAX_DELTA_RULES] = {false};
+
 void checkDeltas() {
     uint32_t now = millis();
     for (int i = 0; i < MAX_DELTA_RULES; i++) {
         DeltaRule& r = deltaRules[i];
         if (!r.active) continue;
-        // First tick after install / reboot: snapshot current, emit
-        // nothing. The output vpin keeps its last value (or 0 on
-        // fresh boot) until the second tick.
-        if (r.lastTime == 0) {
+        // Bootstrap prime gate — wait until the input vpin's real
+        // publisher (peripheral driver / upstream primitive) has
+        // written to it at least once. Only then is the "current
+        // reading" meaningful enough to snapshot as our baseline.
+        //
+        // Without this: a DELTA rule installed BEFORE its input
+        // peripheral comes online would snapshot V=0 on the first
+        // tick, then on the second tick see the peripheral's first
+        // real reading (e.g. QMC5883P ambient magnitude ~2000) and
+        // interpret 0→2000 as a huge spurious delta — enough to trip
+        // any downstream Compare/SETPOINT threshold and broadcast a
+        // phantom "pressent"/"clear" pair with no physical event.
+        //
+        // For unwired inputs (inputPin == 0) or hardware pins,
+        // isPinAwaitingFirstSample() returns false so we prime
+        // immediately — nothing to wait for.
+        if (!deltaPrimed[i]) {
+            if (isPinAwaitingFirstSample(r.inputPin)) continue;
             r.lastValue = (int16_t)((r.inputPin > 0) ? readSensorPin(r.inputPin) : 0);
             r.lastTime  = now;
+            deltaPrimed[i] = true;
             continue;
         }
         if ((uint32_t)(now - r.lastTime) < r.periodMs) continue;
@@ -5130,12 +5290,15 @@ String processDeltaCommand(const String& args) {
         if (slot < 0) return "ERR,DELTA,FULL";
 
         memset(&deltaRules[slot], 0, sizeof(DeltaRule));
+        deltaPrimed[slot] = false;   // Wait for input publisher's first sample
         deltaRules[slot].active     = true;
         deltaRules[slot].outputVpin = (uint8_t)vpin;
         deltaRules[slot].inputPin   = (uint8_t)inPin;
         deltaRules[slot].periodMs   = (uint16_t)period;
-        // lastValue / lastTime stay 0 — checkDeltas will initialise
-        // on its first tick after install.
+        // lastValue / lastTime stay 0 — checkDeltas will prime on the
+        // first tick AFTER the input pin has been published to, not
+        // just the first tick after install (which would race the
+        // peripheral driver on rules deployed before their sensor).
 
         // DELTA output is inherently signed (can be negative when the
         // input is decreasing). Mark the vpin signed so any downstream
@@ -6143,6 +6306,66 @@ static void applyDeviceSignedFlags(const Device& d) {
     }
 }
 
+// Companion to applyDeviceSignedFlags — called on every DEVICE,ADD
+// (install path) so that if the operator swaps a peripheral on a vpin
+// currently consumed by an active PLC primitive, that primitive
+// re-baselines against the new peripheral's first published reading
+// instead of firing a phantom edge on the difference between the
+// previous peripheral's last cached value and the new one's first.
+//
+// Example scenario this covers:
+//   1. DHT22 was on V201 publishing ~200 (20°C)
+//   2. User's DELTA,ADD,V202,V201,2000 primed at lastValue=200
+//   3. User swaps DHT22 for BME280 on V201 — BME280's first read is
+//      say 195 (19.5°C). Without this reset the DELTA would emit
+//      delta=-5 (tiny, safe) — but if the two sensors have different
+//      calibration/units the difference could easily trip a threshold.
+//
+// The sweep clears BOTH sides of the live-vpin ↔ primed-primitive
+// invariant: the vpin's live bit AND every primed[] flag on
+// primitives whose input matches. The primitive then re-primes on the
+// next `checkX()` tick after the peripheral publishes its first real
+// reading.
+static void applyDevicePrimeReset(const Device& d) {
+    if (!d.active) return;
+    // outVpin[] is a fixed 4-slot array on the Device struct; unused
+    // slots hold 0 (the "unwired" sentinel). Iterate all 4 and skip
+    // zeros — future peripherals with more outputs would just extend
+    // the array size here in lock-step with the struct.
+    for (int k = 0; k < 4; k++) {
+        uint8_t vp = d.outVpin[k];
+        if (vp == 0) continue;
+        // Clear the vpin's live bit — next setVpinValue() from the
+        // peripheral driver will re-mark it and let consumers prime.
+        if (isStorageVpin(vp) || isScratchVpin(vp)) {
+            vpinLiveBits[vp >> 3] &= (uint8_t)~(1u << (vp & 7));
+        }
+        // Un-prime any primitive currently reading from this vpin.
+        for (int j = 0; j < MAX_SETPOINTS; j++) {
+            if (setpoints[j].active && setpoints[j].sensorPin == vp)
+                setpointPrimed[j] = false;
+        }
+        for (int j = 0; j < MAX_COUNTERS; j++) {
+            if (!counters[j].active) continue;
+            if (counters[j].upPin     == vp ||
+                counters[j].downPin   == vp ||
+                counters[j].presetPin == vp ||
+                counters[j].resetPin  == vp)
+                counterPrimed[j] = false;
+        }
+        for (int j = 0; j < MAX_LATCH_RULES; j++) {
+            if (!latchRules[j].active) continue;
+            if (latchRules[j].setPin   == vp ||
+                latchRules[j].resetPin == vp)
+                latchPrimed[j] = false;
+        }
+        for (int j = 0; j < MAX_DELTA_RULES; j++) {
+            if (deltaRules[j].active && deltaRules[j].inputPin == vp)
+                deltaPrimed[j] = false;
+        }
+    }
+}
+
 String processDeviceCommand(const String& args) {
     String act = args;
     int comma = act.indexOf(',');
@@ -6566,6 +6789,12 @@ String processDeviceCommand(const String& args) {
     // the runtime sees 65436 not -100). Delegated to a shared helper
     // so loadDevicesTable() re-applies the same flags after reboot.
     applyDeviceSignedFlags(devices[slot]);
+    // Un-prime any PLC primitive currently consuming this peripheral's
+    // output vpins so a hot-swap (e.g. DHT22 → BME280 on the same
+    // vpin) doesn't fire a phantom edge against the previous
+    // peripheral's cached last-value. See applyDevicePrimeReset for
+    // the full rationale.
+    applyDevicePrimeReset(devices[slot]);
     return String("OK,DEVICE,ADD,") + typeStr;
 }
 
@@ -8846,12 +9075,22 @@ void loadPlcTables() {
     // runtime fields (triggered, lastFired, edge-detect lastUp, …)
     // because we dump the whole struct. After load, reset the runtime
     // fields so a mid-action reboot doesn't replay stale state.
+    // Runtime-only bootstrap prime flags — always reset to false on
+    // restore so every restored rule re-baselines against post-boot
+    // publisher output (peripherals will re-populate vpinLiveBits as
+    // they come online after loadDevicesTable). This is what makes
+    // Scenario C (reboot after successful deploy) silent: without it,
+    // the DELTA/COUNTER/LATCH/SETPOINT prime flags would still be
+    // "true" from before the reboot but based on stale-from-EEPROM
+    // last-values that no longer match the peripheral's post-boot
+    // state.
     for (int i = 0; i < MAX_SETPOINTS; i++) {
         if (!setpoints[i].active) continue;
         setpoints[i].triggered    = false;
         setpoints[i].holdLatched  = false;
         setpoints[i].lastFired    = 0;
         setpoints[i].debounceStart = 0;
+        setpointPrimed[i] = false;
     }
     for (int i = 0; i < MAX_COUNTERS; i++) {
         if (!counters[i].active) continue;
@@ -8859,11 +9098,13 @@ void loadPlcTables() {
         counters[i].lastDown   = 0;
         counters[i].lastPreset = 0;
         counters[i].lastReset  = 0;
+        counterPrimed[i] = false;
     }
     for (int i = 0; i < MAX_LATCH_RULES; i++) {
         if (!latchRules[i].active) continue;
         latchRules[i].lastSet   = 0;
         latchRules[i].lastReset = 0;
+        latchPrimed[i] = false;
     }
     // Logic / Scale primitives have no runtime-state fields in their
     // struct — they re-evaluate from current inputs every tick.
@@ -8898,6 +9139,7 @@ void loadPlcTables() {
         if (!deltaRules[i].active) continue;
         deltaRules[i].lastValue = 0;
         deltaRules[i].lastTime  = 0;
+        deltaPrimed[i] = false;
         setVpinSigned(deltaRules[i].outputVpin, true);
     }
     debugPrint("PLC: loaded tables from EEPROM");
