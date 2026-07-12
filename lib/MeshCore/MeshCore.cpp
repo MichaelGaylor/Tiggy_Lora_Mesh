@@ -337,13 +337,24 @@ void MeshCore::_doTransmit(uint16_t dest, const String& payload) {
 
 // Local-originated traffic (messages, heartbeats, setpoints) — capped at 7%
 void MeshCore::transmitPacket(uint16_t dest, const String& payload) {
-    if (!canTransmit()) return;
+    if (!canTransmit()) {
+        // Silent drop is a visibility bug — see ED53 blackout incident.
+        // Bump a counter so the HEALTH tick in repeater.cpp can emit
+        // TX_THROTTLED with the delta once per minute. Saturate rather
+        // than wrap so a runaway loop stays at UINT16_MAX (65535 drops
+        // in an hour is already pathological).
+        if (txThrottledLocal < 0xFFFF) txThrottledLocal++;
+        return;
+    }
     _doTransmit(dest, payload);
 }
 
 // Forwarded traffic (repeating others' packets) — full 10% budget
 void MeshCore::forwardPacket(uint16_t dest, const String& payload) {
-    if (!canForward()) return;
+    if (!canForward()) {
+        if (txThrottledFwd < 0xFFFF) txThrottledFwd++;
+        return;
+    }
     _doTransmit(dest, payload);
 }
 
@@ -361,7 +372,13 @@ void MeshCore::smartForward(const String& from, const String& to,
                             const String& route, const String& enc,
                             uint16_t rawDest) {
     if (ttl <= 1) return;
-    if (!canForward()) return;  // Forwarding uses full 10% budget — never starved by local TX
+    if (!canForward()) {
+        // Same silent-drop bug that hits forwardPacket() — bump the
+        // forward counter so smartForward drops surface in TX_THROTTLED
+        // instead of vanishing into the mesh.
+        if (txThrottledFwd < 0xFFFF) txThrottledFwd++;
+        return;
+    }
 
     String newRoute = route + "," + String(localID);
     String payload = from + "," + to + "," + mid + "," +
@@ -674,6 +691,35 @@ uint8_t MeshCore::hbIntervalMultiplier() {
     if (t < 227000UL) return 4;   // 70-90 % — slow more
     return 8;                     // ≥ 90 % — maximum backoff
 }
+
+// ─── Duty-cycle visibility getters ────────────────────────────
+// Apply the same lazy hour-rollover as canTransmit()/canForward()
+// so a caller polling only these getters (i.e. the HEALTH tick that
+// runs before any TX in the new hour) still sees a fresh value.
+unsigned long MeshCore::txMsThisHour() {
+    unsigned long now = millis();
+    if (now - hourStart > 3600000UL) {
+        hourStart = now;
+        txTimeThisHour = 0;
+    }
+    return txTimeThisHour;
+}
+
+uint8_t MeshCore::dcPercent() {
+    // Percent of the 7 % LOCAL cap (252 000 ms). We deliberately key
+    // off the local cap, not the 10 % legal cap, because canTransmit()
+    // starts silently dropping at the local cap — that is the line
+    // operators need to see approach. Clamped so a brief overshoot
+    // (fwd traffic beyond 252 s while local is unblocked to 360 s)
+    // reads as 100, not 142.
+    unsigned long t = txMsThisHour();
+    unsigned long pct = (t * 100UL) / 252000UL;
+    if (pct > 100UL) pct = 100UL;
+    return (uint8_t)pct;
+}
+
+uint16_t MeshCore::txThrottledLocalCount() { return txThrottledLocal; }
+uint16_t MeshCore::txThrottledFwdCount()   { return txThrottledFwd;   }
 
 void MeshCore::sendHeartbeat() {
     String hb = "HB," + String(localID);

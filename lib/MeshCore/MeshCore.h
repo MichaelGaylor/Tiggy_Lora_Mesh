@@ -234,6 +234,23 @@ public:
     // to the cap blowing. Returns 1 (no backoff) on a quiet mesh.
     uint8_t hbIntervalMultiplier();
 
+    // ─── Duty Cycle Visibility ───────────────────────────────
+    // Live TX time this hour (ms), with lazy hour-rollover applied so
+    // callers always see a fresh, monotonically-sensible value. Callers
+    // MUST use these getters — the raw txTimeThisHour field stays private
+    // because it is only correct AFTER the 3600 s rollover check runs.
+    unsigned long txMsThisHour();
+    // Duty cycle as a % of the 7 % LOCAL cap (252 s). Clamped 0..100.
+    // Used by HEALTH so operators see 0-100 mapped against the throttle
+    // line the node actually starts dropping at, not the 10 % legal cap.
+    uint8_t       dcPercent();
+    // Monotonic-per-boot counter of packets dropped by canTransmit() /
+    // canForward(). Split into two so the HEALTH tick can tell whether
+    // the drop was our own traffic or repeat traffic. Clears on reboot;
+    // the gateway HEALTH tick tracks deltas against its own snapshot.
+    uint16_t      txThrottledLocalCount();
+    uint16_t      txThrottledFwdCount();
+
     // Runtime spreading factor (may differ from compile-time LORA_SF after a CFG change)
     uint8_t currentSF = LORA_SF;
 
@@ -305,6 +322,14 @@ private:
     unsigned long txTimeThisHour = 0;
     unsigned long hourStart = 0;
     unsigned long lastTxDuration = 0;
+    // Throttle-drop counters — bumped from inside transmitPacket() /
+    // forwardPacket() / smartForward() when canTransmit()/canForward()
+    // gates return false. Exposed via txThrottledLocalCount() /
+    // txThrottledFwdCount() so the gateway HEALTH tick can compare
+    // deltas without exposing the raw gate. Not persisted — a boot
+    // cleanly resets both to zero.
+    uint16_t txThrottledLocal = 0;
+    uint16_t txThrottledFwd   = 0;
 
     // Jitter state for pending forwards
     struct PendingForward {

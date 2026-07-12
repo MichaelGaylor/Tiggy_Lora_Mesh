@@ -10199,18 +10199,49 @@ void loop() {
     // Heap + radio health monitor (every 60s)
     static unsigned long lastHeapCheck = 0;
     static uint32_t lastRxSnapshot = 0;
+    // Duty-cycle throttle-drop snapshots — deltas emitted via TX_THROTTLED
+    // once per HEALTH tick (natural 60 s rate limit, uses the same queued
+    // bleSend path so it never bursts the NimBLE async TX queue). Split
+    // into local vs forward so operators can tell whether a saturated
+    // mesh is choking this node's own traffic or its repeat traffic.
+    static uint16_t lastThrottledLocal = 0;
+    static uint16_t lastThrottledFwd   = 0;
     if (millis() - lastHeapCheck > 60000) {
         lastHeapCheck = millis();
         uint32_t freeHeap = ESP.getFreeHeap();
         bool rxChanged = (mesh.packetsReceived != lastRxSnapshot);
-        // Use bleSend so HEALTH goes through serial queue (not blocked by full buffer)
+        uint8_t  dcPct   = mesh.dcPercent();
+        uint8_t  hbMult  = mesh.hbIntervalMultiplier();
+        uint16_t curLocalDrops = mesh.txThrottledLocalCount();
+        uint16_t curFwdDrops   = mesh.txThrottledFwdCount();
+        uint16_t deltaLocal = (uint16_t)(curLocalDrops - lastThrottledLocal);
+        uint16_t deltaFwd   = (uint16_t)(curFwdDrops   - lastThrottledFwd);
+        // Use bleSend so HEALTH goes through serial queue (not blocked by full buffer).
+        // New fields (dc=, hbMult=) appended at the END so any old parser
+        // reading fixed prefixes is unaffected — the gateway parser is
+        // whitespace-tokenised k=v so it picks them up transparently.
+        // Total length target < 128 chars: current + " dc=NN hbMult=N" ≈ +14.
         bleSend("HEALTH: heap=" + String(freeHeap) +
                    " rx=" + String(mesh.packetsReceived) +
                    " fwd=" + String(mesh.packetsForwarded) +
                    " rxFlag=" + String(mesh.rxFlag) +
                    " nodes=" + String(mesh.knownCount) +
                    " routes=" + String(mesh.routingTable.size()) +
-                   " rxNew=" + String(rxChanged ? "YES" : "STALL"));
+                   " rxNew=" + String(rxChanged ? "YES" : "STALL") +
+                   " dc=" + String(dcPct) +
+                   " hbMult=" + String(hbMult));
+        // Only emit TX_THROTTLED when there's actually a delta — nodes
+        // running clean stay silent. dc=<current> is included so the
+        // gateway can drive its alert badge off the throttle line even
+        // if it happens to arrive before HEALTH is parsed.
+        if (deltaLocal > 0 || deltaFwd > 0) {
+            String tt = "TX_THROTTLED dc=" + String(dcPct);
+            if (deltaLocal > 0) tt += " local=" + String(deltaLocal);
+            if (deltaFwd   > 0) tt += " fwd="   + String(deltaFwd);
+            bleSend(tt);
+        }
+        lastThrottledLocal = curLocalDrops;
+        lastThrottledFwd   = curFwdDrops;
         lastRxSnapshot = mesh.packetsReceived;
         // Radio stall recovery — if no new RX for 2 minutes, reinit radio
         static int stallCount = 0;
