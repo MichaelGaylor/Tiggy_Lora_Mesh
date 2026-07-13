@@ -757,5 +757,19 @@ void MeshCore::sendHeartbeat() {
     hb += ",G";
     if (stateGeneration < 0x10) hb += "0";
     hb += String(stateGeneration, HEX);
+    // v4.6: remote-node duty-cycle visibility. D<pct> is the current dcPercent()
+    // so the gateway can render a DC badge on the discovered-node card and
+    // derive the same hbIntervalMultiplier() bucket without a separate tag.
+    hb += ",D" + String(dcPercent());
+    // v4.6: transient THROTTLED signal for remote nodes. X<delta> is the count
+    // of canTransmit() drops since the last successful HB TX. Gateway lights
+    // the transient THROTTLED badge whenever delta >= 1; badge auto-clears
+    // after 60s of no X. Anchor advance is guarded by canTransmit() below.
+    uint16_t txDropNow = txThrottledLocalCount();
+    uint16_t txDelta   = (uint16_t)(txDropNow - txThrottledLocalLastHb);
+    if (txDelta > 0) hb += ",X" + String(txDelta);
+    // Only consume the delta if this HB will actually leave the antenna —
+    // otherwise the drops encoded above are lost on a canTransmit() reject.
+    if (canTransmit()) txThrottledLocalLastHb = txDropNow;
     transmitPacket(0xFFFF, hb);
 }

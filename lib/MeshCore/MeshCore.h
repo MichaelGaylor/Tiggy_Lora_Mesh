@@ -330,6 +330,10 @@ private:
     // cleanly resets both to zero.
     uint16_t txThrottledLocal = 0;
     uint16_t txThrottledFwd   = 0;
+    // Anchor for X-tag delta accounting on HB TX. Only advances when the
+    // outgoing HB actually ships (canTransmit()==true) so drop episodes
+    // encoded inside a dropped HB are re-reported on the next successful HB.
+    uint16_t txThrottledLocalLastHb = 0;
 
     // Jitter state for pending forwards
     struct PendingForward {

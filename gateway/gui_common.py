@@ -159,6 +159,13 @@ class HexPacketParser:
             # further deploys to that node. See the plan file for design
             # details.
             result["hb_state_gen"] = None
+            # v4.6: remote-node duty-cycle visibility. D<pct> is the emitting
+            # node's live dcPercent() (0-100). None = legacy firmware.
+            result["hb_dc_pct"] = None
+            # v4.6: transient THROTTLED signal. X<delta> is the count of
+            # canTransmit()-drops since the last successful HB TX from that
+            # node. None = legacy firmware; 0 never emitted (tag omitted).
+            result["hb_throttled_delta"] = None
             positional_idx = 0
             for tok in hb_parts:
                 if positional_idx == 0:
@@ -194,6 +201,26 @@ class HexPacketParser:
                     # start with G (e.g. gateway-mode 'G' flag).
                     try:
                         result["hb_state_gen"] = int(tok[1:], 16)
+                    except ValueError:
+                        pass
+                elif tok.startswith("D") and len(tok) > 1 and tok[1:].isdigit():
+                    # D<pct> — remote-node duty-cycle percent (0-100). Strict
+                    # isdigit() so a board code starting with 'D' (none today
+                    # but future-proofed) can't be swallowed.
+                    try:
+                        pct = int(tok[1:])
+                        if 0 <= pct <= 100:
+                            result["hb_dc_pct"] = pct
+                    except ValueError:
+                        pass
+                elif tok.startswith("X") and len(tok) > 1 and tok[1:].isdigit():
+                    # X<delta> — canTransmit() drop count since last successful
+                    # HB TX. XS3 board code starts with 'X' but fails isdigit()
+                    # on "S3" so it can't collide here.
+                    try:
+                        n = int(tok[1:])
+                        if 0 <= n <= 65535:
+                            result["hb_throttled_delta"] = n
                     except ValueError:
                         pass
                 elif positional_idx == 1:
