@@ -3002,6 +3002,67 @@ bool radioChannelFree() {
     return rssi < -120.0;
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// SF-derived inter-packet delays for multi-packet response bursts.
+//
+// The gateway auto-ACKs every unicast SDATA at MeshCore.cpp:667-669.
+// Each ACK is ~30 bytes → ~185 ms airtime at SF9/BW125. The sender's
+// radio.standby()-before-TX call at repeater.cpp:2988 aborts any RX in
+// progress, so the sender's own ACK reception is fine, BUT the *gateway*
+// is deaf during its own ACK TX. If the sender's next packet starts
+// while the gateway is still radiating that ACK, the gateway misses the
+// entire preamble → packet lost.
+//
+// The old delay(50) between multi-packet response packets was ~4× too
+// short. The result was deterministic every-other-packet loss ("P2/P4
+// always drops" on POLL SDATA, "rule 0 body always drops" on SETPOINT,
+// LIST). Uncovered by workflow investigation on 2026-07-13.
+//
+// Both helpers derive from radio.getTimeOnAir() so they auto-scale if
+// the operator changes SF at runtime (via CFGGO/SF path). Clamped to
+// sane bounds so a mis-configured SF can't produce absurd delays.
+// ─────────────────────────────────────────────────────────────────────────
+
+uint16_t unicastInterPacketDelayMs() {
+    // Unicast responses (POLL SDATA): wait for the receiver's ACK to
+    // clear the air. ACK payload ~30 bytes + 200 ms margin for RX
+    // processing + CAD + startReceive re-arm at the receiver.
+    uint32_t ackAirMs = radio.getTimeOnAir(30) / 1000UL;
+    uint32_t total    = ackAirMs + 200UL;
+    if (total < 100UL)  total = 100UL;
+    if (total > 3000UL) total = 3000UL;   // SF12 upper-bound clamp
+    return (uint16_t)total;
+}
+
+uint16_t broadcastInterPacketDelayMs() {
+    // Broadcast responses (SETPOINT,LIST etc.): peers run smartForward
+    // with random(50, FWD_JITTER_MAX=500) ms jitter, then TX the full
+    // packet. Size arg 240 approximates the worst-case on-air size after
+    // AES-GCM + hex + mesh framing (the LoRa frame budget is 249 B, see
+    // MeshCore.cpp:314). Sender must wait for the entire jitter+forward-
+    // airtime tail to clear before its next packet.
+    uint32_t pktAirMs = radio.getTimeOnAir(240) / 1000UL;
+    uint32_t total    = pktAirMs + 500UL /*FWD_JITTER_MAX*/ + 200UL;
+    if (total < 400UL)  total = 400UL;
+    if (total > 6000UL) total = 6000UL;   // SF12 upper-bound clamp
+    return (uint16_t)total;
+}
+
+// delay() variant that pets the hardware WDT while sleeping. Required
+// whenever cumulative delays inside a single loop() iteration approach
+// the 30 s swWdt timeout — e.g. paginated LIST bursts (BEACON,LIST with
+// MAX_BEACON_RULES=8 at SF12 can sum ~51 s of delays; the swWdt would
+// bite in the middle and ESP.restart()). Splits the wait into 1 s
+// chunks and calls timerWrite(swWdt, 0) between each.
+void delayFeedWdt(uint32_t ms) {
+    while (ms > 0UL) {
+        uint32_t chunk = (ms > 1000UL) ? 1000UL : ms;
+        delay(chunk);
+        if (swWdt) timerWrite(swWdt, 0);
+        ms -= chunk;
+    }
+}
+
 #ifndef RADIO_TCXO_VOLTAGE
 #define RADIO_TCXO_VOLTAGE 0
 #endif
@@ -4041,7 +4102,12 @@ void handleSetpointCmd(const String& args, const String& from) {
         bleSend(countMsg);
         if (from != "LOCAL") {
             notifyBeaconEvent(countMsg, true);
-            delay(50);
+            // Broadcast inter-packet delay — must exceed peer smartForward
+            // jitter + forward-airtime tail, else rule 0 body gets dropped
+            // by TX-during-RX collision at any listener. Old delay(50) was
+            // way too short. delayFeedWdt pets the swWdt so a long list
+            // burst can't trip the 30 s hardware watchdog.
+            delayFeedWdt(broadcastInterPacketDelayMs());
         }
         const char* ops[] = {"GT", "LT", "EQ", "GE", "LE", "NE"};
         for (int i = 0; i < MAX_SETPOINTS; i++) {
@@ -4068,7 +4134,9 @@ void handleSetpointCmd(const String& args, const String& from) {
             bleSend(line);
             if (from != "LOCAL") {
                 notifyBeaconEvent(line, true);
-                delay(50);
+                // Same SF-derived broadcast spacing as after the header
+                // above — see comment there and the helper definition.
+                delayFeedWdt(broadcastInterPacketDelayMs());
             }
         }
         bleSend("SETPOINTS,END");
@@ -6221,7 +6289,12 @@ String processBeaconBinary(const uint8_t* data, size_t len, const String& from) 
             return "ERR,BCN,BIN,DEPLOY," + String(count) + "," + resp;
         }
         count++;
-        if (from != "LOCAL") delay(50);
+        // Same SF-derived broadcast spacing — was delay(50), which the
+        // pre-existing comment above (~line 6265) already noted was there
+        // to avoid "channel-busy collisions drop replies". 50 ms was too
+        // short to accomplish that. delayFeedWdt keeps the 30 s swWdt
+        // alive across a long deploy at high SF.
+        if (from != "LOCAL") delayFeedWdt(broadcastInterPacketDelayMs());
     }
     return "OK,BCN,DEPLOY," + String(count);
 }
@@ -7105,7 +7178,13 @@ void handleCmd(const String& from, const String& cmdBody) {
                                  String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
                 mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
                 bleSend(sdata);
-                if (p + 1 < parts) delay(50);  // brief pause between packets
+                // Inter-packet delay MUST exceed receiver ACK airtime, else
+                // every-other packet gets deterministically dropped by the
+                // gateway's TX-during-RX radio.standby() abort. See helper
+                // definition for full explanation. Old value delay(50) was
+                // ~4× too short at SF9. delayFeedWdt pets the swWdt so a
+                // long burst can't trip the 30 s hardware watchdog.
+                if (p + 1 < parts) delayFeedWdt(unicastInterPacketDelayMs());
             }
         }
     }
@@ -7357,7 +7436,13 @@ void handleCmd(const String& from, const String& cmdBody) {
                 bleSend(countMsg);
                 if (from != "LOCAL") {
                     notifyBeaconEvent(countMsg, true);
-                    delay(50);
+                    // Same SF-derived broadcast spacing as SETPOINT,LIST —
+                    // see helper definition. Was delay(50), which caused
+                    // deterministic mid-burst packet loss. delayFeedWdt
+                    // pets the 30 s swWdt so a MAX_BEACON_RULES=8 list at
+                    // SF12 (~51 s of cumulative delay) can't trigger a
+                    // hardware-timer reset mid-burst.
+                    delayFeedWdt(broadcastInterPacketDelayMs());
                 }
                 for (int i = 0; i < MAX_BEACON_RULES; i++) {
                     if (!beaconRules[i].active) continue;
@@ -7365,7 +7450,7 @@ void handleCmd(const String& from, const String& cmdBody) {
                     bleSend(ruleMsg);
                     if (from != "LOCAL") {
                         notifyBeaconEvent(ruleMsg, true);
-                        delay(50);
+                        delayFeedWdt(broadcastInterPacketDelayMs());
                     }
                 }
                 bleSend("BEACONS,END");
