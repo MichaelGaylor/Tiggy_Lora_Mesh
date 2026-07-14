@@ -315,6 +315,14 @@ void MeshCore::_doTransmit(uint16_t dest, const String& payload) {
         // Cannot fit. Caller should have sized it themselves. Drop and
         // log over USB so the developer notices. (Don't transmit a
         // half-truncated packet — receiver couldn't decrypt it.)
+        //
+        // Note: gateway.py used to suppress this line to DEBUG level
+        // because it doesn't start with "PKT,". gateway_gui.py surfaces
+        // it explicitly via a _CONSOLE_DELIVERY_KEYWORDS entry so the
+        // operator can see when their POLL/SETPOINT chunks are being
+        // dropped by the size cap (this is how the P2/P4 mystery was
+        // finally caught — every over-cap payload emits this line but
+        // it was invisible above the console filter).
         Serial.print("TX_DROP: payload ");
         Serial.print(plen);
         Serial.print("B > frame budget ");

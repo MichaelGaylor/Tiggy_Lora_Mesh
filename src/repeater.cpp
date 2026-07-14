@@ -3928,7 +3928,11 @@ String processSetpointCommand(const String& args) {
 
     memset(&setpoints[slot], 0, sizeof(SetpointRule));
     setpointPrimed[slot] = false;   // Wait for first real sensor sample
-    setpoints[slot].active = true;
+    // NOTE: `active = true` is deliberately deferred to after all validation
+    // succeeds (just above savePlcTables() below). Setting it here would leave
+    // a garbage half-populated slot marked active on any early-return path
+    // (EMPTYMSG, MSGTOOLONG, PULSE_FORMAT, BADPULSE, FORMAT, BADTARGET), which
+    // then shows up in SETPOINT,LIST with actionType=0 and empty message.
     setpoints[slot].sensorPin = sensorPin;
     setpoints[slot].op = op;
     setpoints[slot].threshold = threshold;
@@ -4005,6 +4009,9 @@ String processSetpointCommand(const String& args) {
         resp += ",HOLD," + String(holdMs);
     if (leavePin > 0 && leavePulseMs > 0)
         resp += ",LEAVE,PULSE," + String(leavePin) + "," + String(leavePulseMs);
+    // All validation passed and the action-specific fields are populated —
+    // NOW mark the slot active so it starts firing / appears in LIST.
+    setpoints[slot].active = true;
     savePlcTables();
     return resp;
 }
@@ -6955,13 +6962,18 @@ void handleCmd(const String& from, const String& cmdBody) {
             refreshDeadman(pin, val);  // Start/refresh dead-man's switch
         }
         mesh.cmdsExecuted++;
-        // Send response back over mesh
-        String mid = mesh.generateMsgID();
-        String rsp = "CMD,RSP," + String(pin) + "," + String(val);
-        String hex = mesh.encryptMsg(rsp);
-        String payload = String(mesh.localID) + "," + from + "," + mid + "," +
-                         String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
-        mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+        // Send response back over mesh — but skip the mesh unicast when the
+        // caller is LOCAL (USB/BLE origin), because strtol("LOCAL",…,16)==0
+        // would produce a stray unicast to node 0x0000. sendMeshReply() has
+        // the same guard at line 6888; these inline branches were missing it.
+        if (from != "LOCAL") {
+            String mid = mesh.generateMsgID();
+            String rsp = "CMD,RSP," + String(pin) + "," + String(val);
+            String hex = mesh.encryptMsg(rsp);
+            String payload = String(mesh.localID) + "," + from + "," + mid + "," +
+                             String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+            mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+        }
         bleSend("CMD,RSP," + String(pin) + "," + String(val));
     }
     else if (action == "GET") {
@@ -6972,12 +6984,15 @@ void handleCmd(const String& from, const String& cmdBody) {
         }
         int value = readSensorPin(pin);
         mesh.cmdsExecuted++;
-        String mid = mesh.generateMsgID();
-        String rsp = "CMD,RSP," + String(pin) + "," + String(value);
-        String hex = mesh.encryptMsg(rsp);
-        String payload = String(mesh.localID) + "," + from + "," + mid + "," +
-                         String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
-        mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+        // Same LOCAL guard as SET above — see comment there for rationale.
+        if (from != "LOCAL") {
+            String mid = mesh.generateMsgID();
+            String rsp = "CMD,RSP," + String(pin) + "," + String(value);
+            String hex = mesh.encryptMsg(rsp);
+            String payload = String(mesh.localID) + "," + from + "," + mid + "," +
+                             String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+            mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+        }
         bleSend("CMD,RSP," + String(pin) + "," + String(value));
     }
     else if (action == "PULSE") {
@@ -7004,12 +7019,15 @@ void handleCmd(const String& from, const String& cmdBody) {
         // Acknowledge immediately — the pulse is now in flight. The "0" in
         // the response is the *eventual* state once the pulse completes;
         // callers that need a stricter handshake should poll the pin state.
-        String mid = mesh.generateMsgID();
-        String rsp = "CMD,RSP," + String(pin) + ",PULSE_OK," + String(ms);
-        String hex = mesh.encryptMsg(rsp);
-        String payload = String(mesh.localID) + "," + from + "," + mid + "," +
-                         String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
-        mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+        // Same LOCAL guard as SET above — see comment there for rationale.
+        if (from != "LOCAL") {
+            String mid = mesh.generateMsgID();
+            String rsp = "CMD,RSP," + String(pin) + ",PULSE_OK," + String(ms);
+            String hex = mesh.encryptMsg(rsp);
+            String payload = String(mesh.localID) + "," + from + "," + mid + "," +
+                             String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+            mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+        }
         bleSend("CMD,RSP," + String(pin) + ",PULSE_OK," + String(ms));
     }
     else if (action == "LIST") {
@@ -7062,7 +7080,18 @@ void handleCmd(const String& from, const String& cmdBody) {
             mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
             bleSend(sdata);
         } else {
-            const int PINS_PER_PACKET = 8;
+            // Reduced from 8 → 6 to keep the post-AES-GCM+hex+mesh-framing
+            // payload safely under the 249-byte hard cap at
+            // MeshCore::_doTransmit (MeshCore.cpp:314). With 8 pins, groups
+            // whose values happen to be 4-5 digits (raw ADC readings ~30k,
+            // hex counters, negative-signed ints) pushed the encoded payload
+            // past 249 → silent drop of that specific packet,
+            // indistinguishable from parity from the caller's view.
+            // The observed symptom was "P2 and P4 always missing across
+            // 10+ polls" — the same 8-pin groups had the same over-length
+            // content every poll. 6 pins gives ~15 % headroom on realistic
+            // sensor content.
+            const int PINS_PER_PACKET = 6;
             int parts = (sensorCount + PINS_PER_PACKET - 1) / PINS_PER_PACKET;
             if (parts < 1) parts = 1;
             for (int p = 0; p < parts; p++) {
@@ -7513,17 +7542,22 @@ void handleMessage(const String& from, const String& text, int rssi) {
 void handleAck(const String& from, const String& mid) {
     debugPrint("ACK from " + from + " mid=" + mid);
     bleSend("ACK," + from + "," + mid);
-    // Check if this ACK is for a pending BLE MSG send
+    // Check if this ACK is for a pending mesh MSG send. Variable names still
+    // say "ble" for historical reasons — this path applies to any mesh TX
+    // originated locally, regardless of whether the caller came in via BLE,
+    // USB serial, or an internal automation trigger.
     if (mid == blePendingAckID) {
         bleAckReceived = true;
     }
 }
 
-// BLE MSG ACK retry — called from loop(), matches T-Deck's handleAckRetry()
+// Mesh MSG ACK retry — called from loop(), matches T-Deck's handleAckRetry().
+// Historical "ble" prefix on the variable names is retained to keep the diff
+// small; the mechanism itself is LoRa mesh ACK/retry.
 void handleBleAckRetry() {
     if (blePendingAckID.length() == 0) return;
     if (bleAckReceived) {
-        debugPrint("BLE MSG delivered!");
+        debugPrint("MESH MSG delivered!");
         bleSend("DELIVERED," + blePendingAckID);
         blePendingAckID = "";
         return;
@@ -7532,12 +7566,12 @@ void handleBleAckRetry() {
 
     bleAckAttempt++;
     if (bleAckAttempt > MAX_RETRIES) {
-        debugPrint("BLE MSG send failed - no ACK");
+        debugPrint("MESH MSG send failed - no ACK");
         bleSend("FAILED," + blePendingAckID);
         blePendingAckID = "";
         return;
     }
-    debugPrint("BLE MSG retry " + String(bleAckAttempt) + "/" + String(MAX_RETRIES));
+    debugPrint("MESH MSG retry " + String(bleAckAttempt) + "/" + String(MAX_RETRIES));
     mesh.transmitPacket(bleAckDest, bleAckPayloadCache);
     bleAckSentAt = millis();
 }
@@ -7783,7 +7817,9 @@ void bleSend(const String& line) {
 }
 
 void processBleCommand(const String& line, bool fromSerial) {
-    debugPrint("BLE CMD: " + line);
+    // Log tag says "CMD IN" — historically "BLE CMD" but the same handler
+    // processes commands arriving via USB serial too (fromSerial=true).
+    debugPrint("CMD IN: " + line);
 
     // Setup mode: only enforce PIN for BLE connections, not serial (physical access = trusted)
     if (blePinIsDefault && !fromSerial &&
