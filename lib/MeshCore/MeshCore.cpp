@@ -408,9 +408,10 @@ void MeshCore::smartForward(const String& from, const String& to,
     for (int i = 0; i < MAX_PENDING; i++) {
         if (!pendingFwds[i].active) {
             pendingFwds[i].payload = payload;
-            pendingFwds[i].dest = fwdDest;
-            pendingFwds[i].sendAt = millis() + jitter;
-            pendingFwds[i].active = true;
+            pendingFwds[i].mid     = mid;       // for cancel-on-heard-ACK
+            pendingFwds[i].dest    = fwdDest;
+            pendingFwds[i].sendAt  = millis() + jitter;
+            pendingFwds[i].active  = true;
             return;
         }
     }
@@ -477,6 +478,26 @@ void MeshCore::processPacket(const MeshPacket& pkt) {
 
     // ─── ACK packets ─────────────────────────────────────────
     if (pkt.payload.startsWith("ACK,")) {
+        // Cancel-on-Heard-ACK: any node that had queued a smartForward
+        // of the original message will hear this ACK travelling back
+        // (both endpoints already proved reachability to us — that's
+        // why we heard the original in the first place). Suppress the
+        // pending forward — the destination clearly got the packet.
+        // Runs BEFORE the dest-split below so it fires whether the ACK
+        // is for us, for a peer, or would be dedup-dropped later.
+        // Scope note: only "ACK," is checked; CFG/CFGACK/CFGGO use
+        // forwardPacket() directly (never touch pendingFwds[]) so
+        // they're not at risk of accidental cancellation here.
+        int _ackC = pkt.payload.indexOf(',', 4);
+        if (_ackC > 0) {
+            String ackedMid = pkt.payload.substring(_ackC + 1);
+            for (int i = 0; i < MAX_PENDING; i++) {
+                if (pendingFwds[i].active && pendingFwds[i].mid == ackedMid) {
+                    pendingFwds[i].active = false;
+                    if (forwardsSuppressed < 0xFFFF) forwardsSuppressed++;
+                }
+            }
+        }
         if (pkt.dest == myAddr && onAck) {
             // ACK for us
             int c1 = pkt.payload.indexOf(',', 4);

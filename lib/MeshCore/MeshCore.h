@@ -334,10 +334,17 @@ private:
     // outgoing HB actually ships (canTransmit()==true) so drop episodes
     // encoded inside a dropped HB are re-reported on the next successful HB.
     uint16_t txThrottledLocalLastHb = 0;
+    // Cancel-on-Heard-ACK counter. Every time this node sees an ACK for
+    // a packet it had queued to forward, the forward is suppressed and
+    // this counter bumps. Exposed so we can measure how often the fix is
+    // saving airtime once deployed (bench should see near-100 %
+    // suppression on tight 1-hop meshes).
+    uint16_t forwardsSuppressed = 0;
 
     // Jitter state for pending forwards
     struct PendingForward {
         String payload;
+        String mid;                     // for cancel-on-heard-ACK lookup
         uint16_t dest;
         unsigned long sendAt;
         bool active = false;
