@@ -1321,8 +1321,45 @@ static uint32_t sgp41BootMs = 0;   // millis() when first serviced
 // doesn't allocate state for slots that get parsed but fail I2C
 // probe later.
 #define MAX_SGP41_INSTANCES 2
+// Forward decls needed for the SGP41 GIA_RESTORE / GIA_HEAL telemetry
+// paths below — the real definitions live further down in the file
+// after several other forward decls already used here.
+void bleSend(const String& line);
+extern bool gatewayMode;   // referenced by the debugPrint() macro at line ~89
 static GasIndexAlgorithmParams sgp41VocState[MAX_SGP41_INSTANCES];
 static GasIndexAlgorithmParams sgp41NoxState[MAX_SGP41_INSTANCES];
+
+// ─── GIA state persistence: declarations only ───────────────────────
+// Full context and function bodies live near line ~3540 (search for
+// "GIA (Gas Index Algorithm) state persistence"). The struct and
+// state variables need to be visible from the SGP41 device-service
+// block below (line ~1770), so their declarations sit here — right
+// after MAX_SGP41_INSTANCES which the struct depends on. Function
+// bodies remain grouped with the other EEPROM save/load helpers.
+#define GIA_STATE_MAGIC   0x6A5A
+#define GIA_STATE_VER     0x0001
+struct __attribute__((packed)) GiaStateEEPROM {
+    uint16_t magic;
+    uint16_t version;
+    uint32_t save_millis;
+    float    voc_state0[MAX_SGP41_INSTANCES];
+    float    voc_state1[MAX_SGP41_INSTANCES];
+    uint8_t  converged_mask;
+    uint8_t  reserved[3];
+};
+// 28 bytes with MAX_SGP41_INSTANCES=2. Address is runtime-computed in
+// plcOffsetsInit() past eeprom_dev_end_addr to avoid stomping any of
+// the hand-mapped fixed-address regions (NDLOC/BATTCFG/HBCFG/etc.).
+static int eeprom_gia_addr = -1;
+static GiaStateEEPROM giaSaved;
+static bool giaSavedValid = false;
+static bool giaRestoredThisBoot[MAX_SGP41_INSTANCES] = { false, false };
+static uint32_t giaLastHealMs[MAX_SGP41_INSTANCES] = { 0, 0 };
+
+void loadGiaState();
+void saveGiaState(bool synchronous);
+void resetGiaState();
+
 static int8_t sgp41SlotToInst[MAX_DEVICES] = {
     -1,-1,-1,-1,-1,-1,-1,-1   // MAX_DEVICES = 8
 };
@@ -1816,12 +1853,79 @@ void serviceDevices() {
                     GasIndexAlgorithm_init_with_sampling_interval(
                         &sgp41NoxState[inst],
                         GasIndexAlgorithm_ALGORITHM_TYPE_NOX, 1.0f);
+                    // Warm-start VOC from persisted state if we have a
+                    // converged baseline saved. Skips the 45 s INITIAL_
+                    // BLACKOUT + up to 12 h of baseline re-learning that
+                    // would otherwise happen on every boot. NOx has no
+                    // persistence API (Sensirion refuses NOx type) so
+                    // it always starts fresh — that's fine because NOx
+                    // baseline is 1 and has no gating trap.
+                    // set_states() MUST be called after _init per the
+                    // header contract (sensirion_gas_index_algorithm.h:212).
+                    if (giaSavedValid
+                        && (giaSaved.converged_mask & (1u << inst))) {
+                        GasIndexAlgorithm_set_states(
+                            &sgp41VocState[inst],
+                            giaSaved.voc_state0[inst],
+                            giaSaved.voc_state1[inst]);
+                        // Bypass the 50-sample blackout suppression at
+                        // line ~1837 — the algorithm is already
+                        // converged, no need to gate its output.
+                        sgp41SamplesReady[inst] = SGP41_ALGO_BLACKOUT_SAMPLES;
+                        giaRestoredThisBoot[inst] = true;
+                        debugPrint("GIA_RESTORE inst=" + String(inst));
+                        bleSend("GIA_RESTORE," + String(inst));
+                    }
                 }
                 int32_t vocIdx = 0, noxIdx = 0;
                 GasIndexAlgorithm_process(&sgp41VocState[inst],
                                           (int32_t)sVoc, &vocIdx);
                 GasIndexAlgorithm_process(&sgp41NoxState[inst],
                                           (int32_t)sNox, &noxIdx);
+                // ── Stuck-in-gating self-heal ──────────────────────────
+                // The Sensirion algorithm can settle above its own
+                // GATING_THRESHOLD_VOC=340 and stop learning downward
+                // for up to 180 min. In clean rural air with sVoc
+                // sitting in the 28k-32k healthy band, an index above
+                // 340 is a bug, not chemistry. Snap the mean back to
+                // the current raw so the algorithm can escape.
+                //
+                // Two arms:
+                //   LATE  — 6 h since last heal → post-convergence drift
+                //           (double the Sensirion gating window so a
+                //           real long-VOC event releases naturally
+                //           before we intervene).
+                //   EARLY — within 30 min of boot AND state was
+                //           restored from EEPROM → the restore may
+                //           have applied a stale baseline (Sensirion
+                //           says state is only valid for <10 min
+                //           outages, but we can't measure outage
+                //           length without an RTC).
+                // Only fires when the sensor's raw counts DISAGREE
+                // with the algorithm's elevated output — protects
+                // legitimate long-VOC events.
+                if (sgp41SamplesReady[inst] >= SGP41_ALGO_BLACKOUT_SAMPLES
+                    && vocIdx > 340
+                    && sVoc >= 28000 && sVoc <= 32000) {
+                    uint32_t now       = millis();
+                    bool coolExpired   = (now - giaLastHealMs[inst]) > 21600000UL; // 6 h
+                    bool earlyRestored = (now < 1800000UL) && giaRestoredThisBoot[inst]; // 30 min
+                    if (coolExpired || earlyRestored) {
+                        float s0, s1;
+                        GasIndexAlgorithm_get_states(&sgp41VocState[inst], &s0, &s1);
+                        // Re-seed the mean to the current raw. std
+                        // preserved so noise characteristics stay put.
+                        GasIndexAlgorithm_set_states(
+                            &sgp41VocState[inst], (float)sVoc, s1);
+                        giaLastHealMs[inst]      = now;
+                        giaRestoredThisBoot[inst] = false;
+                        debugPrint("GIA_HEAL inst=" + String(inst) +
+                                   " sVoc=" + String(sVoc) +
+                                   " oldIdx=" + String((long)vocIdx));
+                        bleSend("GIA_HEAL," + String(inst) + "," +
+                                String(sVoc) + "," + String((long)vocIdx));
+                    }
+                }
                 // During the algorithm's own 45 s INITIAL_BLACKOUT
                 // window it doesn't write to vocIdx/noxIdx — they
                 // stay at whatever we initialised them to (0). But
@@ -3335,6 +3439,12 @@ void enterLowBatteryShutdown(int mv) {
   #endif
     radio.sleep(false);              // SX1262 cold sleep, lowest current
 
+    // Snapshot GIA state before deep sleep so the wake path can warm-
+    // start the VOC algorithm within Sensirion's 10-min validity window.
+    // synchronous=true bypasses any PlcCommitGuard batch and feeds the
+    // WDT around the commit.
+    saveGiaState(true);
+
     rtcLowBattFlag = RTC_LOW_BATT_MAGIC;  // Tell setup() on wake that we slept due to low batt
     esp_sleep_enable_timer_wakeup((uint64_t)BATT_SLEEP_INTERVAL_S * 1000000ULL);
     esp_deep_sleep_start();
@@ -3448,6 +3558,136 @@ void resetHbCfg() {
     mesh.hbIntervalMs      = HB_INTERVAL;
     mesh.hbIntervalSolarMs = HB_INTERVAL_SOLAR;
     hbCfgIsCustom = false;
+}
+
+// ─── GIA (Gas Index Algorithm) state persistence ───────────────────
+// Sensirion's VOC index algorithm learns its ~30 000-tick clean-air
+// baseline over ~12 h and can get stuck in a "gating trap" above index
+// 340 where downward learning freezes for up to 180 min. Without
+// persistence, every reboot (WDT, power blip, user REBOOT cmd) wipes
+// the learned baseline; customer deployments have then been observed
+// to park at VOC=453 in genuinely clean air for hours after each boot.
+//
+// This blob persists the two floats Sensirion's get_states/set_states
+// API exposes (sensirion_gas_index_algorithm.h:206-222). The state is
+// only strictly valid for outages < 10 min per Sensirion's docs, but
+// the stuck-detector at the SGP41 process loop backstops stale restores
+// by re-snapping the mean to the current raw sVoc when the algorithm
+// output diverges from an in-range sensor reading.
+//
+// NOx has NO persistence path — the API explicitly refuses NOx algo
+// type. NOx re-initialises from scratch every boot, which is fine
+// because its baseline is 1 (default offset) and it converges in
+// ~4-6 h without a stuck-trap.
+//
+// EEPROM address is COMPUTED AT RUNTIME (eeprom_gia_addr, populated in
+// plcOffsetsInit) so it sits past the runtime-sized PLC/DEVICE regions,
+// which themselves start at EEPROM_PLC_BASE=2048. All fixed-address
+// blobs (NDLOC@480, BATTCFG@490, HBCFG@467, BLEPIN@443, ...) live in
+// the low 512-byte window, so no collision is possible at 2048+. Do
+// NOT hardcode an address here — bump-the-array of PLC tables could
+// grow the layout on a future build.
+//
+// See workflow analysis wf_58512903-ae9 for the full design (2026-07-14).
+//
+// The struct definition, address sentinel, and per-instance state
+// variables (giaSaved, giaSavedValid, giaRestoredThisBoot,
+// giaLastHealMs) are declared UP near MAX_SGP41_INSTANCES (~line 1330)
+// so they're visible to the SGP41 device-service block below. Only
+// the function bodies live here.
+
+// Loads persisted GIA state into giaSaved. Called once in setup()
+// after plcOffsetsInit(). Never touches the algorithm structs directly
+// — that happens later during per-instance lazy init.
+void loadGiaState() {
+    giaSavedValid = false;
+    if (eeprom_gia_addr < 0) return;             // no room, persistence disabled
+    GiaStateEEPROM e;
+    EEPROM.get(eeprom_gia_addr, e);
+    if (e.magic != GIA_STATE_MAGIC) return;      // fresh flash / mismatch
+    if (e.version != GIA_STATE_VER) return;      // struct-layout upgrade
+    // Range-sanity every CONVERGED slot's floats. Sensirion sraw sits
+    // ~15 000–40 000 for clean-to-moderate air; std ~0–2000. Anything
+    // outside is corrupt — reject the whole blob (defensive).
+    //
+    // Slots whose bit is NOT set in converged_mask are permitted to
+    // carry 0.0f / 0.0f — that's the sentinel saveGiaState() writes
+    // for instances that were never allocated (e.g. sgp41VocState[1]
+    // on a single-SGP41 board, the common case). Skipping the range
+    // check for those slots fixes the "warm-start never restores on
+    // single-sensor deployments" bug caught by the finalise verifier.
+    for (int i = 0; i < MAX_SGP41_INSTANCES; i++) {
+        if (!(e.converged_mask & (1u << i))) continue;
+        if (!(e.voc_state0[i] >= 10000.0f && e.voc_state0[i] <= 50000.0f)) return;
+        if (!(e.voc_state1[i] >= 0.0f     && e.voc_state1[i] <= 5000.0f))  return;
+    }
+    // If NO slots were converged, there's nothing to restore — treat
+    // as a fresh-boot signal so the algorithm learns from scratch.
+    // (The saved blob is still valid; we just have no useful state.)
+    if (e.converged_mask == 0) return;
+    giaSaved = e;
+    giaSavedValid = true;
+    debugPrint("GIA_LOAD: mask=0x" + String(e.converged_mask, HEX));
+    bleSend("GIA_LOAD," + String(e.converged_mask, HEX));
+}
+
+// Snapshots current VOC-algorithm state to EEPROM. Called from:
+//   • periodic 6 h timer in loop() (synchronous=false — piggybacks any
+//     PlcCommitGuard batch if active)
+//   • graceful shutdown paths (synchronous=true — always commits, feeds
+//     WDT around the ~50 ms commit stall so a large PLC-table flush
+//     can't sum past the 30 s hardware watchdog).
+void saveGiaState(bool synchronous) {
+    if (eeprom_gia_addr < 0) return;
+    GiaStateEEPROM e;
+    memset(&e, 0, sizeof(e));
+    e.magic         = GIA_STATE_MAGIC;
+    e.version       = GIA_STATE_VER;
+    e.save_millis   = millis();
+    e.converged_mask = 0;
+    for (int inst = 0; inst < MAX_SGP41_INSTANCES; inst++) {
+        float s0 = 0.0f, s1 = 0.0f;
+        // Only interrogate an instance that has actually been fed at
+        // least one sample. Uptime_Gamma stays at 0.0f on a fresh _init
+        // and only advances once _process has run.
+        if (sgp41VocState[inst].m_Mean_Variance_Estimator___Uptime_Gamma > 0.0f) {
+            GasIndexAlgorithm_get_states(&sgp41VocState[inst], &s0, &s1);
+            // PERSISTENCE_UPTIME_GAMMA=10800.f is Sensirion's own
+            // "converged enough to trust the state" threshold — same
+            // constant _set_states clamps to. See .h:100 / .c:283.
+            if (sgp41VocState[inst].m_Mean_Variance_Estimator___Uptime_Gamma >= 10800.0f) {
+                e.converged_mask |= (uint8_t)(1u << inst);
+            }
+        }
+        e.voc_state0[inst] = s0;
+        e.voc_state1[inst] = s1;
+    }
+    EEPROM.put(eeprom_gia_addr, e);
+    if (synchronous) {
+        // Shutdown path — bypass any active PlcCommitGuard batch and
+        // commit right now. Feed the swWdt before/after because
+        // EEPROM.commit() on ESP32 stalls the CPU for ~50 ms while it
+        // pushes the NVS partition.
+        if (swWdt) timerWrite(swWdt, 0);
+        EEPROM.commit();
+        if (swWdt) timerWrite(swWdt, 0);
+    } else if (!plcPersistSuspended) {
+        EEPROM.commit();
+    }
+    // Else defer: an outer PlcCommitGuard will EEPROM.commit() on scope exit.
+    debugPrint("GIA_SAVE: mask=0x" + String(e.converged_mask, HEX));
+}
+
+// Wipe the persisted state. Called by the "reset PLC state" flow so a
+// factory-reset doesn't leave a bogus warm-start seed behind.
+void resetGiaState() {
+    if (eeprom_gia_addr < 0) return;
+    GiaStateEEPROM e;
+    memset(&e, 0, sizeof(e));
+    EEPROM.put(eeprom_gia_addr, e);
+    EEPROM.commit();
+    giaSavedValid = false;
+    memset(giaRestoredThisBoot, 0, sizeof(giaRestoredThisBoot));
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -7129,6 +7369,12 @@ void handleCmd(const String& from, const String& cmdBody) {
                          String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
         mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
         delay(200);
+        // Snapshot GIA state before the restart so the SGP41 driver can
+        // warm-start the VOC algorithm on the very next boot instead of
+        // dropping into a 45 s blackout + 12 h re-learn window (during
+        // which VOC can drift into the gating trap and report 400+ for
+        // hours in clean air).
+        saveGiaState(true);
         ESP.restart();
     }
     else if (action == "POLL") {
@@ -7500,6 +7746,7 @@ void handleCmd(const String& from, const String& cmdBody) {
 #endif
             bleSend("OK,SOLAR,OFF,REBOOT_NEEDED");
             delay(500);
+            saveGiaState(true);   // preserve VOC warm-start across the restart
             ESP.restart();
         }
     }
@@ -8072,6 +8319,7 @@ void processBleCommand(const String& line, bool fromSerial) {
             bleSend("PIN changed. Reconnect with new PIN.");
             // Restart BLE with new PIN
             delay(500);
+            saveGiaState(true);   // preserve VOC warm-start across the restart
             ESP.restart();
         } else if (pin == BLE_DEFAULT_PIN) {
             bleSend("ERR,BLEPIN,CANNOT_USE_DEFAULT");
@@ -8082,6 +8330,7 @@ void processBleCommand(const String& line, bool fromSerial) {
     else if (line == "REBOOT") {
         bleSend("OK,REBOOT");
         delay(200);
+        saveGiaState(true);   // preserve VOC warm-start across the restart
         ESP.restart();
     }
     else if (line == "EEPROM,RESET") {
@@ -9023,6 +9272,17 @@ static void plcOffsetsInit() {
     // bytes (magic + version + sizeof low byte) followed by the array.
     eeprom_dev_addr          = eeprom_plc_end_addr;
     eeprom_dev_end_addr      = eeprom_dev_addr + 3 + sizeof(devices);
+    // GIA VOC-algorithm state persistence sits immediately past DEVICE.
+    // Sanity-check that we still fit in EEPROM_SIZE. If not (unlikely
+    // given the PLC region is capped and GiaStateEEPROM is only 28 B),
+    // sentinel to -1 so loadGiaState()/saveGiaState() become no-ops and
+    // the algorithm still runs — just without warm-start persistence.
+    int gia_end = eeprom_dev_end_addr + (int)sizeof(GiaStateEEPROM);
+    if (gia_end <= EEPROM_SIZE) {
+        eeprom_gia_addr = eeprom_dev_end_addr;
+    } else {
+        eeprom_gia_addr = -1;
+    }
 }
 
 // Walk every persisted PLC / DEVICE table, sanitise the runtime-only
@@ -9961,6 +10221,15 @@ void setup() {
     // record exists, otherwise leaves the inline-initialiser defaults
     // (HB_INTERVAL / HB_INTERVAL_SOLAR macros) intact.
     loadHbCfg();
+    // Compute runtime EEPROM offsets for the PLC/DEVICE/GIA regions so
+    // loadGiaState() below (and any subsequent PLC/DEV load path) knows
+    // where its blob sits. Safe to call anytime after EEPROM.begin —
+    // it only computes offsets from static struct sizes, no I/O.
+    plcOffsetsInit();
+    // GIA VOC-algorithm warm-start state. If present + valid, the
+    // per-instance SGP41 lazy-init at DEV_SGP41 will restore rather
+    // than start from a 45 s blackout + 12 h baseline-learning window.
+    loadGiaState();
     // Binary SDATA mode disabled — binarySDATA is now constexpr false.
 
     // ─── Early low-battery recovery check ──────────────────────
@@ -10317,6 +10586,20 @@ void loop() {
 #endif
     updateOLED();
 
+    // GIA VOC-algorithm persistence — snapshot converged state every
+    // 6 h. Save frequency chosen to stay well inside the NVS wear
+    // budget (~1460 writes/year) while keeping a warm-start seed no
+    // older than 6 h. Sensirion's 10-min-outage validity rule is
+    // still respected implicitly: the stuck-detector arm in the
+    // SGP41 handler catches stale restores that happen after longer
+    // outages. Save is a no-op if no SGP41 device is deployed or
+    // eeprom_gia_addr sentinel is -1.
+    static uint32_t lastGiaPersist = 0;
+    if (millis() - lastGiaPersist > 21600000UL) {   // 6 h
+        saveGiaState(false);
+        lastGiaPersist = millis();
+    }
+
     // Heap + radio health monitor (every 60s)
     static unsigned long lastHeapCheck = 0;
     static uint32_t lastRxSnapshot = 0;
@@ -10385,6 +10668,7 @@ void loop() {
         if (freeHeap < 20000) {
             debugPrint("LOW HEAP: " + String(freeHeap) + "B — restarting");
             delay(100);
+            saveGiaState(true);   // preserve VOC warm-start across the restart
             ESP.restart();
         }
     }
@@ -10435,6 +10719,7 @@ void loop() {
         EEPROM.commit();
         Serial.println("BLE PIN reset to default (123456)");
         btnPressStart = 0;  // Prevent re-triggering
+        saveGiaState(true);   // preserve VOC warm-start across the restart
         ESP.restart();
     }
     if (btn) btnPressStart = 0;
