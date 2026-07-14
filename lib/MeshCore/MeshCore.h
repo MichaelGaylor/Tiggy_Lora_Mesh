@@ -142,6 +142,21 @@ public:
     typedef bool (*ChannelFreeFunc)();
     ChannelFreeFunc onChannelFree = nullptr;
 
+    // v4.7 — proper CAD-based LBT for LOCAL originations only.
+    // Distinct from onChannelFree above: the RSSI-history version at
+    // repeater.cpp:radioChannelFree() is still wired to onChannelFree
+    // for the shared _doTransmit path (its return is ignored by
+    // waitForClearChannel — best-effort wait). onChannelFreeCad
+    // performs a real SX1262 CAD probe (~17 ms at SF9) and IS
+    // honoured by transmitPacket() as a single-shot LBT gate.
+    // Kept as a separate callback so:
+    //   1. Forward path (_doTransmit / smartForward) is bit-for-bit
+    //      unchanged — the CAD's ~17 ms RX-blackout side effect never
+    //      hits the forwarder's polling loop.
+    //   2. Firmware without SX126x scanChannel() support (SX127x-only
+    //      boards) can leave this null and get no-op LBT gracefully.
+    ChannelFreeFunc onChannelFreeCad = nullptr;
+
     // Called when a new node is discovered
     typedef void (*NodeDiscoverFunc)(const String& id, int rssi);
     NodeDiscoverFunc onNodeDiscovered = nullptr;

@@ -3106,6 +3106,37 @@ bool radioChannelFree() {
     return rssi < -120.0;
 }
 
+// v4.7 — proper CAD-based channel-free probe for local originations.
+// Distinct from radioChannelFree() above: radio.getRSSI() on SX1262
+// returns the *last received packet's* RSSI, not a live measurement —
+// so the old check is essentially reading history, not real-time
+// channel state. This function invokes the SX1262's native Channel
+// Activity Detection (CAD) which listens for a real LoRa preamble on
+// the currently-configured frequency.
+//
+// Trade-off: CAD internally puts the radio into standby (which aborts
+// any RX in progress) and leaves it in STDBY_RC. We MUST re-arm
+// continuous RX via radioStartListening() before returning, otherwise
+// the radio goes deaf between LBT probes. A packet whose preamble
+// arrives DURING the ~17 ms CAD scan is unavoidably missed — that's
+// the price of a real LBT gate. Single-shot use in transmitPacket
+// limits the RX-blackout to ~17 ms per local TX (vs the pathological
+// case of polling in a tight loop).
+//
+// Timing per CAD (4 symbols @ BW125):
+//   SF7  → ~4 ms   (fast)
+//   SF9  → ~17 ms  (default)
+//   SF12 → ~133 ms (long-range)
+bool radioChannelFreeCad() {
+    int result = radio.scanChannel();
+    // scanChannel exits in STDBY_RC per RadioLib SX126x default (CAD_
+    // GOTO_STDBY exit mode). Re-arm continuous RX so we're not deaf
+    // between probes / before the subsequent transmit() call inside
+    // _doTransmit (which itself re-issues standby() anyway).
+    radioStartListening();
+    return (result == RADIOLIB_CHANNEL_FREE);
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // SF-derived inter-packet delays for multi-packet response bursts.
 //
@@ -10271,7 +10302,8 @@ void setup() {
 
     // Wire up MeshCore callbacks
     mesh.onTransmitRaw = radioTransmit;
-    mesh.onChannelFree = radioChannelFree;
+    mesh.onChannelFree = radioChannelFree;         // legacy RSSI (used by _doTransmit, return ignored)
+    mesh.onChannelFreeCad = radioChannelFreeCad;   // real CAD (single-shot LBT in transmitPacket)
     mesh.onMessage = handleMessage;
     mesh.onCmd = handleCmd;
     mesh.onNodeDiscovered = handleNodeDiscovered;

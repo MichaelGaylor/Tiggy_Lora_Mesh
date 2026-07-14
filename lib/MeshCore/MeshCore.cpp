@@ -354,6 +354,33 @@ void MeshCore::transmitPacket(uint16_t dest, const String& payload) {
         if (txThrottledLocal < 0xFFFF) txThrottledLocal++;
         return;
     }
+    // v4.7 — single-shot CAD-based LBT for local originations.
+    //
+    // ACK payloads bypass LBT: peers that queued smartForward of the
+    // original message are running the Phase C cancel-on-heard-ACK
+    // countdown against 50-500 ms jitter. Delaying the ACK by ~17 ms
+    // (SF9 CAD) is fine, but a drop-and-count silent-return would
+    // leave the peer's forward pending → fires → defeats Phase C.
+    // Ship ACKs unconditionally; the caller (auto-ACK at processPacket
+    // line ~690) is already immediate-after-RX and won't collide with
+    // itself.
+    //
+    // Non-ACK local TX: one CAD probe. If channel is busy, drop and
+    // count (surfaces via TX_THROTTLED HEALTH tick, same counter as
+    // duty-cycle drops). No retry — a delay() here would block
+    // pollDio1() in loop() and abort in-progress RX (design tradeoff
+    // caught by adversarial verify). Single-shot keeps the LBT
+    // benefit without the RX blackout cost.
+    //
+    // If onChannelFreeCad is null (SX127x-only board, unusual test
+    // firmware, or intentional opt-out) the LBT is skipped — behaves
+    // exactly like today.
+    if (onChannelFreeCad && !payload.startsWith("ACK,")) {
+        if (!onChannelFreeCad()) {
+            if (txThrottledLocal < 0xFFFF) txThrottledLocal++;
+            return;
+        }
+    }
     _doTransmit(dest, payload);
 }
 
