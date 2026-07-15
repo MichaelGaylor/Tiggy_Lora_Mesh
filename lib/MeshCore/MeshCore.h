@@ -57,14 +57,36 @@
 // Runtime values live in MeshCore::hbIntervalMs / hbIntervalSolarMs
 // below; these macros are only the fallback if neither Pins.h nor
 // EEPROM has supplied an override.
+//
+// Defaults bumped 2026-07-15 for customer-deployment scaling:
+//   HB_INTERVAL       30 s → 300 s (5 min)
+//   HB_INTERVAL_SOLAR 60 s → 600 s (10 min)
+//
+// Rationale: at the old 30 s HB, an N-node mesh generates ~2N HB
+// broadcasts per minute — 100 HBs/min at 50 nodes, saturating the
+// airway well before customer-target 30-50 node deployments. At
+// 300 s HB, 50 nodes generate 10 HBs/min — well within budget. The
+// adaptive hbIntervalMultiplier (mult 2×/4×/8× at 50/70/90 % budget)
+// stretches this further under load.
+//
+// Existing deployed nodes with a persisted HbCfgEEPROM record are
+// unaffected — loadHbCfg reads their EEPROM override before these
+// defaults apply (see repeater.cpp loadHbCfg). Only fresh units
+// and firmware upgrades WITHOUT prior HB_INTERVAL config see the
+// new defaults.
 #ifndef HB_INTERVAL
-  #define HB_INTERVAL     30000UL
+  #define HB_INTERVAL     300000UL  // 5 min (was 30 s)
 #endif
 #ifndef HB_INTERVAL_SOLAR
-  #define HB_INTERVAL_SOLAR 60000UL // Solar mode: 60s heartbeat (saves power)
+  #define HB_INTERVAL_SOLAR 600000UL // 10 min (was 60 s) — solar saves more power
 #endif
-#define STALE_TIMEOUT   120000UL  // 2min (was 60s) — less aggressive pruning
-#define ROUTE_TIMEOUT   120000UL
+// Bumped alongside HB_INTERVAL 30 s→300 s. Must be several HB intervals
+// so nodes running clean don't get pruned as stale. 3× HB = 900 s
+// covers the normal case, and the firmware's adaptive hb_mult can
+// stretch effective HB up to 8× (2400 s) under load — so 1800 s (30 min)
+// gives some headroom without dragging pruning out too long.
+#define STALE_TIMEOUT   1800000UL  // 30 min (was 2 min)
+#define ROUTE_TIMEOUT   1800000UL  // 30 min (was 2 min)
 
 #define DEDUP_SIZE      128       // Hash-based dedup ring
 #define GCM_NONCE_LEN   12        // AES-GCM nonce size (96 bits)
