@@ -10838,10 +10838,19 @@ void loop() {
         // running clean stay silent. dc=<current> is included so the
         // gateway can drive its alert badge off the throttle line even
         // if it happens to arrive before HEALTH is parsed.
+        //
+        // The "chBusy" field is what USED to be called "local". Rename
+        // reflects the true meaning post-Phase-D: the counter counts
+        // BOTH duty-cycle-saturated drops AND channel-busy-detected
+        // (LBT/CAD) drops on this node's OWN outgoing traffic. When
+        // dc% is low but chBusy>0, the drops were channel-busy events
+        // (other RF activity in the mesh) — informational, not a real
+        // throttle. The gateway's THROTTLED badge gates on dc% > 5
+        // so it only lights for genuine DC-saturation risk.
         if (deltaLocal > 0 || deltaFwd > 0) {
             String tt = "TX_THROTTLED dc=" + String(dcPct);
-            if (deltaLocal > 0) tt += " local=" + String(deltaLocal);
-            if (deltaFwd   > 0) tt += " fwd="   + String(deltaFwd);
+            if (deltaLocal > 0) tt += " chBusy=" + String(deltaLocal);
+            if (deltaFwd   > 0) tt += " fwd="    + String(deltaFwd);
             bleSend(tt);
         }
         lastThrottledLocal = curLocalDrops;
