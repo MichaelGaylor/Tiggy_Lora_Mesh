@@ -693,6 +693,49 @@ void MeshCore::processPacket(const MeshPacket& pkt) {
     MeshMessage msg;
     if (!parsePayloadFields(pkt.payload, msg)) return;
 
+    // ─── Phase G-lite — cancel-on-heard-forward (DIRECTED↔DIRECTED) ───
+    // If we had a pending DIRECTED (unicast-routed) forward queued for
+    // this MID and just heard someone else rebroadcast it, our forward
+    // is redundant — cancel it, same principle as Phase C's
+    // cancel-on-heard-ACK. Runs BEFORE the isDuplicate return below
+    // because the trigger for cancel IS the duplicate reception.
+    //
+    // BOTH sides must be DIRECTED for cancel to fire:
+    //
+    //   1. `pkt.dest != 0xFFFF` — the heard packet must be a directed
+    //      forward, not a blind broadcast. A broadcast rebroadcast
+    //      from a peer is NOT proof anyone with a route to the final
+    //      destination handled it — could be a peer with no route
+    //      that broadcast in hope. Cancelling on unproven effort
+    //      risks losing the packet in mixed-topology cases like
+    //      S→I1→G (I1 has route, DIRECTED) plus S→I2 (I2 no route,
+    //      BROADCAST): if I2 fires first and G isn't in I2's radio
+    //      range, I1's cancel would strand G. Design verifier
+    //      finding #2 caught exactly this.
+    //
+    //   2. `pendingFwds[i].dest != 0xFFFF` — our own pending must
+    //      also be directed. Broadcast forwards continue to flood
+    //      to preserve parallel-diversity coverage in sparse meshes.
+    //      Scale-win for broadcasts comes from Phase H (role
+    //      separation) not cancel-on-heard.
+    //
+    // When both are directed and the MIDs match, cancel is safe:
+    // the route was computed by bestRoute() at smartForward time,
+    // so if someone else already forwarded it to their own chosen
+    // next hop for the same final destination, we'd be pure
+    // duplication. Same-MID matches also stay within the dedup
+    // ring's random-string space (26⁶ collisions are astronomical),
+    // so no cross-source false positives.
+    if (pkt.dest != 0xFFFF) {
+        for (int i = 0; i < MAX_PENDING; i++) {
+            if (!pendingFwds[i].active) continue;
+            if (pendingFwds[i].mid  != msg.mid) continue;
+            if (pendingFwds[i].dest == 0xFFFF)  continue;
+            pendingFwds[i].active = false;
+            if (forwardsSuppressed < 0xFFFF) forwardsSuppressed++;
+        }
+    }
+
     // Dedup
     if (isDuplicate(msg.mid)) return;
     markSeen(msg.mid);
