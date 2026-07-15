@@ -65,6 +65,13 @@ bool oledAvailable = false;
 // bumped PIN_CONFIG_VERSION forces a reload from DEFAULT_*_PINS on next boot.
 #define EEPROM_GPIO_ADDR 1700
 #define EEPROM_SOLAR_ADDR 430
+// Phase H — leaf/router role flag. Single byte, sits in the gap
+// between SOLAR (430) and SF (431)/AUTOPOLL (433). Unwritten EEPROM
+// reads 0xFF which fails the `<= 1` gate on load → defaults to
+// ROUTER (0) — safe for backwards-compat with pre-Phase-H units.
+#define EEPROM_ROLE_ADDR 432
+enum RoleMode : uint8_t { ROLE_ROUTER = 0, ROLE_LEAF = 1 };
+static RoleMode nodeRole = ROLE_ROUTER;
 #define MAX_RELAY_PINS_CFG 48   // was 16 (8 phys + 8 vpins) — bumped to fit
                                 // ALL 32 storage vpins after VIRTUAL_PINS
                                 // was widened to 200-231. Max physical
@@ -3708,6 +3715,32 @@ void resetHbCfg() {
     mesh.hbIntervalMs      = HB_INTERVAL;
     mesh.hbIntervalSolarMs = HB_INTERVAL_SOLAR;
     hbCfgIsCustom = false;
+}
+
+// ─── Phase H — leaf/router role persistence ─────────────────────
+// Single-byte flag at EEPROM_ROLE_ADDR (432). 0 = ROUTER (default),
+// 1 = LEAF (skip all rebroadcasts). Unwritten byte reads 0xFF and
+// fails the `<= 1` gate → default applies. RESET_CONFIG at line
+// ~8533 already zeros the whole low region so a factory reset
+// puts the node back into ROUTER mode automatically.
+//
+// Live-apply via mesh.setLeafMode() so a CMD,ROLE change takes
+// effect on the next received packet without needing REBOOT.
+void loadRoleCfg() {
+    uint8_t b = EEPROM.read(EEPROM_ROLE_ADDR);
+    if (b <= 1) nodeRole = (RoleMode)b;   // 0xFF → default ROLE_ROUTER
+    mesh.setLeafMode(nodeRole == ROLE_LEAF);
+}
+
+void saveRoleCfg(RoleMode r) {
+    nodeRole = r;
+    EEPROM.write(EEPROM_ROLE_ADDR, (uint8_t)r);
+    EEPROM.commit();
+    mesh.setLeafMode(r == ROLE_LEAF);   // apply live, no reboot
+}
+
+void resetRoleCfg() {
+    saveRoleCfg(ROLE_ROUTER);
 }
 
 // ─── GIA (Gas Index Algorithm) state persistence ───────────────────
@@ -7720,6 +7753,26 @@ void handleCmd(const String& from, const String& cmdBody) {
             }
         }
     }
+    else if (action == "ROLE") {
+        // Phase H — commission this node as LEAF (never rebroadcasts)
+        // or ROUTER (default; rebroadcasts data + CFG traffic).
+        // Persisted immediately to EEPROM_ROLE_ADDR + live-applied via
+        // mesh.setLeafMode() so no REBOOT needed. See saveRoleCfg().
+        // Format mirrors BATT_HIBERNATE exactly: empty rest = query,
+        // "LEAF"/"ROUTER" = set, anything else = ERR,format.
+        if (rest.length() == 0) {
+            String rsp = String("CMD,RSP,ROLE,") +
+                         (nodeRole == ROLE_LEAF ? "LEAF" : "ROUTER") +
+                         ",default=ROUTER";
+            sendMeshReply(from, rsp);
+        } else if (rest == "LEAF" || rest == "ROUTER") {
+            saveRoleCfg(rest == "LEAF" ? ROLE_LEAF : ROLE_ROUTER);
+            String rsp = String("CMD,RSP,ROLE,OK,") + rest;
+            sendMeshReply(from, rsp);
+        } else {
+            sendMeshReply(from, "CMD,RSP,ROLE,ERR,format");
+        }
+    }
     else if (action == "BATT_HIBERNATE") {
 #if defined(BAT_DIVIDER) && defined(BOARD_BAT_ADC) && BOARD_BAT_ADC >= 0
         if (rest.length() == 0) {
@@ -10416,6 +10469,11 @@ void setup() {
     // record exists, otherwise leaves the inline-initialiser defaults
     // (HB_INTERVAL / HB_INTERVAL_SOLAR macros) intact.
     loadHbCfg();
+    // Phase H — leaf/router role. Loaded here (magic-independent, same
+    // lifecycle as HbCfg) so a fresh unit defaults to ROUTER and a
+    // deployed unit reads its persisted role without needing to wait
+    // for loadConfig(). Applies via mesh.setLeafMode() live.
+    loadRoleCfg();
     // Compute runtime EEPROM offsets for the PLC/DEVICE/GIA regions so
     // loadGiaState() below (and any subsequent PLC/DEV load path) knows
     // where its blob sits. Safe to call anytime after EEPROM.begin —

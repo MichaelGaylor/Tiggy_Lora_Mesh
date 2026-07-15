@@ -280,6 +280,11 @@ public:
     uint16_t      txThrottledLocalCount();
     uint16_t      txThrottledFwdCount();
 
+    // Phase H — role setter (public API). Field itself is private
+    // (below in the counter block). Called from repeater's
+    // loadRoleCfg/saveRoleCfg so runtime CMD,ROLE takes effect live.
+    void setLeafMode(bool on);
+
     // Runtime spreading factor (may differ from compile-time LORA_SF after a CFG change)
     uint8_t currentSF = LORA_SF;
 
@@ -378,6 +383,20 @@ private:
     // airtime, and defends against on-channel DoS amplification. Ignored
     // by pre-Phase-J firmware which forwarded blindly.
     uint16_t foreignDropped = 0;
+
+    // Phase H — leaf/router role for large-deployment scaling. When
+    // leafMode is true, this node skips ALL relay work (smartForward
+    // for data packets, and CFG/CFGACK/CFGGO/ACK forwards) — it
+    // remains a full endpoint: originates its own traffic, ACKs
+    // packets addressed to it, and applies received CFG/CFGGO
+    // locally. Cuts forward traffic ~5-10× in customer deployments
+    // where most nodes are edge sensors that don't need to relay.
+    // Default false = ROUTER (backwards compat with pre-Phase-H).
+    // leafSuppressed counts forward-events skipped by this gate so
+    // operators can measure the airtime saving in production.
+    bool     leafMode = false;
+    uint16_t leafSuppressed = 0;
+    // setLeafMode() declared in the public API section above; body in .cpp.
 
     // Jitter state for pending forwards
     struct PendingForward {

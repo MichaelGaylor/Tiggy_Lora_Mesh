@@ -407,6 +407,15 @@ void MeshCore::smartForward(const String& from, const String& to,
                             const String& route, const String& enc,
                             uint16_t rawDest) {
     if (ttl <= 1) return;
+    // Phase H — leaf nodes never relay third-party data. Runs before
+    // canForward() and any String allocation so a leaf costs zero on
+    // every heard packet (single-branch early return). Endpoint
+    // functions (own originations, auto-ACK, receiving CFG/CFGGO for
+    // ourselves) are unaffected — they don't call smartForward.
+    if (leafMode) {
+        if (leafSuppressed < 0xFFFF) leafSuppressed++;
+        return;
+    }
     if (!canForward()) {
         // Same silent-drop bug that hits forwardPacket() — bump the
         // forward counter so smartForward drops surface in TX_THROTTLED
@@ -540,7 +549,8 @@ void MeshCore::processPacket(const MeshPacket& pkt) {
                 String ackMid  = pkt.payload.substring(c1 + 1);
                 onAck(ackFrom, ackMid);
             }
-        } else if (pkt.dest != myAddr && pkt.dest != 0xFFFF && pkt.ttl > 1) {
+        } else if (pkt.dest != myAddr && pkt.dest != 0xFFFF && pkt.ttl > 1
+                   && !leafMode) {   // Phase H — leaves don't relay ACKs
             // Forward ACK — dedup to prevent infinite forwarding loops
             // ACK payload "ACK,from,mid" is unique per original message
             String ackKey = pkt.payload;
@@ -581,8 +591,12 @@ void MeshCore::processPacket(const MeshPacket& pkt) {
                 uint16_t destAddr = strtol(from.c_str(), nullptr, 16);
                 transmitPacket(destAddr, ackBody);
 
-                // Rebroadcast CFG so other nodes hear it
-                if (pkt.ttl > 1) {
+                // Rebroadcast CFG so other nodes hear it. Phase H leaf
+                // nodes skip this — they still apply the CFG locally
+                // (onCfg above) but don't propagate to peers behind
+                // them. Commissioning invariant: at least one router
+                // per 2-hop cluster.
+                if (pkt.ttl > 1 && !leafMode) {
                     forwardPacket(0xFFFF, pkt.payload);
                     packetsForwarded++;
                 }
@@ -604,7 +618,8 @@ void MeshCore::processPacket(const MeshPacket& pkt) {
                 String nodeId   = pkt.payload.substring(c3 + 1);
                 onCfgAck(cfgType, value, changeId, nodeId);
             }
-        } else if (pkt.dest != myAddr && pkt.dest != 0xFFFF && pkt.ttl > 1) {
+        } else if (pkt.dest != myAddr && pkt.dest != 0xFFFF && pkt.ttl > 1
+                   && !leafMode) {   // Phase H — leaves don't relay CFGACKs
             // Forward CFGACK toward the initiator
             forwardPacket(pkt.dest, pkt.payload);
             packetsForwarded++;
@@ -631,8 +646,10 @@ void MeshCore::processPacket(const MeshPacket& pkt) {
                 markSeen(dedupKey);
                 if (onCfgGo) onCfgGo(cfgType, value, changeId);
 
-                // Rebroadcast CFGGO so all nodes hear it
-                if (pkt.ttl > 1) {
+                // Rebroadcast CFGGO so all nodes hear it. Phase H
+                // leaves apply the CFGGO locally (onCfgGo above) but
+                // don't re-broadcast — same invariant as CFG.
+                if (pkt.ttl > 1 && !leafMode) {
                     forwardPacket(0xFFFF, pkt.payload);
                     packetsForwarded++;
                 }
@@ -854,6 +871,12 @@ uint8_t MeshCore::dcPercent() {
 
 uint16_t MeshCore::txThrottledLocalCount() { return txThrottledLocal; }
 uint16_t MeshCore::txThrottledFwdCount()   { return txThrottledFwd;   }
+
+// Phase H — one-line setter that flips the leaf flag. Called from
+// repeater's loadRoleCfg/saveRoleCfg. No mutex needed — single-
+// threaded RX/TX and callers only invoke from either setup() or
+// a CMD verb inside the same loop() iteration.
+void MeshCore::setLeafMode(bool on) { leafMode = on; }
 
 void MeshCore::sendHeartbeat() {
     String hb = "HB," + String(localID);
