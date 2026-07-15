@@ -697,36 +697,64 @@ void MeshCore::processPacket(const MeshPacket& pkt) {
     if (isDuplicate(msg.mid)) return;
     markSeen(msg.mid);
 
-    // Update routing from observed route
+    // ─── Phase J — authenticated forwarding ──────────────────────────
+    // Attempt AES-GCM decrypt on EVERY data packet, not just those
+    // destined for us. The auth tag verification is our only signal
+    // that the packet belongs to our mesh (i.e., was written with our
+    // shared AES key). If decrypt fails, the packet is either:
+    //   (a) from a foreign mesh on the same freq/SF (different key),
+    //   (b) tampered / RF-corrupted past the LoRa CRC,
+    //   (c) an intentional on-channel DoS attempt.
+    // In every case, we don't want to spread it — drop before addNode,
+    // updateRouting, ACK, or smartForward can amplify the wasted work.
+    //
+    // CPU cost: ~600 µs per decrypt (Weatherley GCM<AES128>, no HW
+    // accel). At 30-50 node meshes ~3000 pkts/hr → ~1.8 s CPU/hr =
+    // 0.05 % duty. Negligible. Verified in Phase J design workflow.
+    //
+    // Scope note: HB packets are handled in a separate plaintext
+    // branch above (~line 645) and are NOT auth-gated here. Foreign
+    // HBs can still pollute knownNodes[] — Phase K (HB HMAC) would
+    // close that if needed. Documented consciously.
+    String plain = decryptMsg(msg.encrypted);
+    if (plain.length() == 0) {
+        // Foreign, corrupted, or tampered — drop silently. Bump the
+        // counter so the operator can distinguish "quiet mesh" from
+        // "mesh under sustained cross-channel interference".
+        if (foreignDropped < 0xFFFF) foreignDropped++;
+        if (pkt.dest == myAddr) {
+            // Only WARN when the packet was addressed to us — a
+            // foreign broadcast is expected noise and should stay quiet.
+            Serial.println("WARN: decrypt failed from " + msg.from + " mid=" + msg.mid +
+                " keyLen=" + String(strlen(aes_key_string)) +
+                " encLen=" + String(msg.encrypted.length()));
+        }
+        return;
+    }
+
+    // Packet authenticated — safe to update routing and dispatch.
     addNode(msg.from);
     updateRouting(msg.from, msg.route, lastRSSI);
 
-    // For us? Decrypt and dispatch
+    // For us? Dispatch (decrypt already done above)
     if (pkt.dest == myAddr || pkt.dest == 0xFFFF) {
-        String plain = decryptMsg(msg.encrypted);
-        if (plain.length() == 0 && pkt.dest == myAddr) {
-            Serial.println("WARN: decrypt failed from " + msg.from + " mid=" + msg.mid +
-                " keyLen=" + String(strlen(aes_key_string)) +
-                " key[0..3]=" + String(aes_key_string[0]) + String(aes_key_string[1]) + String(aes_key_string[2]) + String(aes_key_string[3]) +
-                " encLen=" + String(msg.encrypted.length()));
+        if (plain.startsWith("CMD,") && onCmd) {
+            onCmd(msg.from, plain.substring(4));
+            cmdsExecuted++;
+        } else if (onMessage) {
+            onMessage(msg.from, plain, lastRSSI);
         }
-        if (plain.length() > 0) {
-            if (plain.startsWith("CMD,") && onCmd) {
-                onCmd(msg.from, plain.substring(4));
-                cmdsExecuted++;
-            } else if (onMessage) {
-                onMessage(msg.from, plain, lastRSSI);
-            }
 
-            // Send ACK for directed messages
-            if (pkt.dest == myAddr) {
-                String ackBody = "ACK," + msg.from + "," + msg.mid;
-                transmitPacket(strtol(msg.from.c_str(), nullptr, 16), ackBody);
-            }
+        // Send ACK for directed messages
+        if (pkt.dest == myAddr) {
+            String ackBody = "ACK," + msg.from + "," + msg.mid;
+            transmitPacket(strtol(msg.from.c_str(), nullptr, 16), ackBody);
         }
     }
 
-    // Forward if not exclusively for us
+    // Forward if not exclusively for us — packet is guaranteed
+    // authenticated by the Phase J gate above, so we're not amplifying
+    // foreign or malicious traffic.
     if (pkt.dest != myAddr) {
         smartForward(msg.from, msg.to, msg.mid, msg.ttl,
                      msg.route, msg.encrypted, pkt.dest);

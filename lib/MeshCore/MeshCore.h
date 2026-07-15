@@ -370,6 +370,15 @@ private:
     // suppression on tight 1-hop meshes).
     uint16_t forwardsSuppressed = 0;
 
+    // Phase J — authenticated-forwarding drop counter. Bumped every time
+    // a data packet fails AES-GCM auth (wrong shared key, corrupted
+    // ciphertext, or foreign-mesh traffic on the same freq/SF/BW). Foreign
+    // packets are then dropped rather than cross-forwarded — prevents
+    // parallel meshes on the same channel from wasting each other's
+    // airtime, and defends against on-channel DoS amplification. Ignored
+    // by pre-Phase-J firmware which forwarded blindly.
+    uint16_t foreignDropped = 0;
+
     // Jitter state for pending forwards
     struct PendingForward {
         String payload;
