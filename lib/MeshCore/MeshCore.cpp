@@ -430,8 +430,15 @@ void MeshCore::smartForward(const String& from, const String& to,
         fwdDest = 0xFFFF;
     }
 
-    // Queue with jitter delay
-    unsigned long jitter = random(FWD_JITTER_MIN, FWD_JITTER_MAX);
+    // Queue with jitter delay. SF-derived bounds when callbacks are
+    // wired (see repeater.cpp:fwdJitterMinMs/fwdJitterMaxMs) — falls
+    // back to the fixed [FWD_JITTER_MIN, FWD_JITTER_MAX] #defines
+    // when unset. The `hi <= lo` guard covers any clamp-collision
+    // corner from a mis-computed callback.
+    uint16_t lo = onGetJitterMinMs ? onGetJitterMinMs() : FWD_JITTER_MIN;
+    uint16_t hi = onGetJitterMaxMs ? onGetJitterMaxMs() : FWD_JITTER_MAX;
+    if (hi <= lo) hi = lo + 50;
+    unsigned long jitter = random(lo, hi);
     for (int i = 0; i < MAX_PENDING; i++) {
         if (!pendingFwds[i].active) {
             pendingFwds[i].payload = payload;

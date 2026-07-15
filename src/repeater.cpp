@@ -3137,6 +3137,10 @@ bool radioChannelFreeCad() {
     return (result == RADIOLIB_CHANNEL_FREE);
 }
 
+// Forward decl — broadcastInterPacketDelayMs() below calls
+// fwdJitterMaxMs() which is defined further down in this same file.
+uint16_t fwdJitterMaxMs();
+
 // ─────────────────────────────────────────────────────────────────────────
 // SF-derived inter-packet delays for multi-packet response bursts.
 //
@@ -3177,10 +3181,68 @@ uint16_t broadcastInterPacketDelayMs() {
     // MeshCore.cpp:314). Sender must wait for the entire jitter+forward-
     // airtime tail to clear before its next packet.
     uint32_t pktAirMs = radio.getTimeOnAir(240) / 1000UL;
-    uint32_t total    = pktAirMs + 500UL /*FWD_JITTER_MAX*/ + 200UL;
-    if (total < 400UL)  total = 400UL;
-    if (total > 6000UL) total = 6000UL;   // SF12 upper-bound clamp
+    // Track fwdJitterMaxMs so the sender's inter-packet gap covers
+    // the peer smartForward jitter tail. At SF7-SF9 this returns 500
+    // unchanged (matches the old hardcoded literal); at SF10+ the
+    // Phase E-widened tail is respected. Clamp bumped from 6000 to
+    // 20000 so pathological SF12 multi-packet bursts (rare) actually
+    // fit their own jitter tail — inter-packet gap should always be
+    // ≥ packet-airtime + forward-jitter-max + margin. SF12 240 B
+    // airtime is ~8.5 s (I originally under-estimated at ~2.5 s, the
+    // verifier caught the 3× miss); + 8 s jitter tail + 200 ms margin
+    // = 16.7 s worst-case, safely inside the 20 s clamp. delayFeedWdt
+    // handles the resulting long waits vs the 30 s swWdt.
+    uint32_t total    = pktAirMs + (uint32_t)fwdJitterMaxMs() + 200UL;
+    if (total < 400UL)   total = 400UL;
+    if (total > 20000UL) total = 20000UL;   // SF12 pathological upper-bound
     return (uint16_t)total;
+}
+
+// v4.7 — SF-derived smartForward jitter bounds. Peer nodes forward
+// mesh broadcasts with random(min, max) ms delay to avoid
+// collision-storming. The fixed FWD_JITTER_MIN/MAX = 50/500 ms
+// defaults are fine at SF7-SF9 (packet airtime < 1.2 s → window
+// covers a good fraction of airtime), but at SF11+ where packet
+// airtime is 2-4.5 s the 500 ms window is too narrow to actually
+// spread N peers → collisions still happen.
+//
+// Conservative tuning: preserve [50, 500] EXACTLY at SF7-SF9 so
+// the default deployment sees zero latency regression. Only widen
+// the window when packet airtime exceeds 1.5 s (SF10+). Actual
+// SF12 airtime for 240 B is ~8.5 s (Semtech formula with LDRO
+// enabled; verifier caught the initial ~2.5 s under-estimate).
+// Consequences at SF12: airtime/2 = 4250 → clamps to 1500 ms min;
+// airtime*3 = 25500 → clamps to 8000 ms max. Both clamps always
+// fire at SF11-SF12, giving a [1500, 8000] ms window that spreads
+// N peers meaningfully across the 8.5 s packet airtime. Clamps
+// are intentional — un-clamped 25 s waits would exceed the
+// 30 s swWdt window.
+//
+// The verifier caught F1/F2/F4 in the initial too-aggressive draft
+// of this — SF7 got a 7× regression and SF9 default rose from
+// 275 ms mean to 2050 ms. The threshold check below preserves the
+// common case exactly.
+uint16_t fwdJitterMinMs() {
+    uint32_t airMs = radio.getTimeOnAir(240) / 1000UL;
+    if (airMs <= 1500UL) return FWD_JITTER_MIN;   // SF7-SF9 unchanged
+    // SF10+: min = ½ airtime, clamped to [50, 1500] so we don't
+    // starve fast forwards even at the worst SF.
+    uint32_t v = airMs / 2UL;
+    if (v < FWD_JITTER_MIN) v = FWD_JITTER_MIN;
+    if (v > 1500UL)         v = 1500UL;
+    return (uint16_t)v;
+}
+
+uint16_t fwdJitterMaxMs() {
+    uint32_t airMs = radio.getTimeOnAir(240) / 1000UL;
+    if (airMs <= 1500UL) return FWD_JITTER_MAX;   // SF7-SF9 unchanged
+    // SF10+: max = 3× airtime, clamped to [500, 8000] so a busy
+    // SF12 mesh has a real 6-8 s spread over N peers instead of
+    // the FWD_JITTER_MAX = 500 ms collision-narrow window.
+    uint32_t v = airMs * 3UL;
+    if (v < FWD_JITTER_MAX) v = FWD_JITTER_MAX;
+    if (v > 8000UL)         v = 8000UL;
+    return (uint16_t)v;
 }
 
 // delay() variant that pets the hardware WDT while sleeping. Required
@@ -10304,6 +10366,10 @@ void setup() {
     mesh.onTransmitRaw = radioTransmit;
     mesh.onChannelFree = radioChannelFree;         // legacy RSSI (used by _doTransmit, return ignored)
     mesh.onChannelFreeCad = radioChannelFreeCad;   // real CAD (single-shot LBT in transmitPacket)
+    // Phase E — SF-derived smartForward jitter (unchanged at SF7-SF9,
+    // widened at SF10+ to cover long-airtime packet windows).
+    mesh.onGetJitterMinMs = fwdJitterMinMs;
+    mesh.onGetJitterMaxMs = fwdJitterMaxMs;
     mesh.onMessage = handleMessage;
     mesh.onCmd = handleCmd;
     mesh.onNodeDiscovered = handleNodeDiscovered;

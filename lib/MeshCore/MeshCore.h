@@ -157,6 +157,20 @@ public:
     //      boards) can leave this null and get no-op LBT gracefully.
     ChannelFreeFunc onChannelFreeCad = nullptr;
 
+    // v4.7 — SF-derived jitter window for smartForward.
+    // Fixed FWD_JITTER_MIN/MAX (50/500 ms) is fine at SF7-SF9 where
+    // packet airtime is < 1.2 s. At SF11-SF12 packet airtime is
+    // 2-4.5 s and the 500 ms window is too narrow to spread N peers'
+    // forwards — collisions still occur. These callbacks let firmware
+    // return SF-derived bounds. Callback-not-set = use the #define
+    // fallbacks unchanged (safe for older firmware + test rigs).
+    // Design point: repeater.cpp's helpers preserve [50, 500] at
+    // SF7-SF9 exactly, only widening the window at SF10+. Default-SF
+    // deployments see zero latency regression.
+    typedef uint16_t (*JitterFunc)();
+    JitterFunc onGetJitterMinMs = nullptr;
+    JitterFunc onGetJitterMaxMs = nullptr;
+
     // Called when a new node is discovered
     typedef void (*NodeDiscoverFunc)(const String& id, int rssi);
     NodeDiscoverFunc onNodeDiscovered = nullptr;
