@@ -3245,6 +3245,25 @@ uint16_t fwdJitterMaxMs() {
     return (uint16_t)v;
 }
 
+// v4.7 — Phase F ACK-wait timeout for POLL SDATA stop-and-wait retry.
+// Round-trip = local SDATA airtime + peer ACK airtime + peer RX
+// processing + peer LBT + local RX re-acquire + safety margin.
+// SDATA is ~200 B on-air after AES-GCM + hex + mesh framing; ACK
+// is ~30 B. Reuses radio.getTimeOnAir() the same way Phase A's
+// unicastInterPacketDelayMs does so the timeout auto-scales when
+// SF is changed at runtime via CFGGO,SF. Clamped [400, 12000] ms:
+//   SF9  → ~800 ms wait  (typical mesh default)
+//   SF11 → ~4 s wait
+//   SF12 → clamped to 12 s (raw estimate ~15 s exceeds ceiling)
+uint16_t unicastAckTimeoutMs() {
+    uint32_t sdataAirMs = radio.getTimeOnAir(200) / 1000UL;
+    uint32_t ackAirMs   = radio.getTimeOnAir(30)  / 1000UL;
+    uint32_t total      = sdataAirMs + ackAirMs + 150UL /*proc+margin*/;
+    if (total < 400UL)   total = 400UL;
+    if (total > 12000UL) total = 12000UL;   // SF12 upper-bound clamp
+    return (uint16_t)total;
+}
+
 // delay() variant that pets the hardware WDT while sleeping. Required
 // whenever cumulative delays inside a single loop() iteration approach
 // the 30 s swWdt timeout — e.g. paginated LIST bursts (BEACON,LIST with
@@ -3259,6 +3278,44 @@ void delayFeedWdt(uint32_t ms) {
         ms -= chunk;
     }
 }
+
+// v4.7 — Phase F ACK waiter for stop-and-wait POLL SDATA retry.
+// Placed here (after delayFeedWdt / receiveCheck-forward-decl) so
+// the POLL handler further down in this file has full struct
+// visibility and can arm/wait/disarm without a forward decl.
+// A single global instance covers the POLL flow (only one POLL
+// burst realistically in flight at a time). Reusable — future
+// SETPOINT,LIST / BEACON,LIST retries can share the same waiter
+// or spawn their own. Runs entirely single-threaded — no locks.
+//
+// Design notes:
+//   * arm() BEFORE transmitPacket() so we never race a very fast
+//     ACK arriving inside the TX call.
+//   * wait() must tick BOTH receiveCheck() (to actually deliver
+//     ACKs from the DIO1 ISR into onAck) AND processPendingForwards
+//     (so peer-relay traffic doesn't stall for the entire ACK
+//     timeout, which at SF12 can be 12 s per attempt).
+//   * delayFeedWdt(5) pets the swWdt so a POLL burst stays inside
+//     the 30 s hardware watchdog even on lossy long-SF links.
+struct AckWaiter {
+    String expectMid;
+    bool   received = false;
+    void arm(const String& mid) { expectMid = mid; received = false; }
+    void notify(const String& mid) {
+        if (expectMid.length() && mid == expectMid) received = true;
+    }
+    void disarm() { expectMid = ""; received = false; }
+    bool wait(uint32_t timeoutMs) {
+        uint32_t t0 = millis();
+        while (!received && (millis() - t0) < timeoutMs) {
+            receiveCheck();
+            mesh.processPendingForwards();
+            delayFeedWdt(5);
+        }
+        return received;
+    }
+};
+static AckWaiter pollAckWaiter;
 
 #ifndef RADIO_TCXO_VOLTAGE
 #define RADIO_TCXO_VOLTAGE 0
@@ -7511,18 +7568,59 @@ void handleCmd(const String& from, const String& cmdBody) {
                 int end   = (start + PINS_PER_PACKET < sensorCount) ? start + PINS_PER_PACKET : sensorCount;
                 String sdata = buildAsciiSDATA(start, end, p + 1, parts);
                 mesh.cmdsExecuted++;
+                bleSend(sdata);   // local echo BEFORE mesh TX — always visible on USB regardless of retry outcome
+                // Phase F — stop-and-wait per packet. arm() sets the MID
+                // we expect the gateway to ACK; wait() spins on receiveCheck
+                // + processPendingForwards until the ACK arrives or timeout.
+                // Retry cap = 1 (2 attempts total) — bounded worst-case
+                // POLL time even at SF12 (~2 × 12 s × 7 packets = ~168 s
+                // pathological, but delayFeedWdt keeps swWdt fed). Fresh
+                // MID on retry so the receiver doesn't dedup-drop the
+                // second attempt.
+                //
+                // Duplicate-delivery note: if both attempts happen to
+                // land (first ACK dropped on return, second ACK arrives)
+                // the receiver processes the SDATA twice. For the Blynk
+                // vpin model this is idempotent (last-value overwrites).
+                // Any downstream counter/aggregator that depends on
+                // one-shot delivery must dedup at ingest — document.
                 String mid = mesh.generateMsgID();
                 String hex = mesh.encryptMsg(sdata);
                 String payload = String(mesh.localID) + "," + from + "," + mid + "," +
                                  String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
-                mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
-                bleSend(sdata);
+                bool ok = false;
+                for (uint8_t attempt = 0; attempt < 2 && !ok; attempt++) {
+                    pollAckWaiter.arm(mid);
+                    mesh.transmitPacket(strtol(from.c_str(), nullptr, 16), payload);
+                    ok = pollAckWaiter.wait(unicastAckTimeoutMs());
+                    if (!ok && attempt == 0) {
+                        // Rebuild payload with fresh MID for the retry so
+                        // the receiver's dedup ring (MeshCore.cpp isDuplicate)
+                        // doesn't reject it as a stale duplicate. Same
+                        // sdata bytes though — receiver processes them once
+                        // per successful decrypt.
+                        mid = mesh.generateMsgID();
+                        hex = mesh.encryptMsg(sdata);
+                        payload = String(mesh.localID) + "," + from + "," + mid + "," +
+                                  String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+                    }
+                }
+                pollAckWaiter.disarm();
+                if (!ok) {
+                    // Surface loss to the operator via USB + BLE — the
+                    // GUI can now render "N/M received" instead of the
+                    // caller having to notice a missing P-tag.
+                    bleSend("SDATA_MISS," + String(p + 1) + "/" + String(parts));
+                }
                 // Inter-packet delay MUST exceed receiver ACK airtime, else
                 // every-other packet gets deterministically dropped by the
                 // gateway's TX-during-RX radio.standby() abort. See helper
                 // definition for full explanation. Old value delay(50) was
                 // ~4× too short at SF9. delayFeedWdt pets the swWdt so a
-                // long burst can't trip the 30 s hardware watchdog.
+                // long burst can't trip the 30 s hardware watchdog. Applied
+                // even after a successful ACK-wait — the wait may have
+                // exited early on the ACK, leaving the receiver's ACK-TX
+                // still consuming the airway.
                 if (p + 1 < parts) delayFeedWdt(unicastInterPacketDelayMs());
             }
         }
@@ -7974,6 +8072,10 @@ void handleAck(const String& from, const String& mid) {
     if (mid == blePendingAckID) {
         bleAckReceived = true;
     }
+    // Phase F — signal any active stop-and-wait waiter. notify() is
+    // a no-op if disarmed or the MID doesn't match; no coupling to
+    // the bleAck path above.
+    pollAckWaiter.notify(mid);
 }
 
 // Mesh MSG ACK retry — called from loop(), matches T-Deck's handleAckRetry().
