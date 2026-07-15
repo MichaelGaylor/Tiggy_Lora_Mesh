@@ -256,26 +256,25 @@ Route* MeshCore::bestRoute(const String& dest) {
 // Duty Cycle Tracking (legal compliance)
 // ═══════════════════════════════════════════════════════════════
 
+// v4.8 — token-bucket duty-cycle gate.
+//
+// txBucketMs holds current bucket usage in ms. Silence periods leak the
+// bucket back down at 7 % of real elapsed time (refillBucket), so a
+// burst-then-quiet pattern recovers smoothly instead of waiting for a
+// fixed hour boundary. Boot state is 0 (full credit). Legally still
+// ≤ 10 % in any hour because the leak rate caps net TX at 7 % (local)
+// or 10 % (forward) of any hour containing continuous traffic.
 bool MeshCore::canTransmit() {
-    unsigned long now = millis();
-    // Reset counter every hour
-    if (now - hourStart > 3600000UL) {
-        hourStart = now;
-        txTimeThisHour = 0;
-    }
-    // Local traffic capped at 7% (252s/hr) — reserves 3% for forwarding
-    return txTimeThisHour < 252000UL;
+    refillBucket();
+    // Local traffic capped at 7% (252s of bucket) — reserves 3% for forwarding
+    return txBucketMs < 252000UL;
 }
 
 bool MeshCore::canForward() {
-    unsigned long now = millis();
-    if (now - hourStart > 3600000UL) {
-        hourStart = now;
-        txTimeThisHour = 0;
-    }
-    // Forwarding allowed up to the full 10% legal limit (360s/hr)
-    // Repeating other nodes' packets must NEVER be starved by local traffic
-    return txTimeThisHour < 360000UL;
+    refillBucket();
+    // Forwarding allowed up to the full 10% legal limit (360s of bucket).
+    // Repeating other nodes' packets must NEVER be starved by local traffic.
+    return txBucketMs < 360000UL;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -340,7 +339,13 @@ void MeshCore::_doTransmit(uint16_t dest, const String& payload) {
 
     unsigned long txStart = millis();
     onTransmitRaw(pkt, pktLen);
-    txTimeThisHour += (millis() - txStart);
+    // Refill (leak) happens through *now*, which includes the TX we just
+    // sent — so 7 % of tx_duration is credited back immediately. Net
+    // charge per packet is 0.93 * tx_duration. At steady 7 % duty this
+    // leaves the bucket flat; at 10 % duty it climbs at 0.7 * airtime.
+    // Both behaviours are what we want.
+    refillBucket();
+    txBucketMs += (millis() - txStart);
 }
 
 // Local-originated traffic (messages, heartbeats, setpoints) — capped at 7%
@@ -836,7 +841,11 @@ void MeshCore::processPacket(const MeshPacket& pkt) {
 // the node still emits a heartbeat at least every 30 min even when
 // the mesh is saturated, so the operator never loses visibility.
 uint8_t MeshCore::hbIntervalMultiplier() {
-    unsigned long t = txTimeThisHour;
+    // Go through txMsThisHour() so a fresh silence-refill applies before
+    // the threshold check — a node that fell quiet after a burst will
+    // see its HB multiplier drop back down as the bucket drains,
+    // rather than staying pinned to the peak until the next TX.
+    unsigned long t = txMsThisHour();
     if (t < 126000UL) return 1;   // < 50 % of 252 s — plenty of headroom
     if (t < 176000UL) return 2;   // 50-70 % — slow down
     if (t < 227000UL) return 4;   // 70-90 % — slow more
@@ -844,16 +853,38 @@ uint8_t MeshCore::hbIntervalMultiplier() {
 }
 
 // ─── Duty-cycle visibility getters ────────────────────────────
-// Apply the same lazy hour-rollover as canTransmit()/canForward()
-// so a caller polling only these getters (i.e. the HEALTH tick that
-// runs before any TX in the new hour) still sees a fresh value.
+// v4.8 — token-bucket refill applied before every read so a caller
+// polling only this getter (i.e. the HEALTH tick that hasn't seen a
+// TX yet in the current window) still sees fresh silence credit.
 unsigned long MeshCore::txMsThisHour() {
+    refillBucket();
+    return txBucketMs;
+}
+
+// ─── Token-bucket refill ─────────────────────────────────────
+// Called by every gate check and by TX increment. Leaks the bucket by
+// 7 % of elapsed real time since the previous refill, so silence banks
+// credit at ~4.2 s per real minute. First call after boot initialises
+// the timestamp without leaking — bucket already starts at 0 (full
+// credit) so there's nothing to leak.
+void MeshCore::refillBucket() {
     unsigned long now = millis();
-    if (now - hourStart > 3600000UL) {
-        hourStart = now;
-        txTimeThisHour = 0;
+    if (bucketLastLeakMs == 0) {
+        // Sentinel bump if millis() happens to be 0 at this instant —
+        // the next call will pick up from here without a huge phantom
+        // elapsed value.
+        bucketLastLeakMs = (now == 0) ? 1UL : now;
+        return;
     }
-    return txTimeThisHour;
+    unsigned long elapsed = now - bucketLastLeakMs;
+    if (elapsed == 0) return;
+    // Leak = 7 % of elapsed. Integer math is fine at millisecond scale:
+    // for elapsed up to 60 * 60 * 1000 ms (1 hour), leak fits easily in
+    // an unsigned long. Refill is applied whether or not TX happened.
+    unsigned long leak = (elapsed * 7UL) / 100UL;
+    if (leak >= txBucketMs) txBucketMs = 0;
+    else                    txBucketMs -= leak;
+    bucketLastLeakMs = now;
 }
 
 uint8_t MeshCore::dcPercent() {

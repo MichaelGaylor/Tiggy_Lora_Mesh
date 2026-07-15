@@ -278,18 +278,21 @@ public:
     unsigned long hbIntervalSolarMs = HB_INTERVAL_SOLAR;
 
     // Adaptive heartbeat backoff multiplier. Returns 1, 2, 4, or 8 based
-    // on how close txTimeThisHour is to the local 7 % cap (252 s). The
-    // scheduling loop multiplies the configured HB interval by this
-    // before computing the next-fire time, so under heavy mesh load the
-    // node automatically reduces its HB cadence and stops contributing
-    // to the cap blowing. Returns 1 (no backoff) on a quiet mesh.
+    // on how close the current bucket usage is to the local 7 % cap
+    // (252 s). Under load the node reduces its HB cadence and stops
+    // contributing to the cap blowing; during silence the bucket
+    // drains and the multiplier recovers automatically. Returns 1 on
+    // a quiet mesh.
     uint8_t hbIntervalMultiplier();
 
     // ─── Duty Cycle Visibility ───────────────────────────────
-    // Live TX time this hour (ms), with lazy hour-rollover applied so
-    // callers always see a fresh, monotonically-sensible value. Callers
-    // MUST use these getters — the raw txTimeThisHour field stays private
-    // because it is only correct AFTER the 3600 s rollover check runs.
+    // Current bucket usage in ms (0..252000+), with a fresh refill
+    // applied so silence credit is always counted. Function name kept
+    // as txMsThisHour() for external ABI stability; semantics changed
+    // from "cumulative in fixed hour" to "current bucket usage after
+    // continuous silence credit". Callers MUST use this getter — the
+    // raw txBucketMs field stays private because it is only correct
+    // after refillBucket() runs.
     unsigned long txMsThisHour();
     // Duty cycle as a % of the 7 % LOCAL cap (252 s). Clamped 0..100.
     // Used by HEALTH so operators see 0-100 mapped against the throttle
@@ -374,10 +377,22 @@ private:
     // Internal TX implementation (shared by transmitPacket and forwardPacket)
     void _doTransmit(uint16_t dest, const String& payload);
 
-    // Duty cycle tracking
-    unsigned long txTimeThisHour = 0;
-    unsigned long hourStart = 0;
+    // Duty cycle tracking — token bucket (v4.8, 2026-07-15).
+    // txBucketMs is current bucket usage in ms (0 = full 252 s credit,
+    // 252000 = local 7 % cap reached). Refills at 7 % of elapsed real
+    // time (252 s per 3600 s) inside refillBucket(). Silence periods
+    // BANK credit for future bursts up to the 252 s ceiling — replaces
+    // the fixed-hour bucket that reset to 0 at every hour boundary and
+    // gave zero recovery during silence. Both fields default-initialise
+    // to 0 → full credit at boot.
+    unsigned long txBucketMs = 0;
+    unsigned long bucketLastLeakMs = 0;
     unsigned long lastTxDuration = 0;
+    // Refill the bucket by 7 % of the time elapsed since the previous
+    // refill call. Idempotent — safe to call from every gate check.
+    // First call after boot (or any call finding bucketLastLeakMs==0)
+    // just initialises the timestamp and returns without leaking.
+    void refillBucket();
     // Throttle-drop counters — bumped from inside transmitPacket() /
     // forwardPacket() / smartForward() when canTransmit()/canForward()
     // gates return false. Exposed via txThrottledLocalCount() /
