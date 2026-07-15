@@ -10848,7 +10848,15 @@ void loop() {
         // throttle. The gateway's THROTTLED badge gates on dc% > 5
         // so it only lights for genuine DC-saturation risk.
         if (deltaLocal > 0 || deltaFwd > 0) {
-            String tt = "TX_THROTTLED dc=" + String(dcPct);
+            // Field is called "budget" (was "dc" pre-2026-07-15) because
+            // dcPercent() returns 0..100 as a percentage of the LOCAL
+            // TX budget (252 s / hour = 7 % of airtime), not a percentage
+            // of the hour. `budget=50` means "half your TX budget used"
+            // = ~3.5 % actual airtime — not "50 % duty cycle" the way
+            // operators intuitively read `dc=50`. Renaming to `budget=`
+            // aligns the wire label with the meaning. Gateway parser
+            // accepts both spellings.
+            String tt = "TX_THROTTLED budget=" + String(dcPct) + "%";
             if (deltaLocal > 0) tt += " chBusy=" + String(deltaLocal);
             if (deltaFwd   > 0) tt += " fwd="    + String(deltaFwd);
             bleSend(tt);
