@@ -27,14 +27,39 @@ uint16_t MeshCore::crc16(const uint8_t* data, size_t len, uint16_t seed) {
 byte* MeshCore::getAESKey() { return (byte*)aes_key_string; }
 
 String MeshCore::toHex(const byte* data, int len) {
-    String s;
-    s.reserve(len * 2);
-    const char hd[] = "0123456789ABCDEF";
-    for (int i = 0; i < len; i++) {
-        s += hd[(data[i] >> 4) & 0xF];
-        s += hd[data[i] & 0xF];
+    // v4.9 — fixed-stack char buffer, replaces the old String + reserve +
+    // s += char loop. Under heap fragmentation (LoRa RX + iBeacon scan +
+    // notifyBeaconEvent all fighting for allocations) the reserve() could
+    // silently return 0, and every subsequent `s += char` triggered a
+    // realloc that could ALSO silently return 0 — dropping that one char
+    // without throwing. Result: odd-length hex strings (`len=197` vs 198,
+    // `len=105` vs 106) reaching the gateway GUI's decrypt path, which
+    // then rejected the whole packet as invalid hex. Symptom on Mike's
+    // rig: SETPOINT-fired sensor updates arrived in the waterfall but
+    // never populated the automation canvas.
+    //
+    // Fixed buffer sized for encryptMsg's worst case: 2 * (GCM_NONCE_LEN
+    // + MAX_MSG_LEN + GCM_TAG_LEN) = 2 * (12 + 200 + 16) = 456 chars,
+    // plus null. 560 gives ~100 chars headroom against a future MAX_MSG_LEN
+    // bump. cfgAuthTag (4-byte tag) fits trivially.
+    char buf[560];
+    // Loud overflow rejection — silent truncation was the whole class of
+    // bug we just fixed. Reject anything that wouldn't fit; caller sees
+    // empty string, encryptMsg's length assert warns downstream, no
+    // packet ever goes on-air with only half its hex.
+    if (len < 0 || len * 2 + 1 > (int)sizeof(buf)) {
+        Serial.print("WARN: toHex overflow len=");
+        Serial.println(len);
+        return "";
     }
-    return s;
+    static const char hd[] = "0123456789ABCDEF";
+    int p = 0;
+    for (int i = 0; i < len; i++) {
+        buf[p++] = hd[(data[i] >> 4) & 0xF];
+        buf[p++] = hd[data[i] & 0xF];
+    }
+    buf[p] = '\0';
+    return String(buf);
 }
 
 void MeshCore::hexToBytes(const String& hex, byte* out, int& outLen) {
@@ -82,7 +107,18 @@ String MeshCore::encryptMsg(const String& msg) {
     memcpy(blob + GCM_NONCE_LEN, ciphertext, mlen);
     memcpy(blob + GCM_NONCE_LEN + mlen, tag, GCM_TAG_LEN);
 
-    return toHex(blob, blobLen);
+    String hex = toHex(blob, blobLen);
+    // Regression guard for the odd-length hex bug fixed in v4.9. If this
+    // ever fires the fix is either incomplete or a NEW allocation-path
+    // regression has been introduced. Loud enough to surface in bench
+    // logs but non-fatal — GUI would reject the packet anyway.
+    if ((int)hex.length() != 2 * blobLen) {
+        Serial.print("WARN: encryptMsg hex len=");
+        Serial.print((int)hex.length());
+        Serial.print(" expected=");
+        Serial.println(2 * blobLen);
+    }
+    return hex;
 }
 
 // AES-128-GCM decrypt — input: hex(nonce || ciphertext || tag)

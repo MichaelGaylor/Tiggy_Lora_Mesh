@@ -1335,6 +1335,17 @@ void bleSend(const String& line);
 extern bool gatewayMode;   // referenced by the debugPrint() macro at line ~89
 static GasIndexAlgorithmParams sgp41VocState[MAX_SGP41_INSTANCES];
 static GasIndexAlgorithmParams sgp41NoxState[MAX_SGP41_INSTANCES];
+// Last-seen raw counts and computed index per instance — updated at the
+// bottom of each SGP41 service tick. Not persisted; boot state is zero.
+// Exposed via CMD,GIA,STATUS so operators can see whether the raw chip
+// is responding to gas events (raw counts change) but the algorithm is
+// stuck (index doesn't). vpins only carry the derived index today, so
+// without these the "sensor stuck vs algorithm stuck" question can't be
+// answered from the gateway side.
+static uint16_t sgp41LastSVoc[MAX_SGP41_INSTANCES]   = {0, 0};
+static uint16_t sgp41LastSNox[MAX_SGP41_INSTANCES]   = {0, 0};
+static int32_t  sgp41LastVocIdx[MAX_SGP41_INSTANCES] = {0, 0};
+static int32_t  sgp41LastNoxIdx[MAX_SGP41_INSTANCES] = {0, 0};
 
 // ─── GIA state persistence: declarations only ───────────────────────
 // Full context and function bodies live near line ~3540 (search for
@@ -1343,8 +1354,13 @@ static GasIndexAlgorithmParams sgp41NoxState[MAX_SGP41_INSTANCES];
 // block below (line ~1770), so their declarations sit here — right
 // after MAX_SGP41_INSTANCES which the struct depends on. Function
 // bodies remain grouped with the other EEPROM save/load helpers.
-#define GIA_STATE_MAGIC   0x6A5A
-#define GIA_STATE_VER     0x0001
+// v4.9 — magic bumped 0x6A5A→0x6A5B, version 1→2 so any pre-fix persist
+// blob (which may contain a stale/poisoned baseline written by the old
+// heal-path domain bug) reads as invalid and forces a fresh learn on
+// first boot after this reflash. One-time cost — subsequent boots
+// persist normally with the new event-detector tuning.
+#define GIA_STATE_MAGIC   0x6A5B
+#define GIA_STATE_VER     0x0002
 struct __attribute__((packed)) GiaStateEEPROM {
     uint16_t magic;
     uint16_t version;
@@ -1860,6 +1876,32 @@ void serviceDevices() {
                     GasIndexAlgorithm_init_with_sampling_interval(
                         &sgp41NoxState[inst],
                         GasIndexAlgorithm_ALGORITHM_TYPE_NOX, 1.0f);
+                    // v4.9 — event-detector tuning. Sensirion defaults
+                    // (learning_time = 12 h, gating_max_duration = 180
+                    // min for VOC / 720 for NOx) are calibrated for
+                    // long-term air-quality trend monitoring, which
+                    // buries sharp events like a butane spike inside
+                    // an over-smoothed baseline.
+                    //
+                    // The header docstring at sensirion_gas_index_algorithm.h
+                    // ~line 246 explicitly documents gating_max_duration_
+                    // minutes=0 as the "disable gating altogether" value.
+                    // Shorter learning_time (2 h vs 12 h) lets the baseline
+                    // forget prior events faster so recovery from any
+                    // transient completes within a customer's lunch break
+                    // rather than overnight.
+                    //
+                    // Parameters (per header:224-259):
+                    //   index_offset (100/1) — clean-air baseline value
+                    //   learning_time_offset_hours (2) — baseline drift τ
+                    //   learning_time_gain_hours (2) — noise-model drift τ
+                    //   gating_max_duration_minutes (0) — DISABLE gating
+                    //   std_initial (50) — default noise std
+                    //   gain_factor (230) — sigmoid scaling (default)
+                    GasIndexAlgorithm_set_tuning_parameters(
+                        &sgp41VocState[inst], 100, 2, 2, 0, 50, 230);
+                    GasIndexAlgorithm_set_tuning_parameters(
+                        &sgp41NoxState[inst],   1, 2, 2, 0, 50, 230);
                     // Warm-start VOC from persisted state if we have a
                     // converged baseline saved. Skips the 45 s INITIAL_
                     // BLACKOUT + up to 12 h of baseline re-learning that
@@ -1911,19 +1953,57 @@ void serviceDevices() {
                 // Only fires when the sensor's raw counts DISAGREE
                 // with the algorithm's elevated output — protects
                 // legitimate long-VOC events.
-                if (sgp41SamplesReady[inst] >= SGP41_ALGO_BLACKOUT_SAMPLES
-                    && vocIdx > 340
-                    && sVoc >= 28000 && sVoc <= 32000) {
+                // v4.9 — widen the EARLY arm to catch the 250-340 dead
+                // band on warm-start restores. The original gate
+                // (vocIdx > 340) only caught the classic Sensirion gating
+                // trap. But Mike's ED53 sat at 273 all night — inside the
+                // dead band the arm never covered. Root cause traced to a
+                // stale persisted baseline (~1000 counts off after normal
+                // RH/T drift) — sigmoid math confirmed exactly.
+                //
+                // mildDrift fires ONLY when the state was restored from
+                // persist AND the current index differs materially from
+                // the 100 baseline. Safe against unstickking a genuine
+                // long-VOC event on a fresh-learn node because it gates
+                // on giaRestoredThisBoot[inst], which clears once heal
+                // fires (see 6 lines below).
+                bool healingReady = sgp41SamplesReady[inst] >= SGP41_ALGO_BLACKOUT_SAMPLES;
+                bool severeStuck  = vocIdx > 340;
+                bool mildDrift    = giaRestoredThisBoot[inst] &&
+                                    (vocIdx > 150 || vocIdx < 50);
+                bool cleanAirRaw  = sVoc >= 28000 && sVoc <= 32000;
+                if (healingReady && cleanAirRaw && (severeStuck || mildDrift)) {
                     uint32_t now       = millis();
                     bool coolExpired   = (now - giaLastHealMs[inst]) > 21600000UL; // 6 h
                     bool earlyRestored = (now < 1800000UL) && giaRestoredThisBoot[inst]; // 30 min
                     if (coolExpired || earlyRestored) {
                         float s0, s1;
                         GasIndexAlgorithm_get_states(&sgp41VocState[inst], &s0, &s1);
-                        // Re-seed the mean to the current raw. std
-                        // preserved so noise characteristics stay put.
+                        // v4.9 — heal-path domain bug fix. Sensirion's
+                        // internal Mean field lives in the (sraw -
+                        // Sraw_Minimum) domain per the algorithm header
+                        // (VOC_SRAW_MINIMUM = 20000). Previous code wrote
+                        // raw sVoc directly into Mean, which corrupted
+                        // the estimator by 20 000 counts and — worst of
+                        // all — poisoned the persist blob for every
+                        // future boot until an EEPROM wipe. That was the
+                        // root of the stuck-at-273 signature.
+                        //
+                        // Also call GasIndexAlgorithm_reset first — set_
+                        // states alone leaves the gating countdown timer
+                        // running from before the heal, so the algorithm
+                        // stayed partially locked even after re-seeding
+                        // the mean. Reset zeroes all internal counters,
+                        // then we re-apply the event-detector tuning,
+                        // then set_states with the correctly-normalised
+                        // mean.
+                        float normalisedMean = (float)sVoc - 20000.0f;
+                        if (normalisedMean < 0.0f) normalisedMean = 0.0f;
+                        GasIndexAlgorithm_reset(&sgp41VocState[inst]);
+                        GasIndexAlgorithm_set_tuning_parameters(
+                            &sgp41VocState[inst], 100, 2, 2, 0, 50, 230);
                         GasIndexAlgorithm_set_states(
-                            &sgp41VocState[inst], (float)sVoc, s1);
+                            &sgp41VocState[inst], normalisedMean, s1);
                         giaLastHealMs[inst]      = now;
                         giaRestoredThisBoot[inst] = false;
                         debugPrint("GIA_HEAL inst=" + String(inst) +
@@ -1951,6 +2031,15 @@ void serviceDevices() {
                 }
                 if (d.outVpin[2]) setVpinValue(d.outVpin[2], (uint16_t)vocIdx);
                 if (d.outVpin[3]) setVpinValue(d.outVpin[3], (uint16_t)noxIdx);
+                // v4.9 — expose raw ticks + computed indexes for CMD,GIA,
+                // STATUS. Raw counts are hidden from the vpin surface
+                // by design (users wire the index for detection rules),
+                // but operators need to see them when diagnosing stuck
+                // baselines so we track them separately.
+                sgp41LastSVoc[inst]   = sVoc;
+                sgp41LastSNox[inst]   = sNox;
+                sgp41LastVocIdx[inst] = vocIdx;
+                sgp41LastNoxIdx[inst] = noxIdx;
                 break;
             }
             case DEV_ADS1115: {
@@ -2790,8 +2879,30 @@ void notifyBeaconEvent(const String& event, bool meshBroadcast = false) {
     if (meshBroadcast) {
         String mid = mesh.generateMsgID();
         String hex = mesh.encryptMsg("CMD,BEACONEVT," + event);
-        String payload = String(mesh.localID) + ",FFFF," + mid + "," +
-                         String(TTL_DEFAULT) + "," + String(mesh.localID) + "," + hex;
+        // v4.9 — pre-size the payload before the concat chain to
+        // eliminate the incremental realloc failure mode. Same class of
+        // bug as toHex's String pressure — under heap fragmentation the
+        // 7-way `+` chain could drop a byte silently, producing odd-
+        // length hex on the wire. Reserve(size) MUST be called on an
+        // empty String BEFORE the first append or Arduino's String
+        // still hits per-append reallocs.
+        String payload;
+        payload.reserve(hex.length() + 32);
+        payload  = String(mesh.localID); payload += ",FFFF,";
+        payload += mid;                  payload += ",";
+        payload += String(TTL_DEFAULT);  payload += ",";
+        payload += String(mesh.localID); payload += ",";
+        payload += hex;
+        // Belt-and-braces guard: after F1 fixed toHex, hex.length() is
+        // always even. The fixed 24-char prefix keeps payload's parity
+        // matched to hex's parity — a mismatch means a concat here
+        // silently truncated. Non-fatal warn to catch future regressions.
+        if ((payload.length() & 1) != (hex.length() & 1)) {
+            Serial.print("WARN: payload concat truncation, hex=");
+            Serial.print((int)hex.length());
+            Serial.print(" payload=");
+            Serial.println((int)payload.length());
+        }
         mesh.transmitPacket(0xFFFF, payload);
     }
 }
@@ -4517,19 +4628,32 @@ void handleSetpointCmd(const String& args, const String& from) {
         int count = 0;
         for (int i = 0; i < MAX_SETPOINTS; i++) if (setpoints[i].active) count++;
         if (count == 0) {
-            bleSend("SETPOINTS,NONE");
-            if (from != "LOCAL") notifyBeaconEvent("SETPOINTS,NONE", true);
+            // v4.9 — same dedupe as the countMsg/rule/END branches below.
+            // notifyBeaconEvent handles both local echo AND mesh broadcast.
+            if (from == "LOCAL") {
+                bleSend("SETPOINTS,NONE");
+            } else {
+                notifyBeaconEvent("SETPOINTS,NONE", true);
+            }
             return;
         }
         String countMsg = "SETPOINTS," + String(count);
-        bleSend(countMsg);
-        if (from != "LOCAL") {
-            notifyBeaconEvent(countMsg, true);
+        // v4.9 — dedupe emission. notifyBeaconEvent(evt, true) already
+        // calls bleSend(evt) internally at repeater.cpp:notifyBeaconEvent;
+        // the extra bleSend below produced two identical local console
+        // entries per line for every mesh-originated LIST. Symptom on
+        // Mike's rig: every SETPOINTS,2 / SETPOINT,RULE,N / SETPOINTS,END
+        // appeared twice at the same timestamp. LOCAL-origin queries
+        // still bleSend once and skip the mesh broadcast.
+        if (from == "LOCAL") {
+            bleSend(countMsg);
+        } else {
+            notifyBeaconEvent(countMsg, true);   // local echo + mesh
             // Broadcast inter-packet delay — must exceed peer smartForward
             // jitter + forward-airtime tail, else rule 0 body gets dropped
-            // by TX-during-RX collision at any listener. Old delay(50) was
-            // way too short. delayFeedWdt pets the swWdt so a long list
-            // burst can't trip the 30 s hardware watchdog.
+            // by TX-during-RX collision at any listener. delayFeedWdt pets
+            // the swWdt so a long list burst can't trip the 30 s hardware
+            // watchdog.
             delayFeedWdt(broadcastInterPacketDelayMs());
         }
         const char* ops[] = {"GT", "LT", "EQ", "GE", "LE", "NE"};
@@ -4554,16 +4678,23 @@ void handleSetpointCmd(const String& args, const String& from) {
                         String(setpoints[i].relayPin) + ":" +
                         String(setpoints[i].action);
             }
-            bleSend(line);
-            if (from != "LOCAL") {
+            // v4.9 — same dedupe as the countMsg branch above. Skip the
+            // standalone bleSend when going out over mesh — notifyBeaconEvent
+            // handles the local echo internally.
+            if (from == "LOCAL") {
+                bleSend(line);
+            } else {
                 notifyBeaconEvent(line, true);
                 // Same SF-derived broadcast spacing as after the header
                 // above — see comment there and the helper definition.
                 delayFeedWdt(broadcastInterPacketDelayMs());
             }
         }
-        bleSend("SETPOINTS,END");
-        if (from != "LOCAL") notifyBeaconEvent("SETPOINTS,END", true);
+        if (from == "LOCAL") {
+            bleSend("SETPOINTS,END");
+        } else {
+            notifyBeaconEvent("SETPOINTS,END", true);
+        }
         return;
     }
     // All other SETPOINT commands (ADD, CLEAR, DELETE, …) produce short
@@ -7771,6 +7902,70 @@ void handleCmd(const String& from, const String& cmdBody) {
             sendMeshReply(from, rsp);
         } else {
             sendMeshReply(from, "CMD,RSP,ROLE,ERR,format");
+        }
+    }
+    else if (action == "GIA") {
+        // v4.9 — self-serve Sensirion Gas Index Algorithm control.
+        //   CMD,GIA,RESET[,<inst>]  → wipe algorithm state + persisted
+        //                              EEPROM blob + re-init with event-
+        //                              detector tuning. Fresh learn kicks
+        //                              off. Recovery path for stuck-
+        //                              baseline situations that auto-heal
+        //                              didn't catch.
+        //   CMD,GIA,STATUS[,<inst>] → dump raw sVoc/sNox + computed
+        //                              indexes + internal Mean/Std +
+        //                              blackout progress + restored-boot
+        //                              flag. Diagnostic surface for
+        //                              future "is the algorithm stuck"
+        //                              investigations without another
+        //                              deep-dive.
+        // Format mirrors ROLE/BATT_HIBERNATE: empty inst = all instances.
+        int c2 = rest.indexOf(',');
+        String sub   = (c2 > 0) ? rest.substring(0, c2) : rest;
+        String rest2 = (c2 > 0) ? rest.substring(c2 + 1) : "";
+        int inst = rest2.length() ? rest2.toInt() : -1;   // -1 = all
+        // v4.9 — validate the instance index up-front. Bogus values used
+        // to slip through (RESET would wipe EEPROM anyway and report OK;
+        // STATUS would silently no-op → GUI hangs on the pending reply).
+        // Reject anything outside [-1, MAX_SGP41_INSTANCES-1].
+        if (inst < -1 || inst >= MAX_SGP41_INSTANCES) {
+            sendMeshReply(from, "CMD,RSP,GIA,ERR,inst");
+        } else if (sub == "RESET") {
+            for (int i = 0; i < MAX_SGP41_INSTANCES; i++) {
+                if (inst >= 0 && i != inst) continue;
+                GasIndexAlgorithm_reset(&sgp41VocState[i]);
+                GasIndexAlgorithm_reset(&sgp41NoxState[i]);
+                // Re-apply event-detector tuning (matches F4 at lazy-init).
+                GasIndexAlgorithm_set_tuning_parameters(
+                    &sgp41VocState[i], 100, 2, 2, 0, 50, 230);
+                GasIndexAlgorithm_set_tuning_parameters(
+                    &sgp41NoxState[i],   1, 2, 2, 0, 50, 230);
+                sgp41SamplesReady[i]   = 0;
+                giaRestoredThisBoot[i] = false;
+                giaLastHealMs[i]       = 0;
+                bleSend("GIA_RESET," + String(i));
+            }
+            // Wipe EEPROM blob too so next boot doesn't restore anything.
+            resetGiaState();
+            sendMeshReply(from, "CMD,RSP,GIA,RESET,OK");
+        } else if (sub == "STATUS") {
+            for (int i = 0; i < MAX_SGP41_INSTANCES; i++) {
+                if (inst >= 0 && i != inst) continue;
+                float s0 = 0, s1 = 0;
+                GasIndexAlgorithm_get_states(&sgp41VocState[i], &s0, &s1);
+                String rsp = "CMD,RSP,GIA,STATUS," + String(i) +
+                             ",sVoc="     + String(sgp41LastSVoc[i]) +
+                             ",vocIdx="   + String(sgp41LastVocIdx[i]) +
+                             ",sNox="     + String(sgp41LastSNox[i]) +
+                             ",noxIdx="   + String(sgp41LastNoxIdx[i]) +
+                             ",st0="      + String(s0, 1) +
+                             ",st1="      + String(s1, 1) +
+                             ",ready="    + String(sgp41SamplesReady[i]) +
+                             ",restored=" + String(giaRestoredThisBoot[i] ? 1 : 0);
+                sendMeshReply(from, rsp);
+            }
+        } else {
+            sendMeshReply(from, "CMD,RSP,GIA,ERR,format");
         }
     }
     else if (action == "BATT_HIBERNATE") {
