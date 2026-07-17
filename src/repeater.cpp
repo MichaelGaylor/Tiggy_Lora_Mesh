@@ -1112,6 +1112,13 @@ struct BmeCal {
     uint16_t P1; int16_t P2,P3,P4,P5,P6,P7,P8,P9;
     uint8_t  H1; int16_t H2; uint8_t H3; int16_t H4, H5; int8_t H6;
 };
+// v4.9 — forward decl so the BME280 read path at line ~1180 can call
+// bleSend on the pv1==0 degenerate-calibration path. Full definition
+// is at ~line 8735; the same style of early forward decl exists for
+// bleSend at lines 1364/2579/2648/2935 for other callers that appear
+// before the definition.
+void bleSend(const String& line);
+
 static bool bme280ReadCal(uint8_t addr, BmeCal& c) {
     uint8_t b[26];
     if (!i2cReadN(addr, 0x88, b, 26)) return false;
@@ -1168,7 +1175,23 @@ static bool bme280Read(uint8_t addr, int16_t* tempC10, uint16_t* hPa10,
     pv2 = pv2 + (((int64_t)cal.P4) << 35);
     pv1 = ((pv1 * pv1 * (int64_t)cal.P3) >> 8) + ((pv1 * (int64_t)cal.P2) << 12);
     pv1 = ((((int64_t)1) << 47) + pv1) * ((int64_t)cal.P1) >> 33;
-    if (pv1 == 0) { *hPa10 = 0; }
+    if (pv1 == 0) {
+        // v4.9 — degenerate calibration path. Bosch's own reference
+        // code guards this to avoid divide-by-zero on line 1174. In
+        // practice pv1==0 means the calibration blob is either
+        // corrupted (I2C glitch during bme280ReadCal) or the chip
+        // is a fake (some BMP280 clones return zeros for P1). Was
+        // silently publishing 0 hPa — reads like a valid vacuum
+        // reading to any threshold rule downstream, which is
+        // misleading for a shipping product. Publish 0 as before
+        // (well below any real atmospheric pressure so threshold
+        // rules like "pressure < 900 hPa storm alert" still won't
+        // false-fire) but bleSend a WARN so operators / automated
+        // health monitors can catch a bad sensor at commissioning.
+        *hPa10 = 0;
+        bleSend("WARN,BME280,BADCAL,addr=0x" + String(addr, HEX) +
+                ",P1=" + String((long)cal.P1));
+    }
     else {
         p = 1048576 - adc_P;
         p = (((p << 31) - pv2) * 3125) / pv1;
@@ -1413,6 +1436,21 @@ static int8_t sgp41SlotToInst[MAX_DEVICES] = {
 static uint8_t sgp41SamplesReady[MAX_SGP41_INSTANCES] = {0, 0};
 #define SGP41_ALGO_BLACKOUT_SAMPLES 50
 
+// v4.9 — BH1750 RAM-only init tracker. Old code used devices[i].outVpin
+// [3] as the "init done" flag which was clever (survives loadDevices
+// Table automatically) but subtly broken: the flag gets serialised to
+// EEPROM by every subsequent saveDevicesTable() call and restored on
+// the next cold boot. After a power cycle the sensor is in Power-Down
+// mode (chip default) but the persisted outVpin[3]=1 tells the tick
+// handler "init already done" so bh1750Init() is skipped and the lux
+// vpin never publishes. RAM-only flag means every fresh boot re-runs
+// the init transaction (~2ms per slot, one-shot per sensor at boot).
+// Declared here (not next to the BH1750 driver at ~line 1583) so the
+// applyDeviceDriverReset() helper below can reference it — driver
+// implementation is far enough down the file that the forward
+// declaration is easier than an extern.
+static bool bh1750_initDone[MAX_DEVICES] = { false };
+
 // v4.9 — reset all SGP41 driver state so a subsequent DEVICE,ADD
 // re-runs the lazy-init path in the DEV_SGP41 service tick. Called
 // from clearAllDevices() so an operator issuing DEVICE,CLEAR followed
@@ -1463,6 +1501,14 @@ static void applyDeviceDriverReset(uint8_t type, int slot) {
         case DEV_SGP41:
             if (slot >= 0 && slot < MAX_DEVICES) {
                 sgp41SlotToInst[slot] = -1;
+            }
+            break;
+        case DEV_BH1750:
+            // v4.9 — hot-swap support. Force bh1750Init() to re-run
+            // on next service tick so a replaced chip (or a fresh
+            // power cycle) doesn't stay in Power-Down mode.
+            if (slot >= 0 && slot < MAX_DEVICES) {
+                bh1750_initDone[slot] = false;
             }
             break;
         default:
@@ -2130,15 +2176,17 @@ void serviceDevices() {
                 break;
             }
             case DEV_BH1750: {
-                // Non-blocking init: try once, gate subsequent reads
-                // on success. Per-slot state is keyed off outVpin[3]
-                // as a "have I sent the mode command" flag (unused
-                // field on BH1750 so we can borrow it safely). Better
-                // than a parallel bh1750_initTried[] table since it
-                // survives loadDevicesTable() automatically.
-                if (d.outVpin[3] == 0) {
+                // v4.9 — RAM-only init tracker (bh1750_initDone[]).
+                // Was piggy-backed on outVpin[3] which serialised to
+                // EEPROM and skipped re-init after cold power cycle,
+                // leaving the sensor stuck in Power-Down mode. See
+                // static declaration comment above ~line 1583 for full
+                // context. Also reset in applyDeviceDriverReset() and
+                // clearAllDevices()'s companion sgp41ResetStateAll()
+                // sibling logic so DEVICE,CLEAR + re-ADD retries init.
+                if (!bh1750_initDone[i]) {
                     if (bh1750Init(d.i2cAddr)) {
-                        d.outVpin[3] = 1;  // "init done" marker
+                        bh1750_initDone[i] = true;
                     } else {
                         break;  // sensor absent; retry on next tick
                     }
