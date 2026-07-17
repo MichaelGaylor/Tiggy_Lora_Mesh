@@ -750,6 +750,16 @@ static VL53L1X vl53l1x_drv;
 static bool    vl53l1x_initOK  = false;
 static bool    vl53l1x_initTried = false;
 
+// v4.9 — forward decls. Bodies defined near SGP41 state (~line 1400)
+// where the static variables they reset are declared. Called from
+// clearAllDevices() below and processDeviceCommand()'s slot-write
+// footer at ~line 7429 so an operator re-issuing DEVICE,ADD for a
+// sensor that failed init previously (e.g. bad wiring first attempt,
+// good wiring second) gets a fresh driver-side init attempt instead
+// of being silently stuck on the latched failure flag.
+static void sgp41ResetStateAll();
+static void applyDeviceDriverReset(uint8_t type, int slot);
+
 static void vl53ResetState() {
     vl53l0x_initOK = vl53l0x_initTried = false;
     vl53l1x_initOK = vl53l1x_initTried = false;
@@ -784,6 +794,10 @@ void clearAllDevices() {
     // VL53L0X/L1X will re-init from scratch (necessary because the
     // user may have re-wired or power-cycled the sensor).
     vl53ResetState();
+    // v4.9 — same for SGP41. Without this, DEVICE,CLEAR then re-ADD
+    // (possibly of a physically swapped chip) inherits the prior
+    // chip's learned baseline via residual sgp41SlotToInst[] mapping.
+    sgp41ResetStateAll();
     // Persist the wipe so a reboot before the next DEVICE,ADD doesn't
     // restore stale device configs from a prior session.
     saveDevicesTable();
@@ -1398,6 +1412,63 @@ static int8_t sgp41SlotToInst[MAX_DEVICES] = {
 // rather than a misleading 0.
 static uint8_t sgp41SamplesReady[MAX_SGP41_INSTANCES] = {0, 0};
 #define SGP41_ALGO_BLACKOUT_SAMPLES 50
+
+// v4.9 — reset all SGP41 driver state so a subsequent DEVICE,ADD
+// re-runs the lazy-init path in the DEV_SGP41 service tick. Called
+// from clearAllDevices() so an operator issuing DEVICE,CLEAR followed
+// by a re-ADD (possibly of a PHYSICALLY-SWAPPED chip) doesn't
+// silently inherit the prior chip's learned baseline via the residual
+// sgp41SlotToInst[]/sgp41SamplesReady[] mapping. Bug reported by the
+// yesterday sensor-audit workflow — the residual mapping meant the
+// service tick's `if (inst < 0)` init block was bypassed and the new
+// sensor's raw counts were fed into the OLD algorithm's Mean/gating
+// state. Reset here is atomic to prevent the same class of stale-
+// baseline hang that Fix F5 addressed for the heal path.
+static void sgp41ResetStateAll() {
+    for (int i = 0; i < MAX_DEVICES; i++) sgp41SlotToInst[i] = -1;
+    for (int i = 0; i < MAX_SGP41_INSTANCES; i++) {
+        sgp41SamplesReady[i]   = 0;
+        sgp41LastSVoc[i]       = 0;
+        sgp41LastSNox[i]       = 0;
+        sgp41LastVocIdx[i]     = 0;
+        sgp41LastNoxIdx[i]     = 0;
+        giaRestoredThisBoot[i] = false;
+        giaLastHealMs[i]       = 0;
+        // GasIndexAlgorithm_reset zeroes Mean/Std/UptimeGamma — the
+        // per-instance init routine will run again on next service
+        // tick to re-apply set_tuning_parameters and the persist-blob
+        // restore branch, exactly like a fresh boot.
+        GasIndexAlgorithm_reset(&sgp41VocState[i]);
+        GasIndexAlgorithm_reset(&sgp41NoxState[i]);
+    }
+    sgp41BootMs = 0;   // re-arms the 10 s heater-warming gate
+}
+
+// v4.9 — per-slot driver-state reset called from
+// processDeviceCommand()'s slot-write footer at ~line 7429. This
+// mirrors the vl53ResetState() call that USED to happen for every
+// device via clearAllDevices() before the Fix #1 removal from PLC,
+// DEPLOY,R. Without it, an operator who fixes bad wiring on a VL53*
+// sensor and re-issues DEVICE,ADD is stuck with the previous init-
+// failure latch until the node reboots. For SGP41, forcing the
+// slot→instance mapping back to -1 makes the next service tick re-
+// run the lazy-init block for that slot only (targeted, doesn't
+// disturb any other SGP41 instance).
+static void applyDeviceDriverReset(uint8_t type, int slot) {
+    switch (type) {
+        case DEV_VL53L0X:
+        case DEV_VL53L1X:
+            vl53ResetState();
+            break;
+        case DEV_SGP41:
+            if (slot >= 0 && slot < MAX_DEVICES) {
+                sgp41SlotToInst[slot] = -1;
+            }
+            break;
+        default:
+            break;
+    }
+}
 static uint8_t sgp41Crc8(const uint8_t* d, size_t n) {
     // Sensirion CRC-8: poly 0x31, init 0xFF, no reflection
     uint8_t crc = 0xFF;
@@ -6117,7 +6188,26 @@ String processPlcCommand(const String& args) {
         processDeltaCommand("CLEAR");
         clearAllStorageVpins();
         clearAllScratchVpins();
-        clearAllDevices();
+        // v4.9 — clearAllDevices() REMOVED from PLC,DEPLOY REPLACE path.
+        // Peripheral hardware bindings (SGP41, BME280, SHT31, DHT, VL53L*,
+        // INA226, ADS1115, ...) are HARDWARE configuration, not "PLC
+        // state" that gets replaced when a rule changes. Every REPLACE
+        // deploy used to wipe them and rely on DEVICE,ADD entries in
+        // the payload arriving intact to re-register them. If ANY packet
+        // in the incoming stream was lost, dropped, or misparsed, the
+        // sensor stayed unregistered permanently until the NEXT
+        // successful deploy — matches Mike's bench "SGP41 randomly
+        // stops working" over the last 48 h.
+        //
+        // Now: peripheral table persists across redeploys. DEVICE,ADD
+        // in the payload updates the existing slot in place (idempotent
+        // — the parser at ~line 7089 already matches on type+pin and
+        // reuses the slot). Old peripherals that aren't in the new
+        // payload linger until an explicit DEVICE,CLEAR verb is sent
+        // — customers who move hardware around can issue that
+        // themselves. Standard PLC,CLEAR (~line 6086) still wipes
+        // devices; only the automatic wipe-then-re-add-per-deploy
+        // race is what we're closing.
         plcResetStats();
     }
 
@@ -7408,6 +7498,14 @@ String processDeviceCommand(const String& args) {
     int slot = allocDeviceSlot(type, tmp.pin1, tmp.i2cAddr);
     if (slot < 0) return "ERR,DEVICE,FULL";
     devices[slot] = tmp;
+    // v4.9 — reset driver-side init latches / instance mappings that
+    // used to be cleared by clearAllDevices() when PLC,DEPLOY,R still
+    // called it (removed in Fix #1 to stop peripherals being wiped
+    // mid-deploy). Without this, an operator who fixes bad wiring on
+    // a VL53L*/SGP41 and re-emits DEVICE,ADD is silently stuck with
+    // the previous init-failure state until the node reboots. See
+    // applyDeviceDriverReset() at ~line 1445 for the per-type detail.
+    applyDeviceDriverReset(type, slot);
     // Persist after every successful install so a reboot doesn't lose
     // the peripheral config. Without this, the gateway had to re-emit
     // every DEVICE,ADD after each node reboot even though the
@@ -8203,17 +8301,64 @@ void handleCmd(const String& from, const String& cmdBody) {
         cfgType.toUpperCase();
 
         if (cfgType == "SENSOR") {
-            sensorCount = 0;
+            // v4.9 — validate EVERY token as a pin number BEFORE
+            // touching sensorPins[] / sensorCount. Old code would wipe
+            // the config to zero pins on any typo — including the
+            // seemingly-innocent CONFIG,SENSOR,LIST which parsed
+            // "LIST".toInt() → 0 → isPinConfigurable(0) → false →
+            // silently reset sensorCount to 0 → reply looked like a
+            // success ("OK,CONFIG,SENSOR,0"). That's a hazard for any
+            // customer or operator who types the wrong verb — a typo
+            // in a diagnostic command should never destroy production
+            // config. Reject the whole command atomically now.
+            int tmpPins[MAX_SENSOR_PINS_CFG];
+            int tmpCount = 0;
             int start = 0, end;
-            while ((end = cfgArgs.indexOf(',', start)) != -1 && sensorCount < MAX_SENSOR_PINS_CFG) {
-                int p = cfgArgs.substring(start, end).toInt();
-                if (isPinConfigurable(p)) sensorPins[sensorCount++] = p;
+            while ((end = cfgArgs.indexOf(',', start)) != -1) {
+                if (tmpCount >= MAX_SENSOR_PINS_CFG) {
+                    bleSend("ERR,CONFIG,SENSOR,TOO_MANY");
+                    return;
+                }
+                String tok = cfgArgs.substring(start, end);
+                tok.trim();
+                // Guard against non-numeric tokens ("LIST", "ALL",
+                // etc.). String::toInt() returns 0 for both a real "0"
+                // and any unparseable string — so we sanity-check the
+                // first char + only-digits before accepting.
+                if (tok.length() == 0 || (tok[0] != '-' && !isDigit(tok[0]))) {
+                    bleSend("ERR,CONFIG,SENSOR,BADPIN," + tok);
+                    return;
+                }
+                int p = tok.toInt();
+                if (!isPinConfigurable(p)) {
+                    bleSend("ERR,CONFIG,SENSOR,BADPIN," + String(p));
+                    return;
+                }
+                tmpPins[tmpCount++] = p;
                 start = end + 1;
             }
-            if (sensorCount < MAX_SENSOR_PINS_CFG) {
-                int p = cfgArgs.substring(start).toInt();
-                if (isPinConfigurable(p)) sensorPins[sensorCount++] = p;
+            // Trailing token (after the last comma).
+            String lastTok = cfgArgs.substring(start);
+            lastTok.trim();
+            if (lastTok.length() > 0) {
+                if (tmpCount >= MAX_SENSOR_PINS_CFG) {
+                    bleSend("ERR,CONFIG,SENSOR,TOO_MANY");
+                    return;
+                }
+                if (lastTok[0] != '-' && !isDigit(lastTok[0])) {
+                    bleSend("ERR,CONFIG,SENSOR,BADPIN," + lastTok);
+                    return;
+                }
+                int p = lastTok.toInt();
+                if (!isPinConfigurable(p)) {
+                    bleSend("ERR,CONFIG,SENSOR,BADPIN," + String(p));
+                    return;
+                }
+                tmpPins[tmpCount++] = p;
             }
+            // All tokens validated — commit atomically.
+            sensorCount = tmpCount;
+            for (int i = 0; i < tmpCount; i++) sensorPins[i] = tmpPins[i];
             setupGPIO(); saveConfig();
             bleSend("OK,CONFIG,SENSOR," + String(sensorCount));
         }
